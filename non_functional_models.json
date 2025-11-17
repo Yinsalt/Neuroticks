@@ -1,0 +1,517 @@
+{
+    "gauss_rate": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "mu": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Mean of the Gaussian gain function"
+        },
+        "sigma": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.1,
+            "max": 10.0,
+            "constraint": "positive",
+            "description": "Standard deviation of Gaussian gain function"
+        },
+        "g": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.0,
+            "max": 100.0,
+            "constraint": "non-negative",
+            "description": "Gain parameter"
+        },
+        "rectify_rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Rectifying rate threshold"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs before nonlinearity"
+        },
+        "rectify_output": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Restrict rate to values >= rectify_rate"
+        }
+    },
+    "lin_rate": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "rectify_rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Rectifying rate threshold"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs"
+        },
+        "rectify_output": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Restrict output to >= rectify_rate"
+        }
+    },
+    "sigmoid_rate": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "mu": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Inflection point of sigmoid"
+        },
+        "sigma": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.1,
+            "max": 10.0,
+            "constraint": "positive",
+            "description": "Steepness of sigmoid"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs"
+        },
+        "rectify_output": {
+            "default": false,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Restrict output to non-negative values"
+        }
+    },
+    "sigmoid_rate_gg_1998": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "mu": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Inflection point"
+        },
+        "sigma": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.1,
+            "max": 10.0,
+            "constraint": "positive",
+            "description": "Steepness parameter"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs"
+        }
+    },
+    "tanh_rate": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "mu": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Center of hyperbolic tangent"
+        },
+        "sigma": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.1,
+            "max": 10.0,
+            "constraint": "positive",
+            "description": "Steepness of hyperbolic tangent"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs"
+        }
+    },
+    "threshold_lin_rate": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "theta": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Threshold for activation"
+        },
+        "alpha": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Gain/slope above threshold"
+        },
+        "linear_summation": {
+            "default": true,
+            "type": "boolean",
+            "unit": "dimensionless",
+            "min": null,
+            "max": null,
+            "constraint": "none",
+            "description": "Linear summation of inputs"
+        }
+    },
+    "rate_neuron_ipn": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "std": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Standard deviation of white noise"
+        },
+        "mean": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Mean of white noise input"
+        }
+    },
+    "rate_neuron_opn": {
+        "rate": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "Hz",
+            "min": 0.0,
+            "max": 1000.0,
+            "constraint": "non-negative",
+            "description": "Firing rate"
+        },
+        "tau": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Time constant of rate dynamics"
+        },
+        "std": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Standard deviation of noise on output"
+        },
+        "mean": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "dimensionless",
+            "min": -10.0,
+            "max": 10.0,
+            "constraint": "none",
+            "description": "Mean of output noise"
+        }
+    },
+    "iaf_psc_alpha_canon": {
+        "V_m": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "mV",
+            "min": -100.0,
+            "max": 50.0,
+            "constraint": "none",
+            "description": "Membrane potential"
+        },
+        "C_m": {
+            "default": 250.0,
+            "type": "float",
+            "unit": "pF",
+            "min": 10.0,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Membrane capacitance"
+        },
+        "tau_m": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Membrane time constant"
+        },
+        "V_th": {
+            "default": 15.0,
+            "type": "float",
+            "unit": "mV",
+            "min": -20.0,
+            "max": 50.0,
+            "constraint": "none",
+            "description": "Spike threshold (relative to resting potential)"
+        },
+        "t_ref": {
+            "default": 2.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Refractory period"
+        },
+        "tau_syn_ex": {
+            "default": 2.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 20.0,
+            "constraint": "positive",
+            "description": "Excitatory synaptic time constant"
+        },
+        "tau_syn_in": {
+            "default": 2.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 20.0,
+            "constraint": "positive",
+            "description": "Inhibitory synaptic time constant"
+        },
+        "I_e": {
+            "default": 0.0,
+            "type": "float",
+            "unit": "pA",
+            "min": -1000.0,
+            "max": 1000.0,
+            "constraint": "none",
+            "description": "External input current"
+        }
+    },
+    "pp_pop_psc_delta": {
+        "N": {
+            "default": 1,
+            "type": "integer",
+            "unit": "dimensionless",
+            "min": 1,
+            "max": 10000,
+            "constraint": "positive",
+            "description": "Population size"
+        },
+        "tau_m": {
+            "default": 10.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Membrane time constant"
+        },
+        "C_m": {
+            "default": 250.0,
+            "type": "float",
+            "unit": "pF",
+            "min": 10.0,
+            "max": 1000.0,
+            "constraint": "positive",
+            "description": "Membrane capacitance"
+        },
+        "V_th": {
+            "default": 15.0,
+            "type": "float",
+            "unit": "mV",
+            "min": 0.0,
+            "max": 50.0,
+            "constraint": "positive",
+            "description": "Threshold (relative to resting potential)"
+        },
+        "t_ref": {
+            "default": 2.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Refractory period"
+        }
+    }
+}
