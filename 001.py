@@ -159,6 +159,352 @@ class PercentageInputField(QWidget):
         return self.spinbox.value()
 
 
+
+class connectionTool(QWidget):
+    def __init__(self, graph_list=None):
+        super().__init__()
+        
+        # Graph-Liste vom MainWindow
+        self.graph_list = graph_list if graph_list else []
+        self.connection_list = []
+        self.current_connection_id = None
+        self.current_parameter_widgets = {}
+        
+        # Connection Rules und Synapse Models definieren
+        self.connection_rules = {
+            'all_to_all': {},
+            'one_to_one': {},
+            'fixed_indegree': {'indegree': {'type': 'integer', 'default': 100, 'min': 1, 'max': 10000}},
+            'fixed_outdegree': {'outdegree': {'type': 'integer', 'default': 100, 'min': 1, 'max': 10000}},
+            'fixed_total_number': {'N': {'type': 'integer', 'default': 1000, 'min': 1, 'max': 100000}},
+            'pairwise_bernoulli': {'p': {'type': 'float', 'default': 0.1, 'min': 0.0, 'max': 1.0}}
+        }
+        
+        self.synapse_models = {
+            'static_synapse': {
+                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
+                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0}
+            },
+            'stdp_synapse': {
+                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
+                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0},
+                'alpha': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
+                'lambda': {'type': 'float', 'default': 0.01, 'min': 0.0, 'max': 1.0},
+                'mu_plus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
+                'mu_minus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
+                'tau_plus': {'type': 'float', 'default': 20.0, 'min': 0.1, 'max': 100.0}
+            },
+            'tsodyks_synapse': {
+                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
+                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0},
+                'U': {'type': 'float', 'default': 0.5, 'min': 0.0, 'max': 1.0},
+                'tau_rec': {'type': 'float', 'default': 800.0, 'min': 0.0, 'max': 10000.0},
+                'tau_fac': {'type': 'float', 'default': 0.0, 'min': 0.0, 'max': 10000.0}
+            }
+        }
+        
+        # Main Layout 50:50
+        self.main_layout = QHBoxLayout()
+        
+        # Linke Seite - Connection Liste (50%)
+        self.connection_list_widget = QWidget()
+        self.connection_list_layout = QVBoxLayout()
+        self.connection_list_widget.setLayout(self.connection_list_layout)
+        
+        self.connection_scroll = QScrollArea()
+        self.connection_scroll.setWidgetResizable(True)
+        self.connection_scroll.setWidget(self.connection_list_widget)
+        
+        self.add_connection_btn = QPushButton("Add Connection")
+        self.add_connection_btn.clicked.connect(self.add_connection)
+        self.connection_list_layout.addWidget(self.add_connection_btn)
+        self.connection_list_layout.addStretch()
+        
+        # Create Connections Button - fixiert unten
+        self.create_connections_btn = QPushButton("Create All Connections")
+        self.create_connections_btn.clicked.connect(self.create_all_connections)
+        self.create_connections_btn.setMinimumHeight(80)
+        self.create_connections_btn.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.connection_list_layout.addWidget(self.create_connections_btn)
+        
+        # Rechte Seite - Parameter Editor (50%)
+        self.param_edit_widget = QWidget()
+        self.param_edit_scroll = QScrollArea()
+        self.param_edit_scroll.setWidgetResizable(True)
+        self.param_edit_scroll.setWidget(self.param_edit_widget)
+        
+        self.param_edit_layout = QVBoxLayout()
+        
+        # SOURCE Section
+        source_label = QLabel("SOURCE")
+        source_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.param_edit_layout.addWidget(source_label)
+        
+        self.source_graph = DropdownField("Graph", self.get_graph_names(), default_index=0)
+        self.source_node = DropdownField("Node", ["Select Graph first"], default_index=0)
+        self.source_population = DropdownField("Population", ["Select Node first"], default_index=0)
+        
+        self.source_graph.combobox.currentTextChanged.connect(self.on_source_graph_changed)
+        self.source_node.combobox.currentTextChanged.connect(self.on_source_node_changed)
+        
+        self.param_edit_layout.addWidget(self.source_graph)
+        self.param_edit_layout.addWidget(self.source_node)
+        self.param_edit_layout.addWidget(self.source_population)
+        
+        # TARGET Section
+        target_label = QLabel("TARGET")
+        target_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.param_edit_layout.addWidget(target_label)
+        
+        self.target_graph = DropdownField("Graph", self.get_graph_names(), default_index=0)
+        self.target_node = DropdownField("Node", ["Select Graph first"], default_index=0)
+        self.target_population = DropdownField("Population", ["Select Node first"], default_index=0)
+        
+        self.target_graph.combobox.currentTextChanged.connect(self.on_target_graph_changed)
+        self.target_node.combobox.currentTextChanged.connect(self.on_target_node_changed)
+        
+        self.param_edit_layout.addWidget(self.target_graph)
+        self.param_edit_layout.addWidget(self.target_node)
+        self.param_edit_layout.addWidget(self.target_population)
+        
+        # Connection Rule
+        conn_rule_label = QLabel("CONNECTION PARAMETERS")
+        conn_rule_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.param_edit_layout.addWidget(conn_rule_label)
+        
+        self.conn_rule = DropdownField("Connection Rule", list(self.connection_rules.keys()), default_index=0)
+        self.conn_rule.combobox.currentTextChanged.connect(self.on_conn_rule_changed)
+        self.param_edit_layout.addWidget(self.conn_rule)
+        
+        # Container für Connection Rule Parameter
+        self.conn_params_widget = QWidget()
+        self.conn_params_layout = QVBoxLayout()
+        self.conn_params_widget.setLayout(self.conn_params_layout)
+        self.param_edit_layout.addWidget(self.conn_params_widget)
+        
+        # Synapse Model
+        syn_model_label = QLabel("SYNAPSE PARAMETERS")
+        syn_model_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.param_edit_layout.addWidget(syn_model_label)
+        
+        self.syn_model = DropdownField("Synapse Model", list(self.synapse_models.keys()), default_index=0)
+        self.syn_model.combobox.currentTextChanged.connect(self.on_syn_model_changed)
+        self.param_edit_layout.addWidget(self.syn_model)
+        
+        # Container für Synapse Parameter
+        self.syn_params_widget = QWidget()
+        self.syn_params_layout = QVBoxLayout()
+        self.syn_params_widget.setLayout(self.syn_params_layout)
+        self.param_edit_layout.addWidget(self.syn_params_widget)
+        
+        self.param_edit_layout.addStretch()
+        self.param_edit_widget.setLayout(self.param_edit_layout)
+        
+        # Add to Main Layout
+        self.main_layout.addWidget(self.connection_scroll, 50)
+        self.main_layout.addWidget(self.param_edit_scroll, 50)
+        self.setLayout(self.main_layout)
+        
+        # Initial parameter widgets erstellen
+        self.on_conn_rule_changed(self.conn_rule.get_value())
+        self.on_syn_model_changed(self.syn_model.get_value())
+    
+    def get_graph_names(self):
+        """Erstellt Liste von Graph-Namen aus graph_list"""
+        if not self.graph_list:
+            return ["No graphs available"]
+        return [f"Graph {graph.graph_id}" for graph in self.graph_list]
+    
+    def get_graph_by_name(self, graph_name):
+        """Findet Graph-Objekt anhand des Namens"""
+        try:
+            graph_id = int(graph_name.split()[1])
+            for graph in self.graph_list:
+                if graph.graph_id == graph_id:
+                    return graph
+        except:
+            pass
+        return None
+    
+    def on_source_graph_changed(self, graph_name):
+        """Update Node-Liste wenn Graph gewählt wird"""
+        graph = self.get_graph_by_name(graph_name)
+        if graph:
+            node_names = [f"Node {i+1}" for i in range(len(graph.node_list))]
+            self.source_node.combobox.clear()
+            self.source_node.combobox.addItems(node_names if node_names else ["No nodes"])
+    
+    def on_source_node_changed(self, node_name):
+        """Update Population-Liste wenn Node gewählt wird"""
+        graph = self.get_graph_by_name(self.source_graph.get_value())
+        if graph:
+            try:
+                node_id = int(node_name.split()[1]) - 1
+                node = graph.node_list[node_id]
+                pop_names = [f"Pop {i+1}" for i in range(len(node.populations))]
+                self.source_population.combobox.clear()
+                self.source_population.combobox.addItems(pop_names if pop_names else ["No populations"])
+            except:
+                pass
+    
+    def on_target_graph_changed(self, graph_name):
+        """Update Node-Liste wenn Graph gewählt wird"""
+        graph = self.get_graph_by_name(graph_name)
+        if graph:
+            node_names = [f"Node {i+1}" for i in range(len(graph.node_list))]
+            self.target_node.combobox.clear()
+            self.target_node.combobox.addItems(node_names if node_names else ["No nodes"])
+    
+    def on_target_node_changed(self, node_name):
+        """Update Population-Liste wenn Node gewählt wird"""
+        graph = self.get_graph_by_name(self.target_graph.get_value())
+        if graph:
+            try:
+                node_id = int(node_name.split()[1]) - 1
+                node = graph.node_list[node_id]
+                pop_names = [f"Pop {i+1}" for i in range(len(node.populations))]
+                self.target_population.combobox.clear()
+                self.target_population.combobox.addItems(pop_names if pop_names else ["No populations"])
+            except:
+                pass
+    
+    def on_conn_rule_changed(self, rule_name):
+        """Erstellt Parameter-Widgets für Connection Rule"""
+        # Lösche alte Widgets
+        while self.conn_params_layout.count():
+            item = self.conn_params_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Erstelle neue Widgets
+        if rule_name in self.connection_rules:
+            rule_params = self.connection_rules[rule_name]
+            for param_name, param_info in rule_params.items():
+                widget = self.create_param_widget(param_name, param_info)
+                if widget:
+                    self.conn_params_layout.addWidget(widget)
+                    self.current_parameter_widgets[f"conn_{param_name}"] = widget
+    
+    def on_syn_model_changed(self, model_name):
+        """Erstellt Parameter-Widgets für Synapse Model"""
+        # Lösche alte Widgets
+        while self.syn_params_layout.count():
+            item = self.syn_params_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Erstelle neue Widgets
+        if model_name in self.synapse_models:
+            model_params = self.synapse_models[model_name]
+            for param_name, param_info in model_params.items():
+                widget = self.create_param_widget(param_name, param_info)
+                if widget:
+                    self.syn_params_layout.addWidget(widget)
+                    self.current_parameter_widgets[f"syn_{param_name}"] = widget
+    
+    def create_param_widget(self, param_name, param_info):
+        """Erstellt Widget basierend auf Parameter-Typ"""
+        param_type = param_info['type']
+        default = param_info['default']
+        min_val = param_info.get('min', 0.0)
+        max_val = param_info.get('max', 100.0)
+        
+        if param_type == 'float':
+            return DoubleInputField(
+                param_name,
+                default_value=default,
+                min_val=min_val,
+                max_val=max_val,
+                decimals=3
+            )
+        elif param_type == 'integer':
+            return IntegerInputField(
+                param_name,
+                default_value=default,
+                min_val=int(min_val),
+                max_val=int(max_val)
+            )
+        return None
+    
+    def add_connection(self):
+        """Erstellt neue Connection mit aktuellen Parametern"""
+        # Sammle alle Parameter
+        conn_data = {
+            "source": {
+                "graph": self.source_graph.get_value(),
+                "node": self.source_node.get_value(),
+                "population": self.source_population.get_value()
+            },
+            "target": {
+                "graph": self.target_graph.get_value(),
+                "node": self.target_node.get_value(),
+                "population": self.target_population.get_value()
+            },
+            "conn_rule": self.conn_rule.get_value(),
+            "conn_params": {},
+            "syn_model": self.syn_model.get_value(),
+            "syn_params": {}
+        }
+        
+        # Sammle Connection Parameter
+        for key, widget in self.current_parameter_widgets.items():
+            if key.startswith("conn_"):
+                param_name = key[5:]  # Remove "conn_" prefix
+                conn_data["conn_params"][param_name] = widget.get_value()
+            elif key.startswith("syn_"):
+                param_name = key[4:]  # Remove "syn_" prefix
+                conn_data["syn_params"][param_name] = widget.get_value()
+        
+        # Erstelle Button für Connection
+        conn_name = f"{conn_data['source']['graph']}:{conn_data['source']['node']}:{conn_data['source']['population']} → {conn_data['target']['graph']}:{conn_data['target']['node']}:{conn_data['target']['population']}"
+        
+        conn_btn = QPushButton(conn_name)
+        conn_btn.setMinimumHeight(50)
+        conn_id = len(self.connection_list)
+        conn_btn.clicked.connect(lambda checked, cid=conn_id: self.select_connection(cid))
+        
+        # Insert vor den Buttons
+        self.connection_list_layout.insertWidget(len(self.connection_list), conn_btn)
+        
+        conn_data["button"] = conn_btn
+        conn_data["name"] = conn_name
+        self.connection_list.append(conn_data)
+        
+        print(f"Connection added: {conn_name}")
+    
+    def select_connection(self, conn_id):
+        """Lädt Connection-Parameter in die Eingabefelder"""
+        self.current_connection_id = conn_id
+        conn_data = self.connection_list[conn_id]
+        
+        print(f"Connection selected: {conn_data['name']}")
+        # TODO: Lade Parameter in Widgets
+    
+    def create_all_connections(self):
+        """Gibt alle Connections als Liste zurück"""
+        connections_output = []
+        
+        for conn_data in self.connection_list:
+            conn_dict = {
+                "source": conn_data["source"],
+                "target": conn_data["target"],
+                "conn_rule": conn_data["conn_rule"],
+                "conn_params": conn_data["conn_params"].copy(),
+                "syn_model": conn_data["syn_model"],
+                "syn_params": conn_data["syn_params"].copy()
+            }
+            connections_output.append(conn_dict)
+        
+        print("\n=== ALL CONNECTIONS ===")
+        print(json.dumps(connections_output, indent=2))
+        print("========================\n")
+        
+        return connections_output
+
+
+    
+
+
 class graphCreationTool(QWidget):
     def __init__(self):
         super().__init__()
@@ -824,7 +1170,7 @@ class MainWindow(QMainWindow):
                                          Color("white"),
                                          Color("purple"),
                                          Color("blue"),
-                                         Color("green"),
+                                         connectionTool(),
                                          Color("yellow"),
                                          Color("orange"),
                                          Color("red"),
