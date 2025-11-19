@@ -2074,7 +2074,7 @@ class MainWindow(QMainWindow):
 
 
         self.btn = self.create_bottom_button_menu()
-        self.graph_list = [createGraph(max_nodes=2,graph_id=0)]# bestimme wie viele nodes initial erstellt werden
+        self.graph_list = []# bestimme wie viele nodes initial erstellt werden# example: createGraph(max_nodes=2,graph_id=0)
         self.graph_vis = self.create_graph_visualization()
         self.node_vis = self.create_neuron_visualization()
 
@@ -2100,8 +2100,7 @@ class MainWindow(QMainWindow):
 
 
         # aktive variablen, zb selection
-        self.selected_graph = self.graph_list[0]
-
+        self.selected_graph = None if not self.graph_list else self.graph_list[0]
         ####### POLYNOM EDITOR
         self.polynom_editor = polynomEditorTool(graph_list=self.graph_list)
         self.graph_creator = graphCreationTool()
@@ -2454,8 +2453,35 @@ class MainWindow(QMainWindow):
             print(f"Building Node with Grid {grid_size} for {target_count} neurons...")
             try:
                 new_node = new_graph.create_node(parameters=node_params, auto_build=True)
+                # Begrenze auf tatsächlich gewünschte Anzahl
+                if new_node.positions:
+                    total_neurons = sum(len(cluster) for cluster in new_node.positions if cluster is not None)
+                    
+                    if total_neurons > target_count:
+                        # Sammle alle Neuronen-Positionen
+                        all_positions = []
+                        for cluster_idx, cluster in enumerate(new_node.positions):
+                            if cluster is not None:
+                                for pos in cluster:
+                                    all_positions.append((pos, cluster_idx))
+                        
+                        # Nimm nur die ersten target_count Neuronen
+                        selected = all_positions[:target_count]
+                        
+                        # Reorganisiere in Cluster
+                        new_positions = [[] for _ in range(len(new_node.positions))]
+                        for pos, cluster_idx in selected:
+                            new_positions[cluster_idx].append(pos)
+                        
+                        # Entferne leere Cluster
+                        new_node.positions = [cluster for cluster in new_positions if len(cluster) > 0]
+                    
+                    actual_count = sum(len(cluster) for cluster in new_node.positions)
+                    print(f"Node {new_node.id} created: Target={target_count}, Actual={actual_count} neurons")
+                else:
+                    print(f"Node {new_node.id} created: No neurons placed")
+
                 created_nodes.append(new_node)
-                print(f"Node {new_node.id} created successfully with {len(new_node.population)} neurons.")
             except Exception as e:
                 print(f"CRITICAL ERROR building node: {e}")
         
