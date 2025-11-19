@@ -159,7 +159,6 @@ class PercentageInputField(QWidget):
         return self.spinbox.value()
 
 
-
 class connectionTool(QWidget):
     def __init__(self, graph_list=None):
         super().__init__()
@@ -170,24 +169,93 @@ class connectionTool(QWidget):
         self.current_connection_id = None
         self.current_parameter_widgets = {}
         
-        # Connection Rules und Synapse Models definieren
+        # Mask Types für Spatial Connections
+        self.mask_types = {
+            'none': {},
+            'circular': {
+                'radius': {'type': 'float', 'default': 5.0, 'min': 0.1, 'max': 100.0}
+            },
+            'box': {
+                'lower_left_x': {'type': 'float', 'default': -5.0, 'min': -100.0, 'max': 100.0},
+                'lower_left_y': {'type': 'float', 'default': -5.0, 'min': -100.0, 'max': 100.0},
+                'upper_right_x': {'type': 'float', 'default': 5.0, 'min': -100.0, 'max': 100.0},
+                'upper_right_y': {'type': 'float', 'default': 5.0, 'min': -100.0, 'max': 100.0}
+            },
+            'elliptical': {
+                'major_axis': {'type': 'float', 'default': 10.0, 'min': 0.1, 'max': 100.0},
+                'minor_axis': {'type': 'float', 'default': 5.0, 'min': 0.1, 'max': 100.0}
+            }
+        }
+        
+        # Kernel Types für Distance-dependent Probability
+        self.kernel_types = {
+            'constant': {
+                'p': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 1.0}
+            },
+            'gaussian': {
+                'p_center': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 1.0},
+                'sigma': {'type': 'float', 'default': 2.5, 'min': 0.1, 'max': 50.0}
+            },
+            'exponential': {
+                'a': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
+                'c': {'type': 'float', 'default': 0.0, 'min': 0.0, 'max': 10.0},
+                'tau': {'type': 'float', 'default': 2.5, 'min': 0.1, 'max': 50.0}
+            },
+            'linear': {
+                'a': {'type': 'float', 'default': -0.1, 'min': -10.0, 'max': 10.0},
+                'c': {'type': 'float', 'default': 1.0, 'min': -10.0, 'max': 10.0}
+            }
+        }
+        
+        # Weight Distribution Types
+        self.weight_types = {
+            'constant': {
+                'value': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0}
+            },
+            'gaussian': {
+                'mean': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
+                'sigma': {'type': 'float', 'default': 0.5, 'min': 0.0, 'max': 50.0}
+            },
+            'exponential_distance': {
+                'a': {'type': 'float', 'default': 1.0, 'min': -10.0, 'max': 10.0},
+                'c': {'type': 'float', 'default': 1.0, 'min': -10.0, 'max': 10.0},
+                'tau': {'type': 'float', 'default': 2.5, 'min': 0.1, 'max': 50.0}
+            },
+            'linear_distance': {
+                'a': {'type': 'float', 'default': -0.1, 'min': -10.0, 'max': 10.0},
+                'c': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0}
+            }
+        }
+        
+        # Delay Distribution Types
+        self.delay_types = {
+            'constant': {
+                'value': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0}
+            },
+            'gaussian': {
+                'mean': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0},
+                'sigma': {'type': 'float', 'default': 0.1, 'min': 0.0, 'max': 10.0}
+            },
+            'linear_distance': {
+                'a': {'type': 'float', 'default': 0.02, 'min': 0.0, 'max': 10.0},
+                'c': {'type': 'float', 'default': 0.1, 'min': 0.0, 'max': 100.0}
+            }
+        }
+        
+        # Connection Rules
         self.connection_rules = {
             'all_to_all': {},
             'one_to_one': {},
             'fixed_indegree': {'indegree': {'type': 'integer', 'default': 100, 'min': 1, 'max': 10000}},
             'fixed_outdegree': {'outdegree': {'type': 'integer', 'default': 100, 'min': 1, 'max': 10000}},
             'fixed_total_number': {'N': {'type': 'integer', 'default': 1000, 'min': 1, 'max': 100000}},
-            'pairwise_bernoulli': {'p': {'type': 'float', 'default': 0.1, 'min': 0.0, 'max': 1.0}}
+            'pairwise_bernoulli': {}  # Probability wird durch Kernel definiert
         }
         
+        # Synapse Models (ohne weight/delay - die kommen aus Distributionen)
         self.synapse_models = {
-            'static_synapse': {
-                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
-                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0}
-            },
+            'static_synapse': {},
             'stdp_synapse': {
-                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
-                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0},
                 'alpha': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
                 'lambda': {'type': 'float', 'default': 0.01, 'min': 0.0, 'max': 1.0},
                 'mu_plus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0},
@@ -195,8 +263,6 @@ class connectionTool(QWidget):
                 'tau_plus': {'type': 'float', 'default': 20.0, 'min': 0.1, 'max': 100.0}
             },
             'tsodyks_synapse': {
-                'weight': {'type': 'float', 'default': 1.0, 'min': -100.0, 'max': 100.0},
-                'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0},
                 'U': {'type': 'float', 'default': 0.5, 'min': 0.0, 'max': 1.0},
                 'tau_rec': {'type': 'float', 'default': 800.0, 'min': 0.0, 'max': 10000.0},
                 'tau_fac': {'type': 'float', 'default': 0.0, 'min': 0.0, 'max': 10000.0}
@@ -220,7 +286,7 @@ class connectionTool(QWidget):
         self.connection_list_layout.addWidget(self.add_connection_btn)
         self.connection_list_layout.addStretch()
         
-        # Create Connections Button - fixiert unten
+        # Create Connections Button
         self.create_connections_btn = QPushButton("Create All Connections")
         self.create_connections_btn.clicked.connect(self.create_all_connections)
         self.create_connections_btn.setMinimumHeight(80)
@@ -267,12 +333,39 @@ class connectionTool(QWidget):
         self.param_edit_layout.addWidget(self.target_node)
         self.param_edit_layout.addWidget(self.target_population)
         
+        # SPATIAL PARAMETERS
+        spatial_label = QLabel("SPATIAL PARAMETERS")
+        spatial_label.setStyleSheet("font-weight: bold; font-size: 14px; color: blue;")
+        self.param_edit_layout.addWidget(spatial_label)
+        
+        # Mask Type
+        self.mask_type = DropdownField("Mask Type", list(self.mask_types.keys()), default_index=0)
+        self.mask_type.combobox.currentTextChanged.connect(self.on_mask_type_changed)
+        self.param_edit_layout.addWidget(self.mask_type)
+        
+        # Container für Mask Parameter
+        self.mask_params_widget = QWidget()
+        self.mask_params_layout = QVBoxLayout()
+        self.mask_params_widget.setLayout(self.mask_params_layout)
+        self.param_edit_layout.addWidget(self.mask_params_widget)
+        
+        # Kernel Type (für Probability)
+        self.kernel_type = DropdownField("Probability Kernel", list(self.kernel_types.keys()), default_index=0)
+        self.kernel_type.combobox.currentTextChanged.connect(self.on_kernel_type_changed)
+        self.param_edit_layout.addWidget(self.kernel_type)
+        
+        # Container für Kernel Parameter
+        self.kernel_params_widget = QWidget()
+        self.kernel_params_layout = QVBoxLayout()
+        self.kernel_params_widget.setLayout(self.kernel_params_layout)
+        self.param_edit_layout.addWidget(self.kernel_params_widget)
+        
         # Connection Rule
-        conn_rule_label = QLabel("CONNECTION PARAMETERS")
+        conn_rule_label = QLabel("CONNECTION RULE")
         conn_rule_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.param_edit_layout.addWidget(conn_rule_label)
         
-        self.conn_rule = DropdownField("Connection Rule", list(self.connection_rules.keys()), default_index=0)
+        self.conn_rule = DropdownField("Rule", list(self.connection_rules.keys()), default_index=0)
         self.conn_rule.combobox.currentTextChanged.connect(self.on_conn_rule_changed)
         self.param_edit_layout.addWidget(self.conn_rule)
         
@@ -282,11 +375,12 @@ class connectionTool(QWidget):
         self.conn_params_widget.setLayout(self.conn_params_layout)
         self.param_edit_layout.addWidget(self.conn_params_widget)
         
-        # Synapse Model
-        syn_model_label = QLabel("SYNAPSE PARAMETERS")
-        syn_model_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.param_edit_layout.addWidget(syn_model_label)
+        # SYNAPSE PARAMETERS
+        syn_label = QLabel("SYNAPSE PARAMETERS")
+        syn_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.param_edit_layout.addWidget(syn_label)
         
+        # Synapse Model
         self.syn_model = DropdownField("Synapse Model", list(self.synapse_models.keys()), default_index=0)
         self.syn_model.combobox.currentTextChanged.connect(self.on_syn_model_changed)
         self.param_edit_layout.addWidget(self.syn_model)
@@ -297,6 +391,28 @@ class connectionTool(QWidget):
         self.syn_params_widget.setLayout(self.syn_params_layout)
         self.param_edit_layout.addWidget(self.syn_params_widget)
         
+        # Weight Distribution
+        self.weight_type = DropdownField("Weight Distribution", list(self.weight_types.keys()), default_index=0)
+        self.weight_type.combobox.currentTextChanged.connect(self.on_weight_type_changed)
+        self.param_edit_layout.addWidget(self.weight_type)
+        
+        # Container für Weight Parameter
+        self.weight_params_widget = QWidget()
+        self.weight_params_layout = QVBoxLayout()
+        self.weight_params_widget.setLayout(self.weight_params_layout)
+        self.param_edit_layout.addWidget(self.weight_params_widget)
+        
+        # Delay Distribution
+        self.delay_type = DropdownField("Delay Distribution", list(self.delay_types.keys()), default_index=0)
+        self.delay_type.combobox.currentTextChanged.connect(self.on_delay_type_changed)
+        self.param_edit_layout.addWidget(self.delay_type)
+        
+        # Container für Delay Parameter
+        self.delay_params_widget = QWidget()
+        self.delay_params_layout = QVBoxLayout()
+        self.delay_params_widget.setLayout(self.delay_params_layout)
+        self.param_edit_layout.addWidget(self.delay_params_widget)
+        
         self.param_edit_layout.addStretch()
         self.param_edit_widget.setLayout(self.param_edit_layout)
         
@@ -306,8 +422,12 @@ class connectionTool(QWidget):
         self.setLayout(self.main_layout)
         
         # Initial parameter widgets erstellen
+        self.on_mask_type_changed(self.mask_type.get_value())
+        self.on_kernel_type_changed(self.kernel_type.get_value())
         self.on_conn_rule_changed(self.conn_rule.get_value())
         self.on_syn_model_changed(self.syn_model.get_value())
+        self.on_weight_type_changed(self.weight_type.get_value())
+        self.on_delay_type_changed(self.delay_type.get_value())
     
     def get_graph_names(self):
         """Erstellt Liste von Graph-Namen aus graph_list"""
@@ -368,39 +488,51 @@ class connectionTool(QWidget):
             except:
                 pass
     
+    def on_mask_type_changed(self, mask_type):
+        """Erstellt Parameter-Widgets für Mask"""
+        self.create_dynamic_params(mask_type, self.mask_types, self.mask_params_layout, "mask_")
+    
+    def on_kernel_type_changed(self, kernel_type):
+        """Erstellt Parameter-Widgets für Kernel"""
+        self.create_dynamic_params(kernel_type, self.kernel_types, self.kernel_params_layout, "kernel_")
+    
     def on_conn_rule_changed(self, rule_name):
         """Erstellt Parameter-Widgets für Connection Rule"""
-        # Lösche alte Widgets
-        while self.conn_params_layout.count():
-            item = self.conn_params_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        # Erstelle neue Widgets
-        if rule_name in self.connection_rules:
-            rule_params = self.connection_rules[rule_name]
-            for param_name, param_info in rule_params.items():
-                widget = self.create_param_widget(param_name, param_info)
-                if widget:
-                    self.conn_params_layout.addWidget(widget)
-                    self.current_parameter_widgets[f"conn_{param_name}"] = widget
+        self.create_dynamic_params(rule_name, self.connection_rules, self.conn_params_layout, "conn_")
     
     def on_syn_model_changed(self, model_name):
         """Erstellt Parameter-Widgets für Synapse Model"""
+        self.create_dynamic_params(model_name, self.synapse_models, self.syn_params_layout, "syn_")
+    
+    def on_weight_type_changed(self, weight_type):
+        """Erstellt Parameter-Widgets für Weight Distribution"""
+        self.create_dynamic_params(weight_type, self.weight_types, self.weight_params_layout, "weight_")
+    
+    def on_delay_type_changed(self, delay_type):
+        """Erstellt Parameter-Widgets für Delay Distribution"""
+        self.create_dynamic_params(delay_type, self.delay_types, self.delay_params_layout, "delay_")
+    
+    def create_dynamic_params(self, selection, param_dict, layout, prefix):
+        """Generische Funktion zum Erstellen dynamischer Parameter-Widgets"""
         # Lösche alte Widgets
-        while self.syn_params_layout.count():
-            item = self.syn_params_layout.takeAt(0)
+        while layout.count():
+            item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         
+        # Entferne alte Einträge mit diesem Prefix
+        keys_to_remove = [k for k in self.current_parameter_widgets.keys() if k.startswith(prefix)]
+        for key in keys_to_remove:
+            del self.current_parameter_widgets[key]
+        
         # Erstelle neue Widgets
-        if model_name in self.synapse_models:
-            model_params = self.synapse_models[model_name]
-            for param_name, param_info in model_params.items():
+        if selection in param_dict:
+            params = param_dict[selection]
+            for param_name, param_info in params.items():
                 widget = self.create_param_widget(param_name, param_info)
                 if widget:
-                    self.syn_params_layout.addWidget(widget)
-                    self.current_parameter_widgets[f"syn_{param_name}"] = widget
+                    layout.addWidget(widget)
+                    self.current_parameter_widgets[f"{prefix}{param_name}"] = widget
     
     def create_param_widget(self, param_name, param_info):
         """Erstellt Widget basierend auf Parameter-Typ"""
@@ -428,7 +560,31 @@ class connectionTool(QWidget):
     
     def add_connection(self):
         """Erstellt neue Connection mit aktuellen Parametern"""
-        # Sammle alle Parameter
+        # WICHTIG: Parameter SOFORT sammeln
+        conn_params = {}
+        mask_params = {}
+        kernel_params = {}
+        syn_params = {}
+        weight_params = {}
+        delay_params = {}
+        
+        for key, widget in list(self.current_parameter_widgets.items()):
+            try:
+                if key.startswith("conn_"):
+                    conn_params[key[5:]] = widget.get_value()
+                elif key.startswith("mask_"):
+                    mask_params[key[5:]] = widget.get_value()
+                elif key.startswith("kernel_"):
+                    kernel_params[key[7:]] = widget.get_value()
+                elif key.startswith("syn_"):
+                    syn_params[key[4:]] = widget.get_value()
+                elif key.startswith("weight_"):
+                    weight_params[key[7:]] = widget.get_value()
+                elif key.startswith("delay_"):
+                    delay_params[key[6:]] = widget.get_value()
+            except RuntimeError:
+                pass
+        
         conn_data = {
             "source": {
                 "graph": self.source_graph.get_value(),
@@ -440,20 +596,19 @@ class connectionTool(QWidget):
                 "node": self.target_node.get_value(),
                 "population": self.target_population.get_value()
             },
+            "mask_type": self.mask_type.get_value(),
+            "mask_params": mask_params,
+            "kernel_type": self.kernel_type.get_value(),
+            "kernel_params": kernel_params,
             "conn_rule": self.conn_rule.get_value(),
-            "conn_params": {},
+            "conn_params": conn_params,
             "syn_model": self.syn_model.get_value(),
-            "syn_params": {}
+            "syn_params": syn_params,
+            "weight_type": self.weight_type.get_value(),
+            "weight_params": weight_params,
+            "delay_type": self.delay_type.get_value(),
+            "delay_params": delay_params
         }
-        
-        # Sammle Connection Parameter
-        for key, widget in self.current_parameter_widgets.items():
-            if key.startswith("conn_"):
-                param_name = key[5:]  # Remove "conn_" prefix
-                conn_data["conn_params"][param_name] = widget.get_value()
-            elif key.startswith("syn_"):
-                param_name = key[4:]  # Remove "syn_" prefix
-                conn_data["syn_params"][param_name] = widget.get_value()
         
         # Erstelle Button für Connection
         conn_name = f"{conn_data['source']['graph']}:{conn_data['source']['node']}:{conn_data['source']['population']} → {conn_data['target']['graph']}:{conn_data['target']['node']}:{conn_data['target']['population']}"
@@ -471,14 +626,14 @@ class connectionTool(QWidget):
         self.connection_list.append(conn_data)
         
         print(f"Connection added: {conn_name}")
+        print(f"  Mask: {conn_data['mask_type']}, Kernel: {conn_data['kernel_type']}")
+        print(f"  Weight: {conn_data['weight_type']}, Delay: {conn_data['delay_type']}")
     
     def select_connection(self, conn_id):
         """Lädt Connection-Parameter in die Eingabefelder"""
         self.current_connection_id = conn_id
         conn_data = self.connection_list[conn_id]
-        
         print(f"Connection selected: {conn_data['name']}")
-        # TODO: Lade Parameter in Widgets
     
     def create_all_connections(self):
         """Gibt alle Connections als Liste zurück"""
@@ -486,21 +641,28 @@ class connectionTool(QWidget):
         
         for conn_data in self.connection_list:
             conn_dict = {
-                "source": conn_data["source"],
-                "target": conn_data["target"],
+                "source": conn_data["source"].copy(),
+                "target": conn_data["target"].copy(),
+                "mask_type": conn_data["mask_type"],
+                "mask_params": conn_data["mask_params"].copy(),
+                "kernel_type": conn_data["kernel_type"],
+                "kernel_params": conn_data["kernel_params"].copy(),
                 "conn_rule": conn_data["conn_rule"],
                 "conn_params": conn_data["conn_params"].copy(),
                 "syn_model": conn_data["syn_model"],
-                "syn_params": conn_data["syn_params"].copy()
+                "syn_params": conn_data["syn_params"].copy(),
+                "weight_type": conn_data["weight_type"],
+                "weight_params": conn_data["weight_params"].copy(),
+                "delay_type": conn_data["delay_type"],
+                "delay_params": conn_data["delay_params"].copy()
             }
             connections_output.append(conn_dict)
         
-        print("\n=== ALL CONNECTIONS ===")
+        print("\n=== ALL SPATIAL CONNECTIONS ===")
         print(json.dumps(connections_output, indent=2))
-        print("========================\n")
+        print("================================\n")
         
         return connections_output
-
 
     
 
