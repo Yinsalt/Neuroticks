@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QPushButton,    # Button
     QFileDialog,    # Datei-Auswahl Dialog
     QColorDialog,   # Farb-Auswahl Dialog
+    QTreeWidget,    
+    QTreeWidgetItem 
 )
 from PyQt6.QtWidgets import QScrollArea, QInputDialog
 
@@ -1165,7 +1167,19 @@ class GraphEditorTool(QWidget):
         except:
             self.non_functional_models = {}
         self.all_models = {**self.functional_models, **self.non_functional_models}
-
+    def select_graph_by_id(self, graph_id):
+        """Wählt einen Graphen anhand seiner ID in der ComboBox aus"""
+        # Finde den Index im Dropdown
+        for i in range(self.graph_select.combobox.count()):
+            text = self.graph_select.combobox.itemText(i)
+            try:
+                # Text format ist "Graph X (...)"
+                current_id = int(text.split()[1])
+                if current_id == graph_id:
+                    self.graph_select.combobox.setCurrentIndex(i)
+                    return
+            except:
+                continue
     def refresh_graph_list(self):
         self.graph_select.combobox.blockSignals(True)
         self.graph_select.combobox.clear()
@@ -1368,6 +1382,63 @@ class GraphEditorTool(QWidget):
             
         except Exception as e:
             print(f"Error rebuilding node: {e}")
+
+class GraphOverviewTool(QWidget):
+    # Signal sendet das Graph-Objekt, wenn darauf geklickt wird
+    graphSelected = pyqtSignal(object)
+
+    def __init__(self, graph_list):
+        super().__init__()
+        self.graph_list = graph_list
+        self.layout = QVBoxLayout()
+        
+        # Header Label
+        self.label = QLabel("GRAPH OVERVIEW")
+        self.label.setStyleSheet("font-weight: bold; font-size: 14px; color: orange;")
+        self.layout.addWidget(self.label)
+        
+        # Tree Widget
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabel("Graphs & Nodes")
+        self.tree.itemClicked.connect(self.on_item_clicked)
+        self.layout.addWidget(self.tree)
+        
+        # Refresh Button
+        self.refresh_btn = QPushButton("Refresh Overview")
+        self.refresh_btn.clicked.connect(self.update_tree)
+        self.layout.addWidget(self.refresh_btn)
+        
+        self.setLayout(self.layout)
+        self.update_tree()
+
+    def update_tree(self):
+        """Baut den Baum aus der graph_list neu auf"""
+        self.tree.clear()
+        
+        for graph in self.graph_list:
+            # Top Level Item: Graph
+            graph_item = QTreeWidgetItem(self.tree)
+            graph_item.setText(0, f"Graph {graph.graph_id} ({graph.nodes} Nodes)")
+            # Graph-Objekt speichern
+            graph_item.setData(0, Qt.ItemDataRole.UserRole, graph)
+            
+            # Child Items: Nodes
+            for node in graph.node_list:
+                node_item = QTreeWidgetItem(graph_item)
+                node_item.setText(0, f"{node.name} (ID: {node.id})")
+                # Node-Objekt speichern (falls später gebraucht)
+                node_item.setData(0, Qt.ItemDataRole.UserRole, node)
+
+    def on_item_clicked(self, item, column):
+        """Reagiert auf Klick im Baum"""
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        
+        # Prüfen, ob es ein Graph ist (wir importieren Graph nicht explizit, checken Typ anders)
+        if hasattr(data, 'graph_id') and hasattr(data, 'node_list'):
+            item.setExpanded(True) # Ausklappen
+            self.graphSelected.emit(data)
+            print(f"Overview selected: Graph {data.graph_id}")
+
 
 
 class graphCreationTool(QWidget):
@@ -2036,6 +2107,8 @@ class MainWindow(QMainWindow):
         self.graph_creator = graphCreationTool()
         self.graph_creator.graphCreated.connect(self.process_created_graph)
         self.graph_editor = GraphEditorTool(self.graph_list)
+        self.graph_overview = GraphOverviewTool(self.graph_list)
+        self.graph_overview.graphSelected.connect(self.on_graph_selected_from_overview)
         # Wenn im Editor was geändert wird -> Neu Plotten
         self.graph_editor.graphUpdated.connect(self.refresh_visualization)
 
@@ -2075,7 +2148,7 @@ class MainWindow(QMainWindow):
         self.layout_top_left.addWidget(self.scene_menu,1)
         self.layout_top_left.addWidget(self.plot_scene,9)
         self.layout_top.addLayout(self.layout_top_left, 7)  # 70% der Breite - PYVISTA
-        self.layout_top.addWidget(Color("orange"), 3)  # 30% der Breite - NODE LIST
+        self.layout_top.addWidget(self.graph_overview, 3)  # 30% der Breite - NODE LIST
         
         # Bottom Layout (40% der Höhe)
         self.layout_bottom = QHBoxLayout()
@@ -2103,7 +2176,19 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.widget)
         self.plot_points_of_graphs()        # Endgültige visualisierung
         self.plot_graphs()
-    
+        self.graph_overview.update_tree()
+
+    def on_graph_selected_from_overview(self, graph):
+        """Wird aufgerufen, wenn im Overview-Baum ein Graph geklickt wird"""
+        self.selected_graph = graph
+        
+        # 1. Zum "Graph Editor Tool" wechseln (Index 2 im Edit Menu)
+        self.edit_menu.setCurrentIndex(2)
+        
+        # 2. Im Editor den Graphen auswählen
+        self.graph_editor.refresh_graph_list() # Sicherstellen, dass Liste aktuell ist
+        self.graph_editor.select_graph_by_id(graph.graph_id)
+
 
     def create_graph_visualization(self):
         """Erstellt die Graph-Skeleton-Visualisierung"""
@@ -2157,7 +2242,7 @@ class MainWindow(QMainWindow):
         btn1 = QPushButton("Create New Graph")
         btn2 = QPushButton("Flow Field Editor")
         btn3 = QPushButton("Graph Editor Tool")
-        btn4 = QPushButton("Edit Node")
+        #btn4 = QPushButton("Edit Node")
         btn5 = QPushButton("New Population Connection")# hier auf jeden fall nodes miteinander verbinden
         btn6 = QPushButton("Delete Connection")
         btn7 = QPushButton("Add Blob")
@@ -2169,7 +2254,7 @@ class MainWindow(QMainWindow):
         btn1.clicked.connect(lambda: self.edit_menu.setCurrentIndex(0))
         btn2.clicked.connect(lambda: self.edit_menu.setCurrentIndex(1))
         btn3.clicked.connect(lambda: self.edit_menu.setCurrentIndex(2))
-        btn4.clicked.connect(lambda: self.edit_menu.setCurrentIndex(3))
+        #btn4.clicked.connect(lambda: self.edit_menu.setCurrentIndex(3))
         btn5.clicked.connect(lambda: self.edit_menu.setCurrentIndex(4))
         btn6.clicked.connect(lambda: self.edit_menu.setCurrentIndex(5))
         btn7.clicked.connect(lambda: self.edit_menu.setCurrentIndex(6))
@@ -2180,7 +2265,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(btn1)
         btn_layout.addWidget(btn2)
         btn_layout.addWidget(btn3)
-        btn_layout.addWidget(btn4)
+        #btn_layout.addWidget(btn4)
         btn_layout.addWidget(btn5)
         btn_layout.addWidget(btn6)
         btn_layout.addWidget(btn7)
@@ -2321,22 +2406,18 @@ class MainWindow(QMainWindow):
         """
         print("Processing graph data via Neuron Toolbox...")
         
-        # Wir nutzen den ersten existierenden Graphen oder erstellen einen neuen Wrapper
-        if not self.graph_list:
-            self.graph_list = [Graph(graph_id=0)]
+        # Neuen Graph erstellen (statt den alten zu überschreiben)
+        new_graph_id = len(self.graph_list)
+        new_graph = Graph(graph_id=new_graph_id)
         
-        active_graph = self.graph_list[0]
+        created_nodes = []  # Liste zum Tracking der erstellten Nodes
         
         for node_data in graph_data['nodes']:
             # 1. BERECHNUNG DER GRID-GRÖßE
-            # Wave Function Collapse füllt nicht alles. Wir schätzen die nötige Grid-Größe.
-            # Annahme: Sparsity factor ca. 0.8 (20% gefüllt) -> Wir brauchen 5x mehr Platz.
-            # Formel: (NeuronCount / (1 - Sparsity))^(1/3)
             target_count = node_data['neuron_count']
-            sparsity = 0.8 # Standard aus toolbox
+            sparsity = 0.8
             needed_volume = target_count / (1.0 - sparsity)
             side_length = int(np.ceil(needed_volume ** (1/3)))
-            # Sicherheitsaufschlag, damit es nicht zu eng wird
             side_length += 2 
             
             grid_size = [side_length, side_length, side_length]
@@ -2346,18 +2427,16 @@ class MainWindow(QMainWindow):
             probs = []
             models = []
             
-            # Sortieren nach ID um Konsistenz zu sichern
             for i, pop in enumerate(node_data['populations']):
-                types.append(i) # Typ ist einfach der Index
-                probs.append(pop['percentage'] / 100.0) # % in 0.0-1.0
+                types.append(i)
+                probs.append(pop['percentage'] / 100.0)
                 models.append(pop['model'])
             
             # 3. NODE PARAMETER ZUSAMMENBAUEN
-            # Wir mappen die GUI-Daten auf das params-Dict der Node-Klasse
             node_params = {
-                "id": len(active_graph.node_list),
-                "name": f"Node_{len(active_graph.node_list)}",
-                "m": node_data['center_of_mass'], # Position aus GUI
+                "id": len(new_graph.node_list),
+                "name": f"Node_{len(new_graph.node_list)}",
+                "m": node_data['center_of_mass'],
                 "grid_size": grid_size,
                 "neuron_models": models,
                 "types": types,
@@ -2365,25 +2444,54 @@ class MainWindow(QMainWindow):
                 "sparsity_factor": sparsity,
                 "sparse_holes": 0,
                 "dt": 0.01,
-                "old": False, # Schnellerer WFC Algorithmus
-                "plot_clusters": False # Wir plotten selbst in PyVista
+                "old": False,
+                "plot_clusters": False,
+                # WICHTIG: Populations-Daten für den Editor speichern
+                "populations": node_data['populations']
             }
             
-            # 4. NODE ERSTELLEN UND BAUEN (WFC ausführen)
-            # Hier arbeitet die neuron_toolbox!
+            # 4. NODE ERSTELLEN UND BAUEN
             print(f"Building Node with Grid {grid_size} for {target_count} neurons...")
             try:
-                new_node = active_graph.create_node(parameters=node_params, auto_build=True)
+                new_node = new_graph.create_node(parameters=node_params, auto_build=True)
+                created_nodes.append(new_node)
                 print(f"Node {new_node.id} created successfully with {len(new_node.population)} neurons.")
             except Exception as e:
                 print(f"CRITICAL ERROR building node: {e}")
-
-        # 5. VISUALISIERUNG UPDATE
+        
+        # 5. GRAPH-STRUKTUR AUFBAUEN (Parent-Child Beziehungen)
+        if created_nodes:
+            # Erstes Node als Root markieren
+            new_graph.root = created_nodes[0]
+            print(f"Root Node: {created_nodes[0].id}")
+            
+            # Sequentielle Verkettung: Node[i] -> Node[i+1]
+            for i in range(len(created_nodes) - 1):
+                current_node = created_nodes[i]
+                next_node = created_nodes[i + 1]
+                
+                # Parent-Child Beziehung setzen
+                current_node.next.append(next_node)
+                next_node.prev.append(current_node)
+                
+                print(f"Connected: Node {current_node.id} -> Node {next_node.id}")
+        
+        # 6. Graph zur Liste hinzufügen
+        self.graph_list.append(new_graph)
+        print(f"\n=== GRAPH {new_graph_id} CREATED ===")
+        print(f"Total Nodes: {len(created_nodes)}")
+        print(f"Structure: {' -> '.join([str(n.id) for n in created_nodes])}")
+        print("============================\n")
+        
+        # 7. VISUALISIERUNG UPDATE
         self.plot_points_of_graphs()
         self.plot_graphs()
         
-        # Wechsel zur 3D Ansicht
-        self.stacked.setCurrentIndex(0)
+        # Graph Editor aktualisieren
+        self.graph_editor.refresh_graph_list()
+        
+        # Wechsel zur Graph-Ansicht um die Struktur zu sehen
+        self.stacked.setCurrentIndex(1)
 
 
                     
