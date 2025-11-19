@@ -2,7 +2,7 @@ import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtWidgets import QPushButton, QStackedWidget, QToolBar, QMenu, QGridLayout, QStackedLayout
 from PyQt6.QtGui import QColor, QPalette, QAction
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 import pyvista as pv
 from pyvistaqt import QtInteractor
 from matplotlib.backends.backend_qtagg import FigureCanvas
@@ -157,6 +157,373 @@ class PercentageInputField(QWidget):
     
     def get_value(self):
         return self.spinbox.value()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class polynomEditorTool(QWidget):
+    def __init__(self, graph_list=None):
+        super().__init__()
+        
+        self.graph_list = graph_list if graph_list else []
+        self.current_polynomial_widgets = {}
+        
+        # Main Layout 30:70 (Selection : Polynomial Editor)
+        self.main_layout = QHBoxLayout()
+        
+        # === LINKE SEITE: Population Selection (30%) ===
+        self.selection_widget = QWidget()
+        self.selection_layout = QVBoxLayout()
+        self.selection_widget.setLayout(self.selection_layout)
+        
+        selection_label = QLabel("SELECT POPULATION")
+        selection_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.selection_layout.addWidget(selection_label)
+        
+        self.graph_select = DropdownField("Graph", self.get_graph_names(), default_index=0)
+        self.node_select = DropdownField("Node", ["Select Graph first"], default_index=0)
+        self.population_select = DropdownField("Population", ["Select Node first"], default_index=0)
+        
+        self.graph_select.combobox.currentTextChanged.connect(self.on_graph_changed)
+        self.node_select.combobox.currentTextChanged.connect(self.on_node_changed)
+        self.population_select.combobox.currentTextChanged.connect(self.on_population_changed)
+        
+        self.selection_layout.addWidget(self.graph_select)
+        self.selection_layout.addWidget(self.node_select)
+        self.selection_layout.addWidget(self.population_select)
+        
+        # Current Polynomial Info Display
+        info_label = QLabel("CURRENT POLYNOMIAL")
+        info_label.setStyleSheet("font-weight: bold; font-size: 12px; margin-top: 20px;")
+        self.selection_layout.addWidget(info_label)
+        
+        self.current_poly_display = QTextEdit()
+        self.current_poly_display.setReadOnly(True)
+        self.current_poly_display.setMaximumHeight(200)
+        self.current_poly_display.setPlaceholderText("No polynomial set")
+        self.selection_layout.addWidget(self.current_poly_display)
+        
+        self.selection_layout.addStretch()
+        
+        # === RECHTE SEITE: Polynomial Editor (70%) ===
+        self.editor_widget = QWidget()
+        self.editor_scroll = QScrollArea()
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setWidget(self.editor_widget)
+        
+        self.editor_layout = QVBoxLayout()
+        
+        editor_title = QLabel("POLYNOMIAL EDITOR")
+        editor_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.editor_layout.addWidget(editor_title)
+        
+        # Polynomial Type Selection
+        self.poly_type = DropdownField(
+            "Polynomial Type",
+            ["linear", "quadratic", "cubic", "quartic", "custom"],
+            default_index=0
+        )
+        self.poly_type.combobox.currentTextChanged.connect(self.on_poly_type_changed)
+        self.editor_layout.addWidget(self.poly_type)
+        
+        # Anzahl Variablen
+        self.num_vars = IntegerInputField("Number of Variables", default_value=2, min_val=1, max_val=10)
+        self.num_vars.spinbox.valueChanged.connect(self.on_num_vars_changed)
+        self.editor_layout.addWidget(self.num_vars)
+        
+        # Container für Koeffizienten
+        coeff_label = QLabel("COEFFICIENTS")
+        coeff_label.setStyleSheet("font-weight: bold; font-size: 12px; margin-top: 10px;")
+        self.editor_layout.addWidget(coeff_label)
+        
+        self.coeff_container_widget = QWidget()
+        self.coeff_container_layout = QVBoxLayout()
+        self.coeff_container_widget.setLayout(self.coeff_container_layout)
+        self.editor_layout.addWidget(self.coeff_container_widget)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        self.generate_btn = QPushButton("Generate Polynomial Matrix")
+        self.generate_btn.clicked.connect(self.generate_polynomial_matrix)
+        self.generate_btn.setMinimumHeight(40)
+        self.generate_btn.setStyleSheet("background-color: rgba(0, 100, 255, 100); font-weight: bold;")
+        
+        self.apply_btn = QPushButton("Apply to Population")
+        self.apply_btn.clicked.connect(self.apply_to_population)
+        self.apply_btn.setMinimumHeight(40)
+        self.apply_btn.setStyleSheet("background-color: rgba(0, 255, 0, 100); font-weight: bold;")
+        
+        button_layout.addWidget(self.generate_btn)
+        button_layout.addWidget(self.apply_btn)
+        self.editor_layout.addLayout(button_layout)
+        
+        # Matrix Display
+        matrix_label = QLabel("GENERATED COEFFICIENT MATRIX")
+        matrix_label.setStyleSheet("font-weight: bold; font-size: 12px; margin-top: 10px;")
+        self.editor_layout.addWidget(matrix_label)
+        
+        self.matrix_display = QTextEdit()
+        self.matrix_display.setReadOnly(True)
+        self.matrix_display.setMaximumHeight(250)
+        self.matrix_display.setPlaceholderText("Click 'Generate Polynomial Matrix' to see coefficient matrix")
+        self.editor_layout.addWidget(self.matrix_display)
+        
+        self.editor_layout.addStretch()
+        self.editor_widget.setLayout(self.editor_layout)
+        
+        # Add to Main Layout
+        self.main_layout.addWidget(self.selection_widget, 30)
+        self.main_layout.addWidget(self.editor_scroll, 70)
+        self.setLayout(self.main_layout)
+        
+        # Initial setup
+        self.current_poly_matrix = None
+        self.on_poly_type_changed(self.poly_type.get_value())
+    
+    def get_graph_names(self):
+        if not self.graph_list:
+            return ["No graphs available"]
+        return [f"Graph {graph.graph_id}" for graph in self.graph_list]
+    
+    def get_graph_by_name(self, graph_name):
+        try:
+            graph_id = int(graph_name.split()[1])
+            for graph in self.graph_list:
+                if graph.graph_id == graph_id:
+                    return graph
+        except:
+            pass
+        return None
+    
+    def on_graph_changed(self, graph_name):
+        graph = self.get_graph_by_name(graph_name)
+        if graph:
+            node_names = [f"Node {i+1}" for i in range(len(graph.node_list))]
+            self.node_select.combobox.clear()
+            self.node_select.combobox.addItems(node_names if node_names else ["No nodes"])
+    
+    def on_node_changed(self, node_name):
+        graph = self.get_graph_by_name(self.graph_select.get_value())
+        if graph:
+            try:
+                node_id = int(node_name.split()[1]) - 1
+                node = graph.node_list[node_id]
+                pop_names = [f"Pop {i+1}" for i in range(len(node.populations))]
+                self.population_select.combobox.clear()
+                self.population_select.combobox.addItems(pop_names if pop_names else ["No populations"])
+            except:
+                pass
+    
+    def on_population_changed(self, pop_name):
+        """Lädt aktuelles Polynom der Population"""
+        graph = self.get_graph_by_name(self.graph_select.get_value())
+        if graph:
+            try:
+                node_id = int(self.node_select.get_value().split()[1]) - 1
+                pop_id = int(pop_name.split()[1]) - 1
+                node = graph.node_list[node_id]
+                
+                # Zeige aktuelles Polynom falls vorhanden
+                if hasattr(node, 'flow_functions') and pop_id < len(node.flow_functions):
+                    flow_func = node.flow_functions[pop_id]
+                    self.current_poly_display.setText(f"Flow Function:\n{flow_func}")
+                else:
+                    self.current_poly_display.setText("No polynomial set for this population")
+            except:
+                self.current_poly_display.setText("Error loading population data")
+    
+    def on_poly_type_changed(self, poly_type):
+        """Ändert die Anzahl der Koeffizientenfelder basierend auf Typ"""
+        type_to_degree = {
+            'linear': 1,
+            'quadratic': 2,
+            'cubic': 3,
+            'quartic': 4,
+            'custom': 3  # default für custom
+        }
+        degree = type_to_degree.get(poly_type, 2)
+        self.create_coefficient_fields(degree, self.num_vars.get_value())
+    
+    def on_num_vars_changed(self):
+        """Neu-erstellt Koeffizientenfelder mit neuer Variablenanzahl"""
+        poly_type = self.poly_type.get_value()
+        type_to_degree = {
+            'linear': 1,
+            'quadratic': 2,
+            'cubic': 3,
+            'quartic': 4,
+            'custom': 3
+        }
+        degree = type_to_degree.get(poly_type, 2)
+        self.create_coefficient_fields(degree, self.num_vars.get_value())
+    
+    def create_coefficient_fields(self, degree, num_vars):
+        """Erstellt Eingabefelder für alle Koeffizienten"""
+        # Lösche alte Felder
+        while self.coeff_container_layout.count():
+            item = self.coeff_container_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        self.current_polynomial_widgets.clear()
+        
+        # Konstante
+        const_widget = DoubleInputField("Constant (c0)", default_value=0.0, min_val=-100.0, max_val=100.0, decimals=4)
+        self.coeff_container_layout.addWidget(const_widget)
+        self.current_polynomial_widgets['c0'] = const_widget
+        
+        # Lineare Terme
+        for i in range(num_vars):
+            widget = DoubleInputField(f"x{i+1} coefficient", default_value=0.0, min_val=-100.0, max_val=100.0, decimals=4)
+            self.coeff_container_layout.addWidget(widget)
+            self.current_polynomial_widgets[f'x{i+1}'] = widget
+        
+        # Höhere Grade
+        if degree >= 2:
+            # Quadratische Terme
+            for i in range(num_vars):
+                widget = DoubleInputField(f"x{i+1}² coefficient", default_value=0.0, min_val=-100.0, max_val=100.0, decimals=4)
+                self.coeff_container_layout.addWidget(widget)
+                self.current_polynomial_widgets[f'x{i+1}^2'] = widget
+            
+            # Kreuzterme
+            for i in range(num_vars):
+                for j in range(i+1, num_vars):
+                    widget = DoubleInputField(f"x{i+1}*x{j+1} coefficient", default_value=0.0, min_val=-100.0, max_val=100.0, decimals=4)
+                    self.coeff_container_layout.addWidget(widget)
+                    self.current_polynomial_widgets[f'x{i+1}*x{j+1}'] = widget
+        
+        if degree >= 3:
+            # Kubische Terme (vereinfacht - nur x^3 Terme)
+            for i in range(num_vars):
+                widget = DoubleInputField(f"x{i+1}³ coefficient", default_value=0.0, min_val=-100.0, max_val=100.0, decimals=4)
+                self.coeff_container_layout.addWidget(widget)
+                self.current_polynomial_widgets[f'x{i+1}^3'] = widget
+    
+    def generate_polynomial_matrix(self):
+        """Generiert Koeffizientenmatrix aus Eingaben"""
+        num_vars = self.num_vars.get_value()
+        poly_type = self.poly_type.get_value()
+        
+        # Sammle Koeffizienten
+        coeffs = {}
+        for key, widget in self.current_polynomial_widgets.items():
+            coeffs[key] = widget.get_value()
+        
+        # Erstelle Matrix-Representation
+        # Format: [konstante, [lineare], [[quadratische]], ...]
+        matrix = {
+            'constant': coeffs.get('c0', 0.0),
+            'linear': [coeffs.get(f'x{i+1}', 0.0) for i in range(num_vars)],
+            'quadratic': [],
+            'cubic': []
+        }
+        
+        # Quadratische Matrix
+        if poly_type in ['quadratic', 'cubic', 'quartic', 'custom']:
+            quad_matrix = np.zeros((num_vars, num_vars))
+            for i in range(num_vars):
+                quad_matrix[i, i] = coeffs.get(f'x{i+1}^2', 0.0)
+            
+            for i in range(num_vars):
+                for j in range(i+1, num_vars):
+                    val = coeffs.get(f'x{i+1}*x{j+1}', 0.0)
+                    quad_matrix[i, j] = val / 2  # Symmetrisch aufteilen
+                    quad_matrix[j, i] = val / 2
+            
+            matrix['quadratic'] = quad_matrix.tolist()
+        
+        # Kubische Terme (diagonal)
+        if poly_type in ['cubic', 'quartic', 'custom']:
+            cubic_diag = [coeffs.get(f'x{i+1}^3', 0.0) for i in range(num_vars)]
+            matrix['cubic'] = cubic_diag
+        
+        self.current_poly_matrix = matrix
+        
+        # Zeige Matrix
+        display_text = f"POLYNOMIAL REPRESENTATION\n"
+        display_text += f"={'='*40}\n\n"
+        display_text += f"Constant: {matrix['constant']:.4f}\n\n"
+        display_text += f"Linear coefficients:\n{np.array(matrix['linear'])}\n\n"
+        
+        if matrix['quadratic']:
+            display_text += f"Quadratic matrix:\n{np.array(matrix['quadratic'])}\n\n"
+        
+        if matrix['cubic']:
+            display_text += f"Cubic coefficients:\n{np.array(matrix['cubic'])}\n\n"
+        
+        # Polynomial als Formel
+        display_text += f"\nPOLYNOMIAL FORMULA:\n"
+        display_text += f"f(x) = {matrix['constant']:.4f}"
+        
+        for i, coeff in enumerate(matrix['linear']):
+            if abs(coeff) > 1e-6:
+                display_text += f" + {coeff:.4f}*x{i+1}"
+        
+        self.matrix_display.setText(display_text)
+        
+        print(f"\n=== POLYNOMIAL MATRIX GENERATED ===")
+        print(json.dumps(matrix, indent=2))
+        print("===================================\n")
+    
+    def apply_to_population(self):
+        """Wendet generiertes Polynom auf ausgewählte Population an"""
+        if self.current_poly_matrix is None:
+            print("ERROR: Generate polynomial matrix first!")
+            return
+        
+        graph = self.get_graph_by_name(self.graph_select.get_value())
+        if not graph:
+            print("ERROR: No graph selected")
+            return
+        
+        try:
+            node_id = int(self.node_select.get_value().split()[1]) - 1
+            pop_id = int(self.population_select.get_value().split()[1]) - 1
+            node = graph.node_list[node_id]
+            
+            # Update flow function für diese Population
+            if not hasattr(node, 'flow_functions'):
+                node.flow_functions = []
+            
+            while len(node.flow_functions) <= pop_id:
+                node.flow_functions.append(None)
+            
+            node.flow_functions[pop_id] = self.current_poly_matrix.copy()
+            
+            # Update Display
+            self.current_poly_display.setText(
+                f"Applied Polynomial:\n"
+                f"Constant: {self.current_poly_matrix['constant']}\n"
+                f"Linear: {self.current_poly_matrix['linear']}\n"
+                f"Quadratic: {'Yes' if self.current_poly_matrix['quadratic'] else 'No'}\n"
+                f"Cubic: {'Yes' if self.current_poly_matrix['cubic'] else 'No'}"
+            )
+            
+            print(f"\n=== POLYNOMIAL APPLIED ===")
+            print(f"Graph {graph.graph_id}, Node {node_id+1}, Population {pop_id+1}")
+            print(f"Polynomial: {json.dumps(self.current_poly_matrix, indent=2)}")
+            print("==========================\n")
+            
+        except Exception as e:
+            print(f"ERROR applying polynomial: {e}")
+
+
+
 
 
 class connectionTool(QWidget):
@@ -664,10 +1031,347 @@ class connectionTool(QWidget):
         
         return connections_output
 
-    
+class GraphEditorTool(QWidget):
+    # Signal, um dem MainWindow zu sagen: "Graph hat sich geändert, bitte neu plotten"
+    graphUpdated = pyqtSignal()
+
+    def __init__(self, graph_list):
+        super().__init__()
+        self.graph_list = graph_list
+        
+        # Modelle laden (Logik aus graphCreationTool übernommen)
+        self.functional_models = {}
+        self.non_functional_models = {}
+        self.all_models = {}
+        self.read_json()
+        
+        self.current_graph = None
+        self.current_node = None
+        self.current_pop_idx = None
+        
+        self.current_parameter_widgets = {}
+        
+        # === LAYOUT ===
+        self.main_layout = QVBoxLayout()
+        
+        # 1. TOP: Graph Selector
+        self.top_bar = QHBoxLayout()
+        self.graph_select = DropdownField("Select Graph", [], default_index=0)
+        self.graph_select.combobox.currentTextChanged.connect(self.on_graph_selected)
+        self.refresh_btn = QPushButton("Refresh List")
+        self.refresh_btn.clicked.connect(self.refresh_graph_list)
+        
+        self.top_bar.addWidget(self.graph_select)
+        self.top_bar.addWidget(self.refresh_btn)
+        self.main_layout.addLayout(self.top_bar)
+        
+        # 2. BODY: Split View (Links: Listen, Rechts: Editor)
+        self.body_layout = QHBoxLayout()
+        
+        # --- LINKS: Node & Population Listen ---
+        self.left_panel = QWidget()
+        self.left_layout = QVBoxLayout()
+        self.left_panel.setLayout(self.left_layout)
+        
+        # Node Liste
+        self.left_layout.addWidget(QLabel("NODES"))
+        self.node_scroll = QScrollArea()
+        self.node_scroll.setWidgetResizable(True)
+        self.node_list_widget = QWidget()
+        self.node_list_layout = QVBoxLayout()
+        self.node_list_widget.setLayout(self.node_list_layout)
+        self.node_scroll.setWidget(self.node_list_widget)
+        self.left_layout.addWidget(self.node_scroll, 50)
+        
+        # Population Liste
+        self.left_layout.addWidget(QLabel("POPULATIONS"))
+        self.pop_scroll = QScrollArea()
+        self.pop_scroll.setWidgetResizable(True)
+        self.pop_list_widget = QWidget()
+        self.pop_list_layout = QVBoxLayout()
+        self.pop_list_widget.setLayout(self.pop_list_layout)
+        self.pop_scroll.setWidget(self.pop_list_widget)
+        self.left_layout.addWidget(self.pop_scroll, 50)
+        
+        self.body_layout.addWidget(self.left_panel, 30)
+        
+        # --- RECHTS: Stacked Editor (Node / Population) ---
+        self.right_stack = QStackedWidget()
+        
+        # PAGE 0: Node Editor
+        self.node_edit_page = QWidget()
+        self.node_edit_layout = QVBoxLayout()
+        self.node_edit_page.setLayout(self.node_edit_layout)
+        
+        self.node_edit_layout.addWidget(QLabel("EDIT NODE PROPERTIES"))
+        
+        self.node_neuron_count = IntegerInputField("Neuron Count (Target)", min_val=1, max_val=50000)
+        self.node_pos_x = DoubleInputField("Pos X", min_val=-100, max_val=100)
+        self.node_pos_y = DoubleInputField("Pos Y", min_val=-100, max_val=100)
+        self.node_pos_z = DoubleInputField("Pos Z", min_val=-100, max_val=100)
+        
+        self.node_edit_layout.addWidget(self.node_neuron_count)
+        self.node_edit_layout.addWidget(self.node_pos_x)
+        self.node_edit_layout.addWidget(self.node_pos_y)
+        self.node_edit_layout.addWidget(self.node_pos_z)
+        
+        # Rebuild Button
+        self.rebuild_node_btn = QPushButton("Apply Changes & Rebuild Node")
+        self.rebuild_node_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 10px;")
+        self.rebuild_node_btn.clicked.connect(self.apply_node_changes)
+        self.node_edit_layout.addWidget(self.rebuild_node_btn)
+        self.node_edit_layout.addStretch()
+        
+        self.right_stack.addWidget(self.node_edit_page)
+        
+        # PAGE 1: Population Editor
+        self.pop_edit_page = QWidget()
+        self.pop_edit_scroll = QScrollArea()
+        self.pop_edit_scroll.setWidgetResizable(True)
+        self.pop_content = QWidget()
+        self.pop_layout = QVBoxLayout()
+        self.pop_content.setLayout(self.pop_layout)
+        self.pop_edit_scroll.setWidget(self.pop_content)
+        
+        self.pop_main_layout = QVBoxLayout()
+        self.pop_main_layout.addWidget(QLabel("EDIT POPULATION PARAMETERS"))
+        self.pop_main_layout.addWidget(self.pop_edit_scroll)
+        
+        self.save_pop_btn = QPushButton("Save Parameters")
+        self.save_pop_btn.clicked.connect(self.save_population_changes)
+        self.pop_main_layout.addWidget(self.save_pop_btn)
+        
+        self.pop_edit_page.setLayout(self.pop_main_layout)
+        self.right_stack.addWidget(self.pop_edit_page)
+        
+        self.body_layout.addWidget(self.right_stack, 70)
+        self.main_layout.addLayout(self.body_layout)
+        
+        self.setLayout(self.main_layout)
+        
+        # Init
+        self.refresh_graph_list()
+
+    def read_json(self):
+        """Lädt Modelle (identisch zu graphCreationTool)"""
+        try:
+            with open("functional_models.json") as f:
+                self.functional_models = json.load(f)
+        except:
+            self.functional_models = {}
+        try:
+            with open("non_functional_models.json") as f:
+                self.non_functional_models = json.load(f)
+        except:
+            self.non_functional_models = {}
+        self.all_models = {**self.functional_models, **self.non_functional_models}
+
+    def refresh_graph_list(self):
+        self.graph_select.combobox.blockSignals(True)
+        self.graph_select.combobox.clear()
+        if not self.graph_list:
+            self.graph_select.combobox.addItem("No Graphs available")
+        else:
+            for g in self.graph_list:
+                self.graph_select.combobox.addItem(f"Graph {g.graph_id} ({g.nodes} Nodes)")
+        self.graph_select.combobox.blockSignals(False)
+        
+        # Automatisch den ersten wählen
+        if self.graph_list:
+            self.on_graph_selected(self.graph_select.combobox.currentText())
+
+    def on_graph_selected(self, text):
+        if not self.graph_list: return
+        try:
+            # Extrahiere ID aus String "Graph 0 (...)"
+            g_id = int(text.split()[1])
+            for g in self.graph_list:
+                if g.graph_id == g_id:
+                    self.current_graph = g
+                    self.load_nodes_list()
+                    break
+        except:
+            pass
+
+    def load_nodes_list(self):
+        # Clear Node List
+        while self.node_list_layout.count():
+            child = self.node_list_layout.takeAt(0)
+            if child.widget(): child.widget().deleteLater()
+        
+        # Clear Pop List
+        self.clear_pop_list()
+        
+        if not self.current_graph: return
+
+        for node in self.current_graph.node_list:
+            btn = QPushButton(f"ID {node.id}: {node.name}")
+            btn.clicked.connect(lambda checked, n=node: self.on_node_selected(n))
+            self.node_list_layout.addWidget(btn)
+        
+        self.node_list_layout.addStretch()
+
+    def clear_pop_list(self):
+        while self.pop_list_layout.count():
+            child = self.pop_list_layout.takeAt(0)
+            if child.widget(): child.widget().deleteLater()
+
+    def on_node_selected(self, node):
+        self.current_node = node
+        self.current_pop_idx = None
+        
+        # 1. Fülle Node Editor Werte
+        # Achtung: Node parameters können unterschiedlich strukturiert sein
+        # Wir schauen in node.parameters dictionary
+        p = node.parameters
+        
+        # Hole Werte sicher, falls Keys fehlen
+        neuron_count = 0
+        # Wir versuchen die Neuronenzahl zu schätzen oder aus Params zu holen
+        if "neuron_count" in p: # Falls wir das im CreationTool gesetzt haben
+             neuron_count = p["neuron_count"]
+        elif hasattr(node, 'population') and node.population:
+             neuron_count = len(node.population)
+        
+        self.node_neuron_count.spinbox.setValue(neuron_count)
+        
+        pos = node.center_of_mass
+        self.node_pos_x.spinbox.setValue(pos[0])
+        self.node_pos_y.spinbox.setValue(pos[1])
+        self.node_pos_z.spinbox.setValue(pos[2])
+        
+        self.right_stack.setCurrentIndex(0) # Zeige Node Editor
+        
+        # 2. Fülle Population Liste
+        self.clear_pop_list()
+        
+        # node.types enthält Indizes, node.neuron_models die Namen
+        if "populations" in p:
+            # Falls wir die Struktur aus dem CreationTool noch im dict haben
+            for i, pop_data in enumerate(p["populations"]):
+                name = pop_data.get('name', f"Pop {i}")
+                btn = QPushButton(name)
+                btn.clicked.connect(lambda checked, idx=i: self.on_pop_selected(idx))
+                self.pop_list_layout.addWidget(btn)
+        else:
+            # Fallback, falls Node nicht über GUI erstellt wurde
+            for i, model in enumerate(node.neuron_models):
+                btn = QPushButton(f"Pop {i}: {model}")
+                btn.clicked.connect(lambda checked, idx=i: self.on_pop_selected(idx))
+                self.pop_list_layout.addWidget(btn)
+                
+        self.pop_list_layout.addStretch()
+
+    def on_pop_selected(self, idx):
+        self.current_pop_idx = idx
+        
+        # Hole Daten aus dem parameters dict des Nodes
+        # Strukturannahme: node.parameters['populations'][idx]['params']
+        if "populations" in self.current_node.parameters:
+            pop_data = self.current_node.parameters["populations"][idx]
+            model = pop_data["model"]
+            params = pop_data["params"]
+            self.build_param_editor(model, params)
+            self.right_stack.setCurrentIndex(1)
+        else:
+            print("Warning: Cannot edit populations for nodes created outside GUI (missing param struct)")
+
+    def build_param_editor(self, model_name, current_values):
+        # Layout leeren
+        while self.pop_layout.count():
+            child = self.pop_layout.takeAt(0)
+            if child.widget(): child.widget().deleteLater()
+        
+        self.current_parameter_widgets = {}
+        
+        # Hole Parameter-Definitionen aus JSON
+        if model_name not in self.all_models:
+            self.pop_layout.addWidget(QLabel(f"No parameter definition for {model_name}"))
+            return
+
+        model_def = self.all_models[model_name]
+        
+        for param_key, param_info in model_def.items():
+            val = current_values.get(param_key, param_info['default'])
+            p_type = param_info['type']
+            
+            widget = None
+            if p_type == 'float':
+                widget = DoubleInputField(param_key, default_value=val, min_val=-10000, max_val=10000)
+            elif p_type == 'integer':
+                widget = IntegerInputField(param_key, default_value=val, min_val=0, max_val=100000)
+            elif p_type == 'boolean':
+                widget = CheckboxField(param_key, default_checked=val) # Annahme CheckboxField existiert
+            
+            if widget:
+                self.pop_layout.addWidget(widget)
+                self.current_parameter_widgets[param_key] = widget
+        
+        self.pop_layout.addStretch()
+
+    def save_population_changes(self):
+        if not self.current_node or self.current_pop_idx is None: return
+        
+        # Werte aus Widgets lesen
+        new_params = {}
+        for key, widget in self.current_parameter_widgets.items():
+            new_params[key] = widget.get_value()
+        
+        # In Node speichern
+        self.current_node.parameters["populations"][self.current_pop_idx]["params"] = new_params
+        print(f"Updated params for Node {self.current_node.id}, Pop {self.current_pop_idx}")
+        
+        # Hinweis: NEST Parameter müssen oft via SetStatus gesetzt werden.
+        # Wenn der Node schon "gebaut" ist (population list existiert),
+        # müssten wir hier eigentlich nest.SetStatus aufrufen.
+        # Fürs erste aktualisieren wir nur das Config-Dict für den nächsten Rebuild.
+
+    def apply_node_changes(self):
+        """Aktualisiert Position/Größe und baut den Node neu"""
+        if not self.current_node: return
+        
+        # 1. Update Parameters
+        new_count = self.node_neuron_count.get_value()
+        new_pos = np.array([
+            self.node_pos_x.get_value(),
+            self.node_pos_y.get_value(),
+            self.node_pos_z.get_value()
+        ])
+        
+        self.current_node.parameters["neuron_count"] = new_count
+        self.current_node.parameters["m"] = new_pos
+        
+        # Update Center of Mass im Objekt selbst
+        self.current_node.center_of_mass = new_pos
+        
+        # 2. Grid neu berechnen (Logik aus MainWindow.process_created_graph)
+        sparsity = self.current_node.parameters.get("sparsity_factor", 0.8)
+        needed_volume = new_count / (1.0 - sparsity)
+        side_length = int(np.ceil(needed_volume ** (1/3))) + 2
+        
+        self.current_node.parameters["grid_size"] = [side_length, side_length, side_length]
+        
+        print(f"Rebuilding Node {self.current_node.id} at {new_pos} with Grid {side_length}^3...")
+        
+        # 3. Rebuild Action
+        try:
+            # build() führt WFC aus und setzt self.positions neu
+            self.current_node.build() 
+            # populate_node() erstellt NEST Nodes (Achtung: Alte NEST Nodes werden nicht automatisch gelöscht!)
+            # TODO: Alte NEST IDs sauber aufräumen falls nötig
+            self.current_node.populate_node()
+            
+            print("Rebuild successful.")
+            
+            # 4. Signal an Mainwindow zum Neuzeichnen
+            self.graphUpdated.emit()
+            
+        except Exception as e:
+            print(f"Error rebuilding node: {e}")
 
 
 class graphCreationTool(QWidget):
+    graphCreated = pyqtSignal(dict)
     def __init__(self):
         super().__init__()
         self.functional_models = {}
@@ -1176,12 +1880,14 @@ class graphCreationTool(QWidget):
         if all_valid:
             print("\nGraph-Structure:")
             print(json.dumps(graph_data, indent=2))
-
             
+            # 2. HIER DAS SIGNAL EMITTIEREN (statt nur print)
+            self.graphCreated.emit(graph_data) 
+
             # RESET INTERFACE nach erfolgreicher Erstellung
             self.reset_interface()
         else:
-            print("\n!!!invalid node parametrization. green ones have passed all checks, organge ones did not. !!!\n")
+            print("\n!!!invalid node parametrization...!!!\n")
         
         return graph_data # Hier Aufruf der Ersteller funktion. PERFEKT.
 
@@ -1293,13 +1999,16 @@ class MainWindow(QMainWindow):
 
 
         # meine Widgets
+
+
+
         self.btn = self.create_bottom_button_menu()
         self.graph_list = [createGraph(max_nodes=2,graph_id=0)]# bestimme wie viele nodes initial erstellt werden
         self.graph_vis = self.create_graph_visualization()
         self.node_vis = self.create_neuron_visualization()
 
         self.vis_widget_list = []
-
+        
         self.vis_widget_list.append(self.node_vis)
         self.vis_widget_list.append(self.graph_vis)
 
@@ -1319,18 +2028,21 @@ class MainWindow(QMainWindow):
 
 
 
-
-
-
         # aktive variablen, zb selection
         self.selected_graph = self.graph_list[0]
 
-
+        ####### POLYNOM EDITOR
+        self.polynom_editor = polynomEditorTool(graph_list=self.graph_list)
+        self.graph_creator = graphCreationTool()
+        self.graph_creator.graphCreated.connect(self.process_created_graph)
+        self.graph_editor = GraphEditorTool(self.graph_list)
+        # Wenn im Editor was geändert wird -> Neu Plotten
+        self.graph_editor.graphUpdated.connect(self.refresh_visualization)
 
         #Erstellungsmenü für connections, nodes, graphen usw
-        self.creation_functionalities = [graphCreationTool(),##################### HIER
-                                         Color("white"),
-                                         Color("purple"),
+        self.creation_functionalities = [self.graph_creator,##################### HIER
+                                         self.polynom_editor,
+                                         self.graph_editor,
                                          Color("blue"),
                                          connectionTool(),
                                          Color("yellow"),
@@ -1398,6 +2110,11 @@ class MainWindow(QMainWindow):
         plotter = QtInteractor(self)
         plotter.set_background('black')
         return plotter
+    
+    def refresh_visualization(self):
+        self.plot_points_of_graphs()
+        self.plot_graphs()
+        self.stacked.setCurrentIndex(0)
 
     def create_neuron_visualization(self):
         """Erstellt die Neuron-Points-Visualisierung"""
@@ -1437,9 +2154,9 @@ class MainWindow(QMainWindow):
         btn_layout = QVBoxLayout()  # oder QHBoxLayout für horizontal
         
         # Buttons erstellen
-        btn1 = QPushButton("Add Graph")
-        btn2 = QPushButton("Add Node")
-        btn3 = QPushButton("Edit Graph")
+        btn1 = QPushButton("Create New Graph")
+        btn2 = QPushButton("Flow Field Editor")
+        btn3 = QPushButton("Graph Editor Tool")
         btn4 = QPushButton("Edit Node")
         btn5 = QPushButton("New Population Connection")# hier auf jeden fall nodes miteinander verbinden
         btn6 = QPushButton("Delete Connection")
@@ -1497,7 +2214,18 @@ class MainWindow(QMainWindow):
         for graph in self.graph_list:
             for node in graph.node_list:
                 for i, pts in enumerate(node.positions):
-                    neuron_type = node.neuron_models[i]
+                    
+                    # --- FIX START: Prüfen ob Punkte existieren ---
+                    if pts is None or len(pts) == 0:
+                        continue
+                    # --- FIX ENDE ---
+
+                    # Sicherstellen, dass wir nicht out of range laufen, falls models fehlen
+                    if i < len(node.neuron_models):
+                        neuron_type = node.neuron_models[i]
+                    else:
+                        neuron_type = "unknown"
+
                     color = neuron_colors.get(neuron_type, "#FFFFFF")
                     
                     # Nur einmal pro Typ zur Legende hinzufügen
@@ -1512,12 +2240,13 @@ class MainWindow(QMainWindow):
                         point_size=10
                     )
         
-        # Legende hinzufügen
-        self.node_vis.add_legend(
-            legend_entries,
-            size=(0.2, 0.2),  # Größe der Legende (relativ)
-            loc='upper right'  # oder 'lower left', 'upper left', etc.
-        )
+        # Legende hinzufügen (nur wenn Einträge vorhanden)
+        if legend_entries:
+            self.node_vis.add_legend(
+                legend_entries,
+                size=(0.2, 0.2),
+                loc='upper right'
+            )
         
         self.node_vis.update()
     
@@ -1584,6 +2313,77 @@ class MainWindow(QMainWindow):
         
         self.graph_vis.reset_camera()
         self.graph_vis.update()
+
+    def process_created_graph(self, graph_data):
+        """
+        Übersetzt die GUI-Daten in echte Node-Objekte der neuron_toolbox
+        und aktualisiert die Visualisierung.
+        """
+        print("Processing graph data via Neuron Toolbox...")
+        
+        # Wir nutzen den ersten existierenden Graphen oder erstellen einen neuen Wrapper
+        if not self.graph_list:
+            self.graph_list = [Graph(graph_id=0)]
+        
+        active_graph = self.graph_list[0]
+        
+        for node_data in graph_data['nodes']:
+            # 1. BERECHNUNG DER GRID-GRÖßE
+            # Wave Function Collapse füllt nicht alles. Wir schätzen die nötige Grid-Größe.
+            # Annahme: Sparsity factor ca. 0.8 (20% gefüllt) -> Wir brauchen 5x mehr Platz.
+            # Formel: (NeuronCount / (1 - Sparsity))^(1/3)
+            target_count = node_data['neuron_count']
+            sparsity = 0.8 # Standard aus toolbox
+            needed_volume = target_count / (1.0 - sparsity)
+            side_length = int(np.ceil(needed_volume ** (1/3)))
+            # Sicherheitsaufschlag, damit es nicht zu eng wird
+            side_length += 2 
+            
+            grid_size = [side_length, side_length, side_length]
+            
+            # 2. DATEN FÜR WFC VORBEREITEN
+            types = []
+            probs = []
+            models = []
+            
+            # Sortieren nach ID um Konsistenz zu sichern
+            for i, pop in enumerate(node_data['populations']):
+                types.append(i) # Typ ist einfach der Index
+                probs.append(pop['percentage'] / 100.0) # % in 0.0-1.0
+                models.append(pop['model'])
+            
+            # 3. NODE PARAMETER ZUSAMMENBAUEN
+            # Wir mappen die GUI-Daten auf das params-Dict der Node-Klasse
+            node_params = {
+                "id": len(active_graph.node_list),
+                "name": f"Node_{len(active_graph.node_list)}",
+                "m": node_data['center_of_mass'], # Position aus GUI
+                "grid_size": grid_size,
+                "neuron_models": models,
+                "types": types,
+                "probability_vector": probs,
+                "sparsity_factor": sparsity,
+                "sparse_holes": 0,
+                "dt": 0.01,
+                "old": False, # Schnellerer WFC Algorithmus
+                "plot_clusters": False # Wir plotten selbst in PyVista
+            }
+            
+            # 4. NODE ERSTELLEN UND BAUEN (WFC ausführen)
+            # Hier arbeitet die neuron_toolbox!
+            print(f"Building Node with Grid {grid_size} for {target_count} neurons...")
+            try:
+                new_node = active_graph.create_node(parameters=node_params, auto_build=True)
+                print(f"Node {new_node.id} created successfully with {len(new_node.population)} neurons.")
+            except Exception as e:
+                print(f"CRITICAL ERROR building node: {e}")
+
+        # 5. VISUALISIERUNG UPDATE
+        self.plot_points_of_graphs()
+        self.plot_graphs()
+        
+        # Wechsel zur 3D Ansicht
+        self.stacked.setCurrentIndex(0)
 
 
                     
