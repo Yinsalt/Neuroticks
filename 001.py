@@ -1032,154 +1032,125 @@ class connectionTool(QWidget):
         print("================================\n")
         
         return connections_output
-
+    
+    
 class GraphEditorTool(QWidget):
-    # Signal, um dem MainWindow zu sagen: "Graph hat sich geändert, bitte neu plotten"
     graphUpdated = pyqtSignal()
 
     def __init__(self, graph_list):
         super().__init__()
         self.graph_list = graph_list
-        
-        # Modelle laden (Logik aus graphCreationTool übernommen)
+        self.current_graph = None
+        self.current_node = None
+        self.current_pop_idx = None
+        self.current_parameter_widgets = {}
+
+        # Modelle laden (wie im CreationTool)
         self.functional_models = {}
         self.non_functional_models = {}
         self.all_models = {}
         self.read_json()
-        
-        self.current_graph = None
-        self.current_node = None
-        self.current_pop_idx = None
-        
-        self.current_parameter_widgets = {}
-        
+
         # === LAYOUT ===
-        self.main_layout = QVBoxLayout()
-        
-        # 1. TOP: Graph Selector
-        self.top_bar = QHBoxLayout()
+        main_layout = QHBoxLayout(self)
+
+        # === LINKS: Auswahl (Graph + Nodes + Populations) ===
+        left_panel = QVBoxLayout()
+
+        # Graph Selector
+        top_bar = QHBoxLayout()
         self.graph_select = DropdownField("Select Graph", [], default_index=0)
         self.graph_select.combobox.currentTextChanged.connect(self.on_graph_selected)
-        self.refresh_btn = QPushButton("Refresh List")
+        self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_graph_list)
-        
-        self.top_bar.addWidget(self.graph_select)
-        self.top_bar.addWidget(self.refresh_btn)
-        self.main_layout.addLayout(self.top_bar)
-        
-        # 2. BODY: Split View (Links: Listen, Rechts: Editor)
-        self.body_layout = QHBoxLayout()
-        
-        # --- LINKS: Node & Population Listen ---
-        self.left_panel = QWidget()
-        self.left_layout = QVBoxLayout()
-        self.left_panel.setLayout(self.left_layout)
-        
+        top_bar.addWidget(self.graph_select)
+        top_bar.addWidget(self.refresh_btn)
+        left_panel.addLayout(top_bar)
+
         # Node Liste
-        self.left_layout.addWidget(QLabel("NODES"))
+        left_panel.addWidget(QLabel("NODES"))
         self.node_scroll = QScrollArea()
         self.node_scroll.setWidgetResizable(True)
-        self.node_list_widget = QWidget()
-        self.node_list_layout = QVBoxLayout()
-        self.node_list_widget.setLayout(self.node_list_layout)
-        self.node_scroll.setWidget(self.node_list_widget)
-        self.left_layout.addWidget(self.node_scroll, 50)
-        
+        self.node_widget = QWidget()
+        self.node_layout = QVBoxLayout(self.node_widget)
+        self.node_scroll.setWidget(self.node_widget)
+        left_panel.addWidget(self.node_scroll, stretch=1)
+
         # Population Liste
-        self.left_layout.addWidget(QLabel("POPULATIONS"))
+        left_panel.addWidget(QLabel("POPULATIONS"))
         self.pop_scroll = QScrollArea()
         self.pop_scroll.setWidgetResizable(True)
-        self.pop_list_widget = QWidget()
-        self.pop_list_layout = QVBoxLayout()
-        self.pop_list_widget.setLayout(self.pop_list_layout)
-        self.pop_scroll.setWidget(self.pop_list_widget)
-        self.left_layout.addWidget(self.pop_scroll, 50)
-        
-        self.body_layout.addWidget(self.left_panel, 30)
-        
-        # --- RECHTS: Stacked Editor (Node / Population) ---
-        self.right_stack = QStackedWidget()
-        
-        # PAGE 0: Node Editor
-        self.node_edit_page = QWidget()
-        self.node_edit_layout = QVBoxLayout()
-        self.node_edit_page.setLayout(self.node_edit_layout)
-        
-        self.node_edit_layout.addWidget(QLabel("EDIT NODE PROPERTIES"))
-        
-        self.node_neuron_count = IntegerInputField("Neuron Count (Target)", min_val=1, max_val=50000)
-        self.node_pos_x = DoubleInputField("Pos X", min_val=-100, max_val=100)
-        self.node_pos_y = DoubleInputField("Pos Y", min_val=-100, max_val=100)
-        self.node_pos_z = DoubleInputField("Pos Z", min_val=-100, max_val=100)
-        
-        self.node_edit_layout.addWidget(self.node_neuron_count)
-        self.node_edit_layout.addWidget(self.node_pos_x)
-        self.node_edit_layout.addWidget(self.node_pos_y)
-        self.node_edit_layout.addWidget(self.node_pos_z)
-        
-        # Rebuild Button
-        self.rebuild_node_btn = QPushButton("Apply Changes & Rebuild Node")
-        self.rebuild_node_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 10px;")
-        self.rebuild_node_btn.clicked.connect(self.apply_node_changes)
-        self.node_edit_layout.addWidget(self.rebuild_node_btn)
-        self.node_edit_layout.addStretch()
-        
-        self.right_stack.addWidget(self.node_edit_page)
-        
-        # PAGE 1: Population Editor
-        self.pop_edit_page = QWidget()
-        self.pop_edit_scroll = QScrollArea()
-        self.pop_edit_scroll.setWidgetResizable(True)
+        self.pop_widget = QWidget()
+        self.pop_layout = QVBoxLayout(self.pop_widget)
+        self.pop_scroll.setWidget(self.pop_widget)
+        left_panel.addWidget(self.pop_scroll, stretch=1)
+
+        main_layout.addLayout(left_panel, 3)
+
+        # === RECHTS: Stacked Editor ===
+        self.editor_stack = QStackedWidget()
+
+        # --- Seite 0: Node bearbeiten ---
+        node_page = QWidget()
+        node_v = QVBoxLayout(node_page)
+        node_v.addWidget(QLabel("EDIT NODE PROPERTIES", alignment=Qt.AlignCenter))
+
+        self.node_neuron_count = IntegerInputField("Neuron Count (Target)", min_val=1, max_val=100000, default_value=1000)
+        self.node_pos_x = DoubleInputField("Position X", min_val=-200, max_val=200, decimals=3)
+        self.node_pos_y = DoubleInputField("Position Y", min_val=-200, max_val=200, decimals=3)
+        self.node_pos_z = DoubleInputField("Position Z", min_val=-200, max_val=200, decimals=3)
+
+        for w in (self.node_neuron_count, self.node_pos_x, self.node_pos_y, self.node_pos_z):
+            node_v.addWidget(w)
+
+        rebuild_btn = QPushButton("Apply Changes & Rebuild Node")
+        rebuild_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 12px;")
+        rebuild_btn.clicked.connect(self.apply_node_changes)
+        node_v.addWidget(rebuild_btn)
+        node_v.addStretch()
+
+        # --- Seite 1: Population bearbeiten ---
+        pop_page = QWidget()
+        pop_v = QVBoxLayout(pop_page)
+        pop_v.addWidget(QLabel("EDIT POPULATION PARAMETERS", alignment=Qt.AlignCenter))
+
+        self.pop_model = DropdownField("Neuron Model", list(self.all_models.keys()) or ["iaf_psc_alpha"])
+        self.pop_model.combobox.currentTextChanged.connect(self.on_model_changed_in_editor)
+        pop_v.addWidget(self.pop_model)
+
+        self.pop_content_scroll = QScrollArea()
+        self.pop_content_scroll.setWidgetResizable(True)
         self.pop_content = QWidget()
-        self.pop_layout = QVBoxLayout()
-        self.pop_content.setLayout(self.pop_layout)
-        self.pop_edit_scroll.setWidget(self.pop_content)
-        
-        self.pop_main_layout = QVBoxLayout()
-        self.pop_main_layout.addWidget(QLabel("EDIT POPULATION PARAMETERS"))
-        self.pop_main_layout.addWidget(self.pop_edit_scroll)
-        
-        self.save_pop_btn = QPushButton("Save Parameters")
-        self.save_pop_btn.clicked.connect(self.save_population_changes)
-        self.pop_main_layout.addWidget(self.save_pop_btn)
-        
-        self.pop_edit_page.setLayout(self.pop_main_layout)
-        self.right_stack.addWidget(self.pop_edit_page)
-        
-        self.body_layout.addWidget(self.right_stack, 70)
-        self.main_layout.addLayout(self.body_layout)
-        
-        self.setLayout(self.main_layout)
-        
+        self.pop_content_layout = QVBoxLayout(self.pop_content)
+        self.pop_content_scroll.setWidget(self.pop_content)
+        pop_v.addWidget(self.pop_content_scroll)
+
+        save_btn = QPushButton("Save Population Parameters")
+        save_btn.setStyleSheet("background-color: #4caf50; color: white; font-weight: bold; padding: 10px;")
+        save_btn.clicked.connect(self.save_population_changes)
+        pop_v.addWidget(save_btn)
+
+        # Stack zusammenbauen
+        self.editor_stack.addWidget(node_page)   # Index 0
+        self.editor_stack.addWidget(pop_page)    # Index 1
+
+        main_layout.addWidget(self.editor_stack, 7)
+        self.setLayout(main_layout)
+
         # Init
         self.refresh_graph_list()
 
     def read_json(self):
-        """Lädt Modelle (identisch zu graphCreationTool)"""
         try:
             with open("functional_models.json") as f:
                 self.functional_models = json.load(f)
-        except:
-            self.functional_models = {}
-        try:
             with open("non_functional_models.json") as f:
                 self.non_functional_models = json.load(f)
-        except:
-            self.non_functional_models = {}
-        self.all_models = {**self.functional_models, **self.non_functional_models}
-    def select_graph_by_id(self, graph_id):
-        """Wählt einen Graphen anhand seiner ID in der ComboBox aus"""
-        # Finde den Index im Dropdown
-        for i in range(self.graph_select.combobox.count()):
-            text = self.graph_select.combobox.itemText(i)
-            try:
-                # Text format ist "Graph X (...)"
-                current_id = int(text.split()[1])
-                if current_id == graph_id:
-                    self.graph_select.combobox.setCurrentIndex(i)
-                    return
-            except:
-                continue
+            self.all_models = {**self.functional_models, **self.non_functional_models}
+        except Exception as e:
+            print("Model JSONs nicht gefunden → Default-Modelle")
+            self.all_models = {"iaf_psc_alpha": {}}
+
     def refresh_graph_list(self):
         self.graph_select.combobox.blockSignals(True)
         self.graph_select.combobox.clear()
@@ -1189,199 +1160,160 @@ class GraphEditorTool(QWidget):
             for g in self.graph_list:
                 self.graph_select.combobox.addItem(f"Graph {g.graph_id} ({g.nodes} Nodes)")
         self.graph_select.combobox.blockSignals(False)
-        
-        # Automatisch den ersten wählen
         if self.graph_list:
             self.on_graph_selected(self.graph_select.combobox.currentText())
 
     def on_graph_selected(self, text):
-        if not self.graph_list: return
-        try:
-            # Extrahiere ID aus String "Graph 0 (...)"
-            g_id = int(text.split()[1])
-            for g in self.graph_list:
-                if g.graph_id == g_id:
-                    self.current_graph = g
-                    self.load_nodes_list()
-                    break
-        except:
-            pass
+        if not text or "No Graphs" in text:
+            return
+        g_id = int(text.split()[1])
+        self.current_graph = next((g for g in self.graph_list if g.graph_id == g_id), None)
+        if self.current_graph:
+            self.load_nodes()
 
-    def load_nodes_list(self):
-        # Clear Node List
-        while self.node_list_layout.count():
-            child = self.node_list_layout.takeAt(0)
-            if child.widget(): child.widget().deleteLater()
-        
-        # Clear Pop List
-        self.clear_pop_list()
-        
-        if not self.current_graph: return
+    def load_nodes(self):
+        # Node-Buttons leeren
+        for i in reversed(range(self.node_layout.count())):
+            widget = self.node_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
 
         for node in self.current_graph.node_list:
-            btn = QPushButton(f"ID {node.id}: {node.name}")
-            btn.clicked.connect(lambda checked, n=node: self.on_node_selected(n))
-            self.node_list_layout.addWidget(btn)
-        
-        self.node_list_layout.addStretch()
+            total_neurons = sum(len(c) for c in node.positions) if node.positions else 0
+            btn = QPushButton(f"{node.name} (ID {node.id}) – {total_neurons} Neurons")
+            btn.clicked.connect(lambda checked, n=node: self.select_node(n))
+            self.node_layout.addWidget(btn)
+        self.node_layout.addStretch()
 
-    def clear_pop_list(self):
-        while self.pop_list_layout.count():
-            child = self.pop_list_layout.takeAt(0)
-            if child.widget(): child.widget().deleteLater()
-
-    def on_node_selected(self, node):
+    def select_node(self, node):
         self.current_node = node
         self.current_pop_idx = None
-        
-        # 1. Fülle Node Editor Werte
-        # Achtung: Node parameters können unterschiedlich strukturiert sein
-        # Wir schauen in node.parameters dictionary
+        self.editor_stack.setCurrentIndex(0)
+
+        # Node-Werte laden
         p = node.parameters
-        
-        # Hole Werte sicher, falls Keys fehlen
-        neuron_count = 0
-        # Wir versuchen die Neuronenzahl zu schätzen oder aus Params zu holen
-        if "neuron_count" in p: # Falls wir das im CreationTool gesetzt haben
-             neuron_count = p["neuron_count"]
-        elif hasattr(node, 'population') and node.population:
-             neuron_count = len(node.population)
-        
-        self.node_neuron_count.spinbox.setValue(neuron_count)
-        
+        self.node_neuron_count.spinbox.setValue(p.get("neuron_count", 1000))
         pos = node.center_of_mass
         self.node_pos_x.spinbox.setValue(pos[0])
         self.node_pos_y.spinbox.setValue(pos[1])
         self.node_pos_z.spinbox.setValue(pos[2])
-        
-        self.right_stack.setCurrentIndex(0) # Zeige Node Editor
-        
-        # 2. Fülle Population Liste
-        self.clear_pop_list()
-        
-        # node.types enthält Indizes, node.neuron_models die Namen
-        if "populations" in p:
-            # Falls wir die Struktur aus dem CreationTool noch im dict haben
-            for i, pop_data in enumerate(p["populations"]):
-                name = pop_data.get('name', f"Pop {i}")
-                btn = QPushButton(name)
-                btn.clicked.connect(lambda checked, idx=i: self.on_pop_selected(idx))
-                self.pop_list_layout.addWidget(btn)
-        else:
-            # Fallback, falls Node nicht über GUI erstellt wurde
-            for i, model in enumerate(node.neuron_models):
-                btn = QPushButton(f"Pop {i}: {model}")
-                btn.clicked.connect(lambda checked, idx=i: self.on_pop_selected(idx))
-                self.pop_list_layout.addWidget(btn)
-                
-        self.pop_list_layout.addStretch()
 
-    def on_pop_selected(self, idx):
+        # Population-Liste laden
+        self.load_populations()
+
+    def load_populations(self):
+        for i in reversed(range(self.pop_layout.count())):
+            widget = self.pop_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+
+        if "populations" not in self.current_node.parameters:
+            return
+
+        for i, pop_data in enumerate(self.current_node.parameters["populations"]):
+            name = pop_data.get("name", f"Pop {i+1}")
+            btn = QPushButton(name)
+            btn.clicked.connect(lambda checked, idx=i: self.select_population(idx))
+            self.pop_layout.addWidget(btn)
+        self.pop_layout.addStretch()
+
+    def select_population(self, idx):
         self.current_pop_idx = idx
-        
-        # Hole Daten aus dem parameters dict des Nodes
-        # Strukturannahme: node.parameters['populations'][idx]['params']
-        if "populations" in self.current_node.parameters:
-            pop_data = self.current_node.parameters["populations"][idx]
-            model = pop_data["model"]
-            params = pop_data["params"]
-            self.build_param_editor(model, params)
-            self.right_stack.setCurrentIndex(1)
-        else:
-            print("Warning: Cannot edit populations for nodes created outside GUI (missing param struct)")
+        pop_data = self.current_node.parameters["populations"][idx]
+        model = pop_data["model"]
+        params = pop_data["params"]
+
+        self.editor_stack.setCurrentIndex(1)
+        self.pop_model.combobox.blockSignals(True)
+        self.pop_model.combobox.setCurrentText(model)
+        self.pop_model.combobox.blockSignals(False)
+
+        self.build_param_editor(model, params)
 
     def build_param_editor(self, model_name, current_values):
-        # Layout leeren
-        while self.pop_layout.count():
-            child = self.pop_layout.takeAt(0)
-            if child.widget(): child.widget().deleteLater()
-        
-        self.current_parameter_widgets = {}
-        
-        # Hole Parameter-Definitionen aus JSON
+        # Alte Widgets löschen
+        for i in reversed(range(self.pop_content_layout.count())):
+            widget = self.pop_content_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+
+        self.current_parameter_widgets.clear()
+
         if model_name not in self.all_models:
-            self.pop_layout.addWidget(QLabel(f"No parameter definition for {model_name}"))
+            self.pop_content_layout.addWidget(QLabel(f"Kein Modell gefunden: {model_name}"))
             return
 
         model_def = self.all_models[model_name]
-        
-        for param_key, param_info in model_def.items():
-            val = current_values.get(param_key, param_info['default'])
-            p_type = param_info['type']
-            
-            widget = None
-            if p_type == 'float':
-                widget = DoubleInputField(param_key, default_value=val, min_val=-10000, max_val=10000)
-            elif p_type == 'integer':
-                widget = IntegerInputField(param_key, default_value=val, min_val=0, max_val=100000)
-            elif p_type == 'boolean':
-                widget = CheckboxField(param_key, default_checked=val) # Annahme CheckboxField existiert
-            
-            if widget:
-                self.pop_layout.addWidget(widget)
-                self.current_parameter_widgets[param_key] = widget
-        
-        self.pop_layout.addStretch()
+        for key, info in model_def.items():
+            val = current_values.get(key, info['default'])
+            if info['type'] == 'float':
+                w = DoubleInputField(key, default_value=val, min_val=-1e5, max_val=1e5, decimals=4)
+            elif info['type'] == 'integer':
+                w = IntegerInputField(key, default_value=val, min_val=0, max_val=100000)
+            elif info['type'] == 'boolean':
+                w = CheckboxField(key, default_checked=bool(val))
+            else:
+                continue
+            self.pop_content_layout.addWidget(w)
+            self.current_parameter_widgets[key] = w
+        self.pop_content_layout.addStretch()
+
+    def on_model_changed_in_editor(self, new_model):
+        if self.current_pop_idx is None:
+            return
+        defaults = {k: v['default'] for k, v in self.all_models[new_model].items()}
+        self.current_node.parameters["populations"][self.current_pop_idx].update({
+            "model": new_model,
+            "params": defaults
+        })
+        self.build_param_editor(new_model, defaults)
 
     def save_population_changes(self):
-        if not self.current_node or self.current_pop_idx is None: return
-        
-        # Werte aus Widgets lesen
-        new_params = {}
-        for key, widget in self.current_parameter_widgets.items():
-            new_params[key] = widget.get_value()
-        
-        # In Node speichern
+        if not self.current_node or self.current_pop_idx is None:
+            return
+        new_params = {k: w.get_value() for k, w in self.current_parameter_widgets.items()}
         self.current_node.parameters["populations"][self.current_pop_idx]["params"] = new_params
-        print(f"Updated params for Node {self.current_node.id}, Pop {self.current_pop_idx}")
-        
-        # Hinweis: NEST Parameter müssen oft via SetStatus gesetzt werden.
-        # Wenn der Node schon "gebaut" ist (population list existiert),
-        # müssten wir hier eigentlich nest.SetStatus aufrufen.
-        # Fürs erste aktualisieren wir nur das Config-Dict für den nächsten Rebuild.
+        print(f"Population {self.current_pop_idx} von Node {self.current_node.id} gespeichert.")
 
     def apply_node_changes(self):
-        """Aktualisiert Position/Größe und baut den Node neu"""
-        if not self.current_node: return
-        
-        # 1. Update Parameters
+        if not self.current_node:
+            return
+
+        # Alte NEST-Neuronen löschen
+        if hasattr(self.current_node, "population") and self.current_node.population:
+            for pop in self.current_node.population:
+                if pop:
+                    try:
+                        nest.Delete(pop)
+                    except:
+                        pass
+
+        # Neue Werte setzen
         new_count = self.node_neuron_count.get_value()
         new_pos = np.array([
             self.node_pos_x.get_value(),
             self.node_pos_y.get_value(),
             self.node_pos_z.get_value()
         ])
-        
+
         self.current_node.parameters["neuron_count"] = new_count
-        self.current_node.parameters["m"] = new_pos
-        
-        # Update Center of Mass im Objekt selbst
+        self.current_node.parameters["m"] = new_pos.tolist()
         self.current_node.center_of_mass = new_pos
-        
-        # 2. Grid neu berechnen (Logik aus MainWindow.process_created_graph)
+
+        # Grid neu berechnen
         sparsity = self.current_node.parameters.get("sparsity_factor", 0.8)
-        needed_volume = new_count / (1.0 - sparsity)
-        side_length = int(np.ceil(needed_volume ** (1/3))) + 2
-        
-        self.current_node.parameters["grid_size"] = [side_length, side_length, side_length]
-        
-        print(f"Rebuilding Node {self.current_node.id} at {new_pos} with Grid {side_length}^3...")
-        
-        # 3. Rebuild Action
-        try:
-            # build() führt WFC aus und setzt self.positions neu
-            self.current_node.build() 
-            # populate_node() erstellt NEST Nodes (Achtung: Alte NEST Nodes werden nicht automatisch gelöscht!)
-            # TODO: Alte NEST IDs sauber aufräumen falls nötig
-            self.current_node.populate_node()
-            
-            print("Rebuild successful.")
-            
-            # 4. Signal an Mainwindow zum Neuzeichnen
-            self.graphUpdated.emit()
-            
-        except Exception as e:
-            print(f"Error rebuilding node: {e}")
+        volume = new_count / (1.0 - sparsity)
+        side = int(np.ceil(volume ** (1/3))) + 2
+        self.current_node.parameters["grid_size"] = [side, side, side]
+
+        # Rebuild
+        self.current_node.build()
+        self.current_node.populate_node()
+
+        self.graphUpdated.emit()
+        print(f"Node {self.current_node.id} erfolgreich neu gebaut → {new_count} Neuronen")
+
+
 
 class GraphOverviewTool(QWidget):
     # Signal sendet das Graph-Objekt, wenn darauf geklickt wird
