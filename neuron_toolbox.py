@@ -10,14 +10,24 @@ from numpy import diag, array, zeros
 import random
 import numpy as np
 import numpy as np, heapq, random
+import pyvista as pv
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from mpl_toolkits.mplot3d import Axes3D
+from neuron_toolbox import *
+from dataclasses import dataclass, asdict
+import json
+import copy
+import random
+from typing import List, Tuple, Callable, Optional, Dict, Any
 
 SCALING_FACTOR = 1.0
-k= 10.0 # for default
+k= 10.0
 m= np.zeros(3)
 dt = 0.01
 positions=[np.zeros(3)]
-
-gsl = 16 #grid side length
+gsl = 8
 
 
 area2models = {
@@ -35,10 +45,6 @@ area2models = {
     "V6": ["iaf_cond_alpha","aeif_cond_alpha","hh_psc_alpha","iaf_psc_delta","iaf_cond_alpha","iaf_cond_beta_gap"]
     
 }
-
-
-
-
 
 ### Helper functions
 
@@ -164,199 +170,6 @@ def plot_point_clusters_normalized(
     plt.show()
 
 # may be usefull later, I dunno.
-
-def make_div_curl(f1, f2, f3, h = 1e-5):
-
-    def div(x, y, z):
-        df1dx = (f1(x + h, y, z) - f1(x - h, y, z)) / (2*h)
-        df2dy = (f2(x, y + h, z) - f2(x, y - h, z)) / (2*h)
-        df3dz = (f3(x, y, z + h) - f3(x, y, z - h)) / (2*h)
-        return df1dx + df2dy + df3dz
-
-    def curl(x, y, z):
-        df3dy = (f3(x, y + h, z) - f3(x, y - h, z)) / (2*h)
-        df2dz = (f2(x, y, z + h) - f2(x, y, z - h)) / (2*h)
-        c1 = df3dy - df2dz
-
-        df1dz = (f1(x, y, z + h) - f1(x, y, z - h)) / (2*h)
-        df3dx = (f3(x + h, y, z) - f3(x - h, y, z)) / (2*h)
-        c2 = df1dz - df3dx
-
-        df2dx = (f2(x + h, y, z) - f2(x - h, y, z)) / (2*h)
-        df1dy = (f1(x, y + h, z) - f1(x, y - h, z)) / (2*h)
-        c3 = df2dx - df1dy
-
-        return np.array([c1, c2, c3])
-
-    return div, curl
-
-
-###### GEOMETRIC NUMPY FUNCTIONS ######
-
-
-def circle3d(
-    n=10, 
-    r=1.0, 
-    theta=0, 
-    phi=0, 
-    m=(0,0,0), 
-    name="Circle", 
-    plot=False
-    ):
-    """
-    Generate points on a rotated and translated 3D circle.
-
-    Args:
-        n (int): Number of points to sample along the circle.
-        r (float): Radius of the circle.
-        theta (float): Rotation angle around the X-axis, in degrees.
-        phi (float):   Rotation angle around the Y-axis, in degrees.
-        m (tuple):     3-tuple giving the translation offset (x, y, z).
-        name (str):    Title for the plot if `plot=True`.
-
-    Returns:
-        np.ndarray: Array of shape (n, 3) containing the (x, y, z) coordinates.
-    """
-
-    
-    X_angles = np.linspace(0, 2*np.pi, n, endpoint=False)
-    x_coords = SCALING_FACTOR * r * np.cos(X_angles)
-    y_coords = SCALING_FACTOR * r * np.sin(X_angles)
-    z_coords = np.zeros(n)
-
-    theta = np.deg2rad(theta)
-    phi   = np.deg2rad(phi)
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(theta), -np.sin(theta)],
-                   [0, np.sin(theta),  np.cos(theta)]])
-    Ry = np.array([[ np.cos(phi), 0, np.sin(phi)],
-                   [0,           1, 0         ],
-                   [-np.sin(phi),0, np.cos(phi)]])
-    rotM = Ry @ Rx
-
-    pts = np.vstack((x_coords, y_coords, z_coords)).T
-    pts = pts @ rotM
-    pts = pts + np.array(m)
-
-    if plot:
-        fig = plt.figure()
-        ax  = fig.add_subplot(111, projection='3d')
-        ax.plot(pts[:,0], pts[:,1], pts[:,2], lw=2)
-        max_val = np.max(np.abs(pts))
-        ax.set_xlim(-max_val*1.2, max_val*1.2)
-        ax.set_ylim(-max_val*1.2, max_val*1.2)
-        ax.set_zlim(-max_val*1.2, max_val*1.2)
-        ax.set_title(name)
-        ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
-        plt.show()
-
-    return pts
-
-
-def create_cone(
-    m=np.zeros(3, dtype=np.float32),
-    n=1500,
-    inner_radius=0.1,
-    outer_radius=0.2,
-    height=0.6,
-    rot_theta=0.0,
-    rot_phi=0.0,
-    plot=False
-    ):
-    #~*~*~*~* START *~*~*~*~#
-    """
-    Generate random points within a truncated cone, apply rotation and translation.
-
-    Args:
-        m (np.ndarray): 3-element center offset (x, y, z) of the cone base.
-        n (int): Number of points to generate.
-        inner_radius (float): Radius of the top (smaller) circle.
-        outer_radius (float): Radius of the bottom (larger) circle.
-        height (float): Vertical height of the cone.
-        rot_theta (float): Rotation angle around the X-axis in degrees.
-        rot_phi (float): Rotation angle around the Y-axis in degrees.
-        plot (bool): If True, display a 3D scatter plot of generated points.
-
-    Returns:
-        np.ndarray: Array of shape (n, 3) containing the (x, y, z) coordinates of points.
-    """
-    
-    #~*~*~*~* END *~*~*~*~#
-    
-
-    inner_r = inner_radius * SCALING_FACTOR  
-    outer_r = outer_radius * SCALING_FACTOR
-    h = height * SCALING_FACTOR
-    
-    ang = np.random.uniform(0, 2*np.pi, n)
-    z = np.random.uniform(m[2], m[2] + h, n)
-    
-    r = inner_r + (outer_r - inner_r) * ((z - m[2]) / h)
-    
-    x = m[0] + r * np.cos(ang)
-    y = m[1] + r * np.sin(ang)
-    
-    # randomized on the surface.
-    th = np.deg2rad(rot_theta)
-    ph = np.deg2rad(rot_phi)
-    
-    Rx = np.array([[1,         0,          0       ],
-                   [0, np.cos(th), -np.sin(th)],
-                   [0, np.sin(th),  np.cos(th)]])
-    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
-                   [          0, 1,          0],
-                   [-np.sin(ph), 0, np.cos(ph)]])
-    rotM = Ry @ Rx
-    
-    points = np.column_stack((x, y, z))
-    points = points @ rotM.T
-    
-    if plot:
-        from mpl_toolkits.mplot3d import Axes3D 
-        import matplotlib.pyplot as plt
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.scatter(points[:,0], points[:,1], points[:,2], s=2)
-        ax.set_xlabel('X [mm]')
-        ax.set_ylabel('Y [mm]')
-        ax.set_zlabel('Z [mm]')
-        plt.show()
-    
-    return points
-
-
-
-def blob_positions(
-    n = 10,
-    m = np.zeros(3),
-    r = 1.0,
-    scaling_factor = 1.0,
-    plot=False,
-    name="Blob"
-    ):
-
-
-    pos_norm = np.random.normal(size=(n, 3))
-    pos_norm /= np.linalg.norm(pos_norm, axis=1, keepdims=True)
-    
-    u = np.random.rand(n, 1)
-    r_scaling = r * u**(1/3)
-    
-    # FIX: Erst skalieren, dann verschieben
-    pts = m + pos_norm * r_scaling * scaling_factor
-
-    if plot:
-        fig = plt.figure()
-        ax  = fig.add_subplot(111, projection='3d')
-
-        ax.scatter(pts[:,0], pts[:,1], pts[:,2])
-
-        lim = 1.1*np.abs(pts).max()
-        ax.set(xlim=(-lim, lim), ylim=(-lim, lim), zlim=(-lim, lim),
-               title=name, xlabel='X', ylabel='Y', zlabel='Z')
-        plt.show()
-    return pts
-
 def set_axes_equal(ax):
         #~*~*~*~* START  *~*~*~*~#
 
@@ -385,578 +198,177 @@ def set_axes_equal(ax):
     ax.set_ylim3d(y_middle - max_range/2, y_middle + max_range/2)
     ax.set_zlim3d(z_middle - max_range/2, z_middle + max_range/2)
 
-    
-    
 
-def create_Grid(m=np.zeros(3, dtype=np.float32),
-                grid_size_list=[28, 15, 10],
-                rot_theta=0.0, 
-                rot_phi=0.0, 
-                plot=False):
-        #~*~*~*~* START  *~*~*~*~#
+    
+def make_div_curl(f1, f2, f3, h = 1e-5):
 
+    def div(x, y, z):
+        df1dx = (f1(x + h, y, z) - f1(x - h, y, z)) / (2*h)
+        df2dy = (f2(x, y + h, z) - f2(x, y - h, z)) / (2*h)
+        df3dz = (f3(x, y, z + h) - f3(x, y, z - h)) / (2*h)
+        return df1dx + df2dy + df3dz
+
+    def curl(x, y, z):
+        df3dy = (f3(x, y + h, z) - f3(x, y - h, z)) / (2*h)
+        df2dz = (f2(x, y, z + h) - f2(x, y, z - h)) / (2*h)
+        c1 = df3dy - df2dz
+
+        df1dz = (f1(x, y, z + h) - f1(x, y, z - h)) / (2*h)
+        df3dx = (f3(x + h, y, z) - f3(x - h, y, z)) / (2*h)
+        c2 = df1dz - df3dx
+
+        df2dx = (f2(x + h, y, z) - f2(x - h, y, z)) / (2*h)
+        df1dy = (f1(x, y + h, z) - f1(x, y - h, z)) / (2*h)
+        c3 = df2dx - df1dy
+
+        return np.array([c1, c2, c3])
+
+    return div, curl
+
+
+def generate_direction_similarity_matrix(
+    pop1=None,
+    pop2=None,
+    vecfield1=(
+        lambda x, y, z: 1.5 * x ** 2 + y + z,
+        lambda x, y, z: 1.3 * x ** 3 - y + z,
+        lambda x, y, z: 1.7 * x ** 2 + y - z,
+    ),
+    vecfield2=(
+        lambda x, y, z: 4.7 * x - np.sin(y),
+        lambda x, y, z: -1.9 * x ** 2 - y + 2,
+        lambda x, y, z: 1.7 * y ** 2 + x - y,
+    ),
+    eps: float = 1e-12,
+    plot: bool = False,
+    cmap: str = "plasma",
+    arrow_length: float = 0.2,
+):
     """
-    Generate a stack of 2D grid layers in 3D space and optionally plot them.
+    Compute a cosine-similarity weight matrix W between two 3-D vector fields.
+    The fields are evaluated on point clouds *pop1* (sources) and *pop2*
+    (targets).  If either population is *None*, a default 4 × 4 × 4 grid is
+    generated and transformed with hard-coded parameters.
 
-    Each layer is a k×k grid of points lying in a plane at increasing offsets
-    along the first coordinate. The entire stack is then rotated and translated.
+    Parameters
+    ----------
+    pop1, pop2 : np.ndarray | None
+        Arrays with shape (N, 3) and (M, 3) giving the coordinates of the
+        source and target neurons.  When *None*, a default grid is built via
+        ``generate_cube`` and ``transform_points`` (see example).
+    vecfield1, vecfield2 : tuple(callable, callable, callable)
+        Component functions (f₁, f₂, f₃) mapping (x, y, z) → ℝ for each field.
+    eps : float
+        Floor for vector norms to avoid division by zero.
+    plot : bool
+        Forwarded to ``field`` to display 3-D quiver plots.
+    cmap : str
+        Matplotlib colour map used when *plot=True*.
+    arrow_length : float
+        Arrow scale in the quiver plots.
 
-    Args:
-        m (np.ndarray):       3-vector translation offset applied after rotation.
-        grid_size_list (list): List of integers [d1, d2, d3,...], where each
-                               entry di defines the grid resolution (di×di)
-                               for the layer at depth index i.
-        rot_theta (float):    Rotation angle around the X-axis in degrees.
-        rot_phi (float):      Rotation angle around the Y-axis in degrees.
-        plot (bool):          If True, display a 3D scatter of all layers.
+    Returns
+    -------
+    numpy.ndarray
+        Weight matrix W with shape (len(pop2), len(pop1)); entries are cosine
+        similarities in [-1, 1].
 
-    Returns:
-        list of np.ndarray:   A list where each element is an (di*di, 3) array
-                              of 3D coordinates for layer i.
+    Example
+    -------
+    >>> W = generate_direction_similarity_matrix()        # defaults
+    >>> nest.Connect(pop1_nodes, pop2_nodes,
+    ...              syn_spec={'weight': W.astype(np.float32)})
     """
-        #~*~*~*~* END  *~*~*~*~#
-
-    
-    th = np.deg2rad(rot_theta)
-    ph = np.deg2rad(rot_phi)
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(th), -np.sin(th)],
-                   [0, np.sin(th),  np.cos(th)]])
-    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
-                   [          0, 1,          0],
-                   [-np.sin(ph), 0, np.cos(ph)]])
-    rotM = Ry @ Rx
-
-    node_layers = []
-    for d, k in enumerate(grid_size_list):
-        pts = np.array([[d + m[0], w + m[1], n + m[2]]
-                        for w in range(k) for n in range(k)])
-        node_layers.append(pts @ rotM.T)
-
-    if plot:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        for layer_pts in node_layers:
-            ax.scatter(layer_pts[:, 0], layer_pts[:, 1], layer_pts[:, 2], s=1)
-        ax.set_xlabel('X [mm]')
-        ax.set_ylabel('Y [mm]')
-        ax.set_zlabel('Z [mm]')
-        try:
-            ax.set_box_aspect((1,1,1))
-        except AttributeError:
-            set_axes_equal(ax)
-        plt.show()
-
-    return node_layers
-
-def create_Grid_z(m=np.zeros(3, dtype=np.float32),
-                grid_size_list=[28, 15, 10],
-                rot_theta=0.0, 
-                rot_phi=0.0, 
-                plot=False):
-    
-    th = np.deg2rad(rot_theta)
-    ph = np.deg2rad(rot_phi)
-
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(th), -np.sin(th)],
-                   [0, np.sin(th),  np.cos(th)]])
-
-    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
-                   [          0, 1,          0],
-                   [-np.sin(ph), 0, np.cos(ph)]])
-
-    rotM = Ry @ Rx
-
-    node_layers = []
-    for d, k in enumerate(grid_size_list):
-        pts = np.array([[w, n, d] for w in range(k) for n in range(k)])  # jetzt XY-Gitter in Z-Tiefe d
-        pts = pts @ rotM.T + m
-        node_layers.append(pts)
-
-    if plot:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        for layer_pts in node_layers:
-            ax.scatter(layer_pts[:, 0], layer_pts[:, 1], layer_pts[:, 2], s=1)
-        ax.set_xlabel('X [mm]')
-        ax.set_ylabel('Y [mm]')
-        ax.set_zlabel('Z [mm]')
-        try:
-            ax.set_box_aspect((1,1,1))
-        except AttributeError:
-            set_axes_equal(ax)
-        plt.show()
-
-    return node_layers
-
-
-# can use a mask.
-# better for more uniformly sized clusters. here even low prob. types form clusters approx this size. 
-# they stay just rare according to their prob. or so I strongly assume. because of the nature of this algorithm.
-# this holds for < (space_dim**space_dim - 1 - log(base=space_dim,x=( space_dim**space_dim))) = 23 types (in 3D) 
-# this pattern should break because the clusters form from the pigion hole principle. or so I imagine
-def wave_collapse_old(mask=None, 
-                  dims=(2,2,2), 
-                  sparse_holes = 0,
-                  type_array=[0,1],
-                  probability_vector=np.array([0.3,0.7]), 
-                  start_pos=np.zeros(3),
-                  sparsity_factor=0.7,
-                seed=42):
-    
-    """
-    Perform a 3D "wave function collapse" to assign discrete labels to grid cells, 
-    forming clusters based on local entropy and neighbor constraints.
-
-    Parameters:
-        mask (np.ndarray or None): Initial occupancy mask of shape dims. 
-            0 = uncollapsed, -1 = blocked. If None, a zero mask is created.
-        dims (tuple[int]): Grid dimensions if mask is None.
-        sparse_holes (int): Number of random positions to block (-1) for holes.
-        type_array (list[int]): List of possible labels.
-        probability_vector (np.ndarray): Initial probability for each label.
-        start_pos (array-like): Starting coordinate to seed collapse.
-        sparsity_factor (float): Controls influence of existing neighbor labels.
-        seed (int): Base seed for random number generators.
-
-    Returns:
-        np.ndarray: Array of shape dims with assigned labels for each cell.
-    """
-    
-    
-    
-    # Initialize random seeds for reproducibility
-    random.seed(seed+3)
-    np.random.seed(seed+7)
-
-    # Normalize probability vector
-    probability_vector = np.asarray(probability_vector, dtype=float)
-    probability_vector /= probability_vector.sum()
-    
-    # Create mask if not provided: 0=uncollapsed, -1=blocked
-    if mask is None:
-        mask = np.zeros(dims, dtype=np.int32)
-    dims=mask.shape
-    
-    # High initial entropy for all cells
-    entropy_matrix = np.full(shape=dims, fill_value=1000.0, dtype=np.float32)
-    
-    # Store collapsed labels; -1 indicates not yet collapsed
-    collapsed_nodes = np.full(shape=dims, fill_value=-1, dtype=np.int32)
-    
-    
-    D0, D1, D2 = mask.shape
-    
-    
-    # Randomly block positions to create holes if desired
-    if(sparse_holes!=0):
-        for _ in range(0,sparse_holes,1):
-            x = random.randint(0,D0-1)
-            y = random.randint(0,D1-1)
-            z = random.randint(0,D2-1)
-            mask[x][y][z] = -1
-        
-    def check_neighbors(i, j, k):
-        undef_neighbors = []
-        def_neighbors = []
-        """
-        Return lists of uncollapsed and collapsed neighbor coordinates in all directions.
-        """ 
-        shifts = [(dx, dy, dz)         # Examine all 26 neighbors in 3D
-              for dx in (-1, 0, 1) 
-              for dy in (-1, 0, 1) 
-              for dz in (-1, 0, 1) 
-              if not (dx == dy == dz == 0)]        
-        for di, dj, dk in shifts:
-            ni, nj, nk = i+di, j+dj, k+dk
-            if 0 <= ni < D0 and 0 <= nj < D1 and 0 <= nk < D2:
-                if mask[ni, nj, nk] == 0:
-                    undef_neighbors.append((ni, nj, nk))
-                elif mask[ni, nj, nk] == 1:
-                    def_neighbors.append((ni, nj, nk))
-                else:
-                    continue  # ignore blocked cells
-
-                    
-        return undef_neighbors, def_neighbors
-    
-
-    def entropy(p, base=None):
-        """Compute Shannon entropy of probability vector p."""
-        p = np.asarray(p, dtype=float)
-        p += 0.0001
-        p/=np.sum(p)# p > 0
-        log_p = np.log(p) if base is None else np.log(p) / np.log(base)
-        return -np.sum(p * log_p)
-    
-    def collapse(i, j, k):        
-        """
-        Collapse the cell at (i,j,k) by sampling a label based on local probabilities and neighbor influence.
-        """
-        if(mask[i][j][k]):#if already collapsed
-            pass #TODO for invariants
-        
-        # Copy and adjust probabilities based on collapsed neighbors
-
-        
-        l = len(probability_vector)
-        l1 = int((1-sparsity_factor)*l) 
-        # Boost probability for each neighbor label
-
-        list_of_uncollapsed_neighbors, list_of_collapsed_neighbors = check_neighbors(i,j,k)
-        
-        neighbor_labels = []
-        for x,y,z in list_of_collapsed_neighbors:
-            neighbor_labels.append(collapsed_nodes[x][y][z])
-        
-        #possible_values = np.setdiff1d(type_array,neighbor_labels) #regel zu hart für Klusterbildung
-        
-        private_probability_vector = probability_vector.copy()
-
-        #######################################################################
-        original_pv = private_probability_vector.copy()
-        #######################################################################
-        
-        for m in neighbor_labels:# label gleichzeitig index für probability vektor
-            # private_probability_vector anpassen
-            p = private_probability_vector[m] / (l + l1)
-            p_self = l1 * p
-            p_rest = p
-            p_redistribution = np.full(shape=(l,),fill_value=p_rest)
-            p_redistribution[m] += p_self
-            private_probability_vector[m] = 0.0 #setze wert im original zurück
-            private_probability_vector+=p_redistribution
-        private_probability_vector/=private_probability_vector.sum()#danach um sequenziellen Einfluss zu minimieren
-        private_probability_vector=(private_probability_vector+2*original_pv)/3############################################
-        #print("#######",np.sum(private_probability_vector))#just a check
-        choice = np.random.choice(type_array,p=private_probability_vector)#damit kein ablaufmuster entsteht
-        collapsed_nodes[i][j][k] = choice
-        mask[i][j][k]=1
-        entropy_matrix[i][j][k] = 0.0
-        # Update entropy for uncollapsed neighbors
-
-        #after collapsed
-        # Anpassung der Entropie der Nachbarn
-
-        for ni, nj, nk in list_of_uncollapsed_neighbors:
-            _, coll_nbrs = check_neighbors(ni, nj, nk)
-            neigh_labels = [collapsed_nodes[x,y,z] for x,y,z in coll_nbrs]
-
-            allowed = np.setdiff1d(type_array, neigh_labels)
-
-            p = np.zeros_like(probability_vector, dtype=float)
-            idxs = [type_array.index(a) for a in allowed]
-            p[idxs] = probability_vector[idxs]
-            if p.sum() > 0:
-                p /= p.sum()
-            else:
-                p[:] = 1 / len(p)
-            entropy_matrix[ni, nj, nk] = entropy(p, base=2)
-        
-            
-    def _next():
-        """Select the next uncollapsed cell with minimal non-zero entropy."""
-        candidates = np.argwhere(mask == 0)
-        if candidates.size == 0:
-            return None
-        valid = [(tuple(idx), entropy_matrix[tuple(idx)]) 
-                 for idx in candidates 
-                 if entropy_matrix[tuple(idx)] > 0]
-        if not valid:
-            return None
-        next_idx = min(valid, key=lambda x: x[1])[0]
-        return next_idx
-    
-    # Main collapse loop
-    while True:
-        nxt = _next()
-        if nxt is None:
-            break
-        collapse(*nxt)
-
-    return np.array(collapsed_nodes)#, entropy_matrix
-
-
-# newer version, much faster on big clusters but doesnt use entropy to determine the next cell to collapse.
-# chooses randomly instead.
-# für minikolonne mit >80–100 Neuronen und makrokolonne mit 4000–12000 Neuronen
-
-
-
-def wave_collapse(dims, type_array, probability_vector,
-                       sparsity_factor=.7, seed=0, sparse_holes=0):
-    NEIGHBOR_OFFSETS = np.array([(dx,dy,dz)
-      for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1)
-      if (dx,dy,dz)!=(0,0,0)], dtype=np.int8)
-    random.seed(seed+3); np.random.seed(seed+7)
-    probability_vector = np.asarray(probability_vector, float); probability_vector /= probability_vector.sum()
-    mask  = np.zeros(dims, np.int8)
-    if sparse_holes:                       
-        idx = np.random.choice(mask.size, sparse_holes, replace=False)
-        mask.ravel()[idx] = -1
-
-    collapsed = -np.ones(dims, np.int16)
-    H = np.full(dims, 999., np.float32)
-
-    heap = [(H[i,j,k],i,j,k) for i in range(dims[0])
-                               for j in range(dims[1])
-                               for k in range(dims[2]) if mask[i,j,k]==0]
-    heapq.heapify(heap)
-
-    while heap:
-        h,i,j,k = heapq.heappop(heap)
-        if mask[i,j,k]:                    
-            continue
-
-        neigh = NEIGHBOR_OFFSETS + (i,j,k)
-        good  = ((neigh[:,0] >= 0) & (neigh[:,0] < dims[0]) &
-                 (neigh[:,1] >= 0) & (neigh[:,1] < dims[1]) &
-                 (neigh[:,2] >= 0) & (neigh[:,2] < dims[2]))
-        neigh = neigh[good]
-        labels = collapsed[tuple(neigh.T)]
-        labels = labels[labels >= 0]              
-
-        if labels.size:
-            counts = np.bincount(labels, minlength=len(type_array))
-            boost  = counts * (1-sparsity_factor)/len(type_array)
-            p = probability_vector + boost
-            p /= p.sum()
-        else:
-            p = probability_vector
-
-        choice = np.random.choice(type_array, p=p)
-        collapsed[i,j,k] = choice
-        mask[i,j,k] = 1
-        H[i,j,k] = 0.0
-
-        for ni,nj,nk in neigh:
-            if mask[ni,nj,nk]==0:
-                H[ni,nj,nk] = 1.0  
-                heapq.heappush(heap,(H[ni,nj,nk],ni,nj,nk))
-
-    return collapsed
-
-# Runtime is of the old algorithm is roughly quadratic–cubic, but it’s intended to create patches for micro-clusters.
-# A grid of size 10×20×20 already corresponds to about 4K neurons.
-# sure it takes time, but if you want to have "random structures of higher quality" - whatever that means -
-# then you should create miniclusters with old wfc and maybe patch them together. because the runtime here
-# is horrible.
-
-
-# Each natural number in the grid will eventually serve as a class label for neurons.
-# That mapping will be implemented in the corresponding function.
-
-# -1 indicates a blocked cell where no neuron can be placed.
-#  0 indicates an available cell that could hold a neuron but hasn’t been assigned yet.
-#    (You could choose to assign a neuron to 0 if desired.)
-# This scheme reserves space in the grid for later hypothetical neurogeneration,
-# ensuring that these slots persist under any transformations.
-
-# Next step: transform the grid and then convert each label into actual neuron placements.
-
-# You can clearly see how “channels” of like-typed neurons emerge.
-# It works exactly as intended!
-
-def generate_qube(grid_size_list=(10, 10, 10)):
-    """
-    Generate a 3D grid of points within a cube from -1 to 1 in each axis.
-
-    Args:
-        grid_size_list (tuple of int): Number of samples along each axis (nx, ny, nz).
-
-    Returns:
-        np.ndarray: An array of shape (nx*ny*nz, 3) containing the (x, y, z) coordinates.
-    """
-    nx, ny, nz = grid_size_list
-    xs = np.linspace(-1, 1, nx)
-    ys = np.linspace(-1, 1, ny)
-    zs = np.linspace(-1, 1, nz)
-    X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
-    return np.vstack((X.ravel(), Y.ravel(), Z.ravel())).T 
-
-def transform_points(
-    points,
-    m = np.zeros(3, dtype=float),
-    rot_theta = 0.0,
-    rot_phi = 0.0,
-    transform_matrix = np.eye(3),
-    plot = False
-    ):
-    """
-    Apply rotation, linear transformation, and translation to a set of 3D points.
-
-    Args:
-        points (np.ndarray): Array of shape (N,3) containing the original points.
-        m (np.ndarray):      Translation offset as a 3-vector.
-        rot_theta (float):   Rotation angle around the X-axis in degrees.
-        rot_phi (float):     Rotation angle around the Y-axis in degrees.
-        transform_matrix (np.ndarray): 3×3 matrix to apply after rotation.
-        plot (bool):         If True, display a 3D scatter of the transformed points.
-
-    Returns:
-        np.ndarray: Array of shape (N,3) with transformed coordinates.
-    """
-    pts = np.asarray(points, dtype=float)
-    
-    th = np.deg2rad(rot_theta)
-    ph = np.deg2rad(rot_phi)
-    Rx = np.array([[1,          0,           0],
-                   [0, np.cos(th), -np.sin(th)],
-                   [0, np.sin(th),  np.cos(th)]])
-    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
-                   [          0, 1,          0],
-                   [-np.sin(ph), 0, np.cos(ph)]])
-    rotM = Ry @ Rx
-    
-    rotated = (rotM @ pts.T).T
-            
-    transformed = (transform_matrix @ rotated.T).T
-    
-    result = transformed + np.asarray(m, dtype=float)
-    
-    if plot:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.scatter(result[:,0], result[:,1], result[:,2], s=2)
-        ax.set_xlabel('X [mm]')
-        ax.set_ylabel('Y [mm]')
-        ax.set_zlabel('Z [mm]')
-        plt.show()
-    
-    return result
-
-def field(
-        positions: np.ndarray,
-        f1 = lambda x, y, z: np.zeros_like(x),
-        f2 = lambda x, y, z: np.zeros_like(x),
-        f3 = lambda x, y, z: np.zeros_like(x),
-        plot=False,    
-        normalize = False,
-        color_by_length = False,
-        cmap = 'viridis',
-        arrow_length = 0.1
-    ):
-    """
-    Compute a 3D vector field at given positions and optionally visualize it.
-
-    Args:
-        positions (np.ndarray): An (N,3) array of (x,y,z) coordinates.
-        f1, f2, f3 (callable):  Functions f1(x,y,z), f2(x,y,z), f3(x,y,z) defining
-                                the three vector components at each point.
-        plot (bool):           If True, display a 3D quiver plot of the field.
-        normalize (bool):      If True, normalize each vector to unit length before plotting.
-        color_by_length (bool): If True, color arrows by their original lengths.
-        cmap (str):             Name of the Matplotlib colormap to use when coloring.
-        arrow_length (float):   Scaling factor for arrow lengths in the plot.
-
-    Returns:
-        np.ndarray: An (N,3) array of the computed vectors [v1, v2, v3].
-    """
-    
-    x = positions[:, 0]
-    y = positions[:, 1]
-    z = positions[:, 2]
-
-    v1 = f1(x, y, z)
-    v2 = f2(x, y, z)
-    v3 = f3(x, y, z)
-    vectors = np.column_stack((v1, v2, v3))
-    if plot:
-        lengths = np.linalg.norm(vectors, axis=1)
-        U, V, W = v1.copy(), v2.copy(), v3.copy()
-        if normalize:
-            nonzero = lengths > 0
-            U[nonzero] /= lengths[nonzero]
-            V[nonzero] /= lengths[nonzero]
-            W[nonzero] /= lengths[nonzero]
-            U *= arrow_length
-            V *= arrow_length
-            W *= arrow_length
-        else:
-            U *= arrow_length
-            V *= arrow_length
-            W *= arrow_length
-
-        color_args = {}
-        if color_by_length:
-            normed = (lengths - lengths.min()) / (lengths.ptp() if lengths.ptp()>0 else 1)
-            cmap_obj = plt.get_cmap(cmap)
-            colors = cmap_obj(normed)
-            color_args['color'] = colors
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.quiver(
-            x, y, z,
-            U, V, W,
-            **color_args,
-            length=1.0,
-            normalize=False
+    # ---------------------------------------------------------------------
+    if pop1 is None:
+        grid = generate_cube((4, 4, 4))
+        pop1 = transform_points(
+            grid, [1, 2, 3], 120, 120, transform_matrix=np.eye(3), plot=plot
         )
-        ax.set_xlabel('X [mm]')
-        ax.set_ylabel('Y [mm]')
-        ax.set_zlabel('Z [mm]')
-        plt.show()
-    return vectors
+    if pop2 is None:
+        grid = generate_cube((4, 4, 4))
+        pop2 = transform_points(
+            grid, [3, 3, 1], 24, 77, transform_matrix=np.eye(3), plot=plot
+        )
+
+    f1v1, f2v1, f3v1 = vecfield1
+    f1v2, f2v2, f3v2 = vecfield2
+
+    vec1 = field(pop1, plot=plot, normalize=True, cmap=cmap,
+                 arrow_length=arrow_length, f1=f1v1, f2=f2v1, f3=f3v1)
+    vec2 = field(pop2, plot=plot, normalize=True, cmap=cmap,
+                 arrow_length=arrow_length, f1=f1v2, f2=f2v2, f3=f3v2)
+
+    u1 = vec1 / np.clip(np.linalg.norm(vec1, axis=1, keepdims=True), eps, None)
+    u2 = vec2 / np.clip(np.linalg.norm(vec2, axis=1, keepdims=True), eps, None)
+
+    return u2 @ u1.T
 
 
-def generate_torus(
-        R = 1.0,
-        r = 0.3,
-        grid_size_list = (100, 40),
-    rot_theta=0,
-    rot_phi=0,
-    plot=False
-    ):
+def generate_direction_similarity_matrix2(
+    grid_shape=(4, 4, 4),
+    transform1=None,
+    transform2=None,
+    stretch1=(1, 1, 1),
+    stretch2=(1, 1, 1),
+    vecfield1=(
+        lambda x, y, z: 1.5 * x ** 2 + y + z,
+        lambda x, y, z: 1.3 * x ** 3 - y + z,
+        lambda x, y, z: 1.7 * x ** 2 + y - z,
+    ),
+    vecfield2=(
+        lambda x, y, z: 4.7 * x - np.sin(y),
+        lambda x, y, z: -1.9 * x ** 2 - y + 2,
+        lambda x, y, z: 1.7 * y ** 2 + x - y,
+    ),
+    eps=1e-12,
+    plot=False,
+    cmap="plasma",
+    arrow_length=0.2,
+):
     """
-    Generate a set of 3-D points on the surface of a torus.
-
-    The torus lies in the XY-plane, centred at the origin.  The major
-    radius R is the distance from the origin to the centre of the tube,
-    the minor radius r is the tube radius.
-
-    Args:
-        R (float):            Major radius (distance from origin to tube centre).
-        r (float):            Minor radius (tube radius).
-        grid_size_list (tuple of int):
-                              Number of samples along the two angular
-                              coordinates (n_theta, n_phi).  Higher numbers
-                              produce a denser point cloud.
-
-    Returns:
-        np.ndarray: Array of shape (n_theta * n_phi, 3) with (x, y, z)
-                    coordinates on the torus surface.
+    Generate a cosine-similarity weight matrix between two 3-D vector fields
+    evaluated on two separately transformed point grids.  See full docstring
+    below for details.
     """
-    n_theta, n_phi = grid_size_list
+    if transform1 is None:
+        transform1 = dict(m=[1, 2, 3], rot_theta=120, rot_phi=120)
+    if transform2 is None:
+        transform2 = dict(m=[3, 3, 1], rot_theta=24, rot_phi=77)
 
-    
-    theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)  
-    phi   = np.linspace(0.0, 2.0 * np.pi, n_phi,   endpoint=False)  
-
-    a, b = np.meshgrid(theta, phi, indexing='ij')  
-
-    x = (R + r * np.cos(b)) * np.cos(a)
-    y = (R + r * np.cos(b)) * np.sin(a)
-    z =  r * np.sin(b)
-
-    return transform_points(np.vstack((x.ravel(), y.ravel(), z.ravel())).T,
-                            rot_theta=rot_theta, rot_phi=rot_phi, plot=plot)
-
-
-def field_flow_iteration(
-                        positions=np.zeros(3),  # ← Plural
-                        f1 = lambda x, y, z: np.zeros_like(x),
-                        f2 = lambda x, y, z: np.zeros_like(x),
-                        f3 = lambda x, y, z: np.zeros_like(x)):
-    velocity = field(
-        positions=positions,
-        plot=False,
-        f1=f1,
-        f2=f2,
-        f3=f3
+    grid = generate_cube(grid_shape)                       
+    pop1 = transform_points(
+        grid,
+        transform1["m"],
+        transform1["rot_theta"],
+        transform1["rot_phi"],
+        transform_matrix=np.diag(stretch1),
+        plot=plot,
     )
-    return positions + dt * velocity
+    pop2 = transform_points(
+        grid,
+        transform2["m"],
+        transform2["rot_theta"],
+        transform2["rot_phi"],
+        transform_matrix=np.diag(stretch2),
+        plot=plot,
+    )
+
+    f1v1, f2v1, f3v1 = vecfield1
+    f1v2, f2v2, f3v2 = vecfield2
+
+    vec1 = field(pop1, plot=plot, normalize=True, cmap=cmap,
+                 arrow_length=arrow_length, f1=f1v1, f2=f2v1, f3=f3v1)
+    vec2 = field(pop2, plot=plot, normalize=True, cmap=cmap,
+                 arrow_length=arrow_length, f1=f1v2, f2=f2v2, f3=f3v2)
+
+    u1 = vec1 / np.clip(np.linalg.norm(vec1, axis=1, keepdims=True), eps, None)
+    u2 = vec2 / np.clip(np.linalg.norm(vec2, axis=1, keepdims=True), eps, None)
+
+    return u2 @ u1.T
+
+
+
 
 
 class PolynomGenerator:
@@ -1271,6 +683,669 @@ class PolynomGenerator:
         second_deriv = self.derivative(first_deriv_encoded, variable=var2)
         
         return second_deriv
+    
+
+
+
+
+
+
+def circle3d(
+    n=10, 
+    r=1.0, 
+    theta=0, 
+    phi=0, 
+    m=(0,0,0), 
+    name="Circle", 
+    plot=False
+    ):
+    """
+    Generate points on a rotated and translated 3D circle.
+
+    Args:
+        n (int): Number of points to sample along the circle.
+        r (float): Radius of the circle.
+        theta (float): Rotation angle around the X-axis, in degrees.
+        phi (float):   Rotation angle around the Y-axis, in degrees.
+        m (tuple):     3-tuple giving the translation offset (x, y, z).
+        name (str):    Title for the plot if `plot=True`.
+
+    Returns:
+        np.ndarray: Array of shape (n, 3) containing the (x, y, z) coordinates.
+    """
+
+    
+    X_angles = np.linspace(0, 2*np.pi, n, endpoint=False)
+    x_coords = SCALING_FACTOR * r * np.cos(X_angles)
+    y_coords = SCALING_FACTOR * r * np.sin(X_angles)
+    z_coords = np.zeros(n)
+
+    theta = np.deg2rad(theta)
+    phi   = np.deg2rad(phi)
+    Rx = np.array([[1, 0, 0],
+                   [0, np.cos(theta), -np.sin(theta)],
+                   [0, np.sin(theta),  np.cos(theta)]])
+    Ry = np.array([[ np.cos(phi), 0, np.sin(phi)],
+                   [0,           1, 0         ],
+                   [-np.sin(phi),0, np.cos(phi)]])
+    rotM = Ry @ Rx
+
+    pts = np.vstack((x_coords, y_coords, z_coords)).T
+    pts = pts @ rotM
+    pts = pts + np.array(m)
+
+    if plot:
+        fig = plt.figure()
+        ax  = fig.add_subplot(111, projection='3d')
+        ax.plot(pts[:,0], pts[:,1], pts[:,2], lw=2)
+        max_val = np.max(np.abs(pts))
+        ax.set_xlim(-max_val*1.2, max_val*1.2)
+        ax.set_ylim(-max_val*1.2, max_val*1.2)
+        ax.set_zlim(-max_val*1.2, max_val*1.2)
+        ax.set_title(name)
+        ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+        plt.show()
+
+    return pts
+
+
+
+def create_cone(
+    m=np.zeros(3, dtype=np.float32),
+    n=1500,
+    inner_radius=0.1,
+    outer_radius=0.2,
+    height=0.6,
+    rot_theta=0.0,
+    rot_phi=0.0,
+    plot=False,
+    name="Cone"
+    ):
+    #~*~*~*~* START *~*~*~*~#
+    """
+    Generate random points within a truncated cone, apply rotation and translation.
+
+    Args:
+        m (np.ndarray): 3-element center offset (x, y, z) of the cone base.
+        n (int): Number of points to generate.
+        inner_radius (float): Radius of the top (smaller) circle.
+        outer_radius (float): Radius of the bottom (larger) circle.
+        height (float): Vertical height of the cone.
+        rot_theta (float): Rotation angle around the X-axis in degrees.
+        rot_phi (float): Rotation angle around the Y-axis in degrees.
+        plot (bool): If True, display a 3D scatter plot of generated points.
+
+    Returns:
+        np.ndarray: Array of shape (n, 3) containing the (x, y, z) coordinates of points.
+    """
+    
+    #~*~*~*~* END *~*~*~*~#
+    
+
+    inner_r = inner_radius * SCALING_FACTOR  
+    outer_r = outer_radius * SCALING_FACTOR
+    h = height * SCALING_FACTOR
+    
+    ang = np.random.uniform(0, 2*np.pi, n)
+    z = np.random.uniform(m[2], m[2] + h, n)
+    
+    r = inner_r + (outer_r - inner_r) * ((z - m[2]) / h)
+    
+    x = m[0] + r * np.cos(ang)
+    y = m[1] + r * np.sin(ang)
+    
+    # randomized on the surface.
+    th = np.deg2rad(rot_theta)
+    ph = np.deg2rad(rot_phi)
+    
+    Rx = np.array([[1,         0,          0       ],
+                   [0, np.cos(th), -np.sin(th)],
+                   [0, np.sin(th),  np.cos(th)]])
+    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
+                   [          0, 1,          0],
+                   [-np.sin(ph), 0, np.cos(ph)]])
+    rotM = Ry @ Rx
+    
+    points = np.column_stack((x, y, z))
+    points = points @ rotM.T
+    
+    if plot:
+        from mpl_toolkits.mplot3d import Axes3D 
+        import matplotlib.pyplot as plt
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(points[:,0], points[:,1], points[:,2], s=2)
+        ax.set(title=name)
+        ax.set_xlabel('X [mm]')
+        ax.set_ylabel('Y [mm]')
+        ax.set_zlabel('Z [mm]')
+        plt.show()
+    
+    return points
+
+
+
+
+def blob_positions(
+    n = 10,
+    m = np.zeros(3),
+    r = 1.0,
+    scaling_factor = 1.0,
+    plot=False,
+    name="Blob"
+    ):
+
+
+    pos_norm = np.random.normal(size=(n, 3))
+    pos_norm /= np.linalg.norm(pos_norm, axis=1, keepdims=True)
+    
+    u = np.random.rand(n, 1)
+    r_scaling = r * u**(1/3)
+    
+    pts = m + pos_norm * r_scaling * scaling_factor
+
+    if plot:
+        fig = plt.figure()
+        ax  = fig.add_subplot(111, projection='3d')
+
+        ax.scatter(pts[:,0], pts[:,1], pts[:,2])
+
+        lim = 1.1*np.abs(pts).max()
+        ax.set(xlim=(-lim, lim), ylim=(-lim, lim), zlim=(-lim, lim),
+               title=name, xlabel='X', ylabel='Y', zlabel='Z')
+        plt.show()
+    return pts
+
+
+def create_Grid(m=np.zeros(3, dtype=np.float32),
+                grid_size_list=[28, 15, 10],
+                rot_theta=0.0, 
+                rot_phi=0.0, 
+                plot=False,
+               name="Grid"):
+        #~*~*~*~* START  *~*~*~*~#
+
+    """
+    Generate a stack of 2D grid layers in 3D space and optionally plot them.
+
+    Each layer is a k×k grid of points lying in a plane at increasing offsets
+    along the first coordinate. The entire stack is then rotated and translated.
+
+    Args:
+        m (np.ndarray):       3-vector translation offset applied after rotation.
+        grid_size_list (list): List of integers [d1, d2, d3,...], where each
+                               entry di defines the grid resolution (di×di)
+                               for the layer at depth index i.
+        rot_theta (float):    Rotation angle around the X-axis in degrees.
+        rot_phi (float):      Rotation angle around the Y-axis in degrees.
+        plot (bool):          If True, display a 3D scatter of all layers.
+
+    Returns:
+        list of np.ndarray:   A list where each element is an (di*di, 3) array
+                              of 3D coordinates for layer i.
+    """
+        #~*~*~*~* END  *~*~*~*~#
+
+    
+    th = np.deg2rad(rot_theta)
+    ph = np.deg2rad(rot_phi)
+    Rx = np.array([[1, 0, 0],
+                   [0, np.cos(th), -np.sin(th)],
+                   [0, np.sin(th),  np.cos(th)]])
+    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
+                   [          0, 1,          0],
+                   [-np.sin(ph), 0, np.cos(ph)]])
+    rotM = Ry @ Rx
+
+    node_layers = []
+    for d, k in enumerate(grid_size_list):
+        pts = np.array([[d + m[0], w + m[1], n + m[2]]
+                        for w in range(k) for n in range(k)])
+        node_layers.append(pts @ rotM.T)
+
+    if plot:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        for layer_pts in node_layers:
+            ax.scatter(layer_pts[:, 0], layer_pts[:, 1], layer_pts[:, 2], s=1)
+        ax.set_xlabel('X [mm]')
+        ax.set_ylabel('Y [mm]')
+        ax.set_zlabel('Z [mm]')
+        ax.set(title=name)
+        try:
+            ax.set_box_aspect((1,1,1))
+        except AttributeError:
+            set_axes_equal(ax)
+        plt.show()
+
+    return node_layers
+
+
+def wave_collapse_old(mask=None, 
+                  dims=(2,2,2), 
+                  sparse_holes = 0,
+                  type_array=[0,1],
+                  probability_vector=np.array([0.3,0.7]), 
+                  start_pos=np.zeros(3),
+                  sparsity_factor=0.7,
+                seed=42):
+    
+    """
+    Perform a 3D "wave function collapse" to assign discrete labels to grid cells, 
+    forming clusters based on local entropy and neighbor constraints.
+
+    Parameters:
+        mask (np.ndarray or None): Initial occupancy mask of shape dims. 
+            0 = uncollapsed, -1 = blocked. If None, a zero mask is created.
+        dims (tuple[int]): Grid dimensions if mask is None.
+        sparse_holes (int): Number of random positions to block (-1) for holes.
+        type_array (list[int]): List of possible labels.
+        probability_vector (np.ndarray): Initial probability for each label.
+        start_pos (array-like): Starting coordinate to seed collapse.
+        sparsity_factor (float): Controls influence of existing neighbor labels.
+        seed (int): Base seed for random number generators.
+
+    Returns:
+        np.ndarray: Array of shape dims with assigned labels for each cell.
+    """
+    
+    
+    
+    # Initialize random seeds for reproducibility
+    random.seed(seed+3)
+    np.random.seed(seed+7)
+
+    # Normalize probability vector
+    probability_vector = np.asarray(probability_vector, dtype=float)
+    probability_vector /= probability_vector.sum()
+    
+    # Create mask if not provided: 0=uncollapsed, -1=blocked
+    if mask is None:
+        mask = np.zeros(dims, dtype=np.int32)
+    dims=mask.shape
+    
+    # High initial entropy for all cells
+    entropy_matrix = np.full(shape=dims, fill_value=1000.0, dtype=np.float32)
+    
+    # Store collapsed labels; -1 indicates not yet collapsed
+    collapsed_nodes = np.full(shape=dims, fill_value=-1, dtype=np.int32)
+    
+    
+    D0, D1, D2 = mask.shape
+    
+    
+    # Randomly block positions to create holes if desired
+    if(sparse_holes!=0):
+        for _ in range(0,sparse_holes,1):
+            x = random.randint(0,D0-1)
+            y = random.randint(0,D1-1)
+            z = random.randint(0,D2-1)
+            mask[x][y][z] = -1
+        
+    def check_neighbors(i, j, k):
+        undef_neighbors = []
+        def_neighbors = []
+        """
+        Return lists of uncollapsed and collapsed neighbor coordinates in all directions.
+        """ 
+        shifts = [(dx, dy, dz)         # Examine all 26 neighbors in 3D
+              for dx in (-1, 0, 1) 
+              for dy in (-1, 0, 1) 
+              for dz in (-1, 0, 1) 
+              if not (dx == dy == dz == 0)]        
+        for di, dj, dk in shifts:
+            ni, nj, nk = i+di, j+dj, k+dk
+            if 0 <= ni < D0 and 0 <= nj < D1 and 0 <= nk < D2:
+                if mask[ni, nj, nk] == 0:
+                    undef_neighbors.append((ni, nj, nk))
+                elif mask[ni, nj, nk] == 1:
+                    def_neighbors.append((ni, nj, nk))
+                else:
+                    continue  # ignore blocked cells
+
+                    
+        return undef_neighbors, def_neighbors
+    
+
+    def entropy(p, base=None):
+        """Compute Shannon entropy of probability vector p."""
+        p = np.asarray(p, dtype=float)
+        p += 0.0001
+        p/=np.sum(p)# p > 0
+        log_p = np.log(p) if base is None else np.log(p) / np.log(base)
+        return -np.sum(p * log_p)
+    
+    def collapse(i, j, k):        
+        """
+        Collapse the cell at (i,j,k) by sampling a label based on local probabilities and neighbor influence.
+        """
+        if(mask[i][j][k]):#if already collapsed
+            pass #TODO for invariants
+        
+        # Copy and adjust probabilities based on collapsed neighbors
+
+        
+        l = len(probability_vector)
+        l1 = int((1-sparsity_factor)*l) 
+        # Boost probability for each neighbor label
+
+        list_of_uncollapsed_neighbors, list_of_collapsed_neighbors = check_neighbors(i,j,k)
+        
+        neighbor_labels = []
+        for x,y,z in list_of_collapsed_neighbors:
+            neighbor_labels.append(collapsed_nodes[x][y][z])
+        
+        #possible_values = np.setdiff1d(type_array,neighbor_labels) #regel zu hart für Klusterbildung
+        
+        private_probability_vector = probability_vector.copy()
+
+        #######################################################################
+        original_pv = private_probability_vector.copy()
+        #######################################################################
+        
+        for m in neighbor_labels:# label gleichzeitig index für probability vektor
+            # private_probability_vector anpassen
+            p = private_probability_vector[m] / (l + l1)
+            p_self = l1 * p
+            p_rest = p
+            p_redistribution = np.full(shape=(l,),fill_value=p_rest)
+            p_redistribution[m] += p_self
+            private_probability_vector[m] = 0.0 #setze wert im original zurück
+            private_probability_vector+=p_redistribution
+        private_probability_vector/=private_probability_vector.sum()#danach um sequenziellen Einfluss zu minimieren
+        private_probability_vector=(private_probability_vector+2*original_pv)/3############################################
+        #print("#######",np.sum(private_probability_vector))#just a check
+        choice = np.random.choice(type_array,p=private_probability_vector)#damit kein ablaufmuster entsteht
+        collapsed_nodes[i][j][k] = choice
+        mask[i][j][k]=1
+        entropy_matrix[i][j][k] = 0.0
+        # Update entropy for uncollapsed neighbors
+
+        #after collapsed
+        # Anpassung der Entropie der Nachbarn
+
+        for ni, nj, nk in list_of_uncollapsed_neighbors:
+            _, coll_nbrs = check_neighbors(ni, nj, nk)
+            neigh_labels = [collapsed_nodes[x,y,z] for x,y,z in coll_nbrs]
+
+            allowed = np.setdiff1d(type_array, neigh_labels)
+
+            p = np.zeros_like(probability_vector, dtype=float)
+            idxs = [type_array.index(a) for a in allowed]
+            p[idxs] = probability_vector[idxs]
+            if p.sum() > 0:
+                p /= p.sum()
+            else:
+                p[:] = 1 / len(p)
+            entropy_matrix[ni, nj, nk] = entropy(p, base=2)
+            
+            
+    def _next():
+        """Select the next uncollapsed cell with minimal non-zero entropy."""
+        candidates = np.argwhere(mask == 0)
+        if candidates.size == 0:
+            return None
+        valid = [(tuple(idx), entropy_matrix[tuple(idx)]) 
+                 for idx in candidates 
+                 if entropy_matrix[tuple(idx)] > 0]
+        if not valid:
+            return None
+        next_idx = min(valid, key=lambda x: x[1])[0]
+        return next_idx
+    
+    # Main collapse loop
+    while True:
+        nxt = _next()
+        if nxt is None:
+            break
+        collapse(*nxt)
+
+    return np.array(collapsed_nodes)#, entropy_matrix
+
+
+def wave_collapse(dims, type_array, probability_vector,
+                       sparsity_factor=.7, seed=0, sparse_holes=0):
+    NEIGHBOR_OFFSETS = np.array([(dx,dy,dz)
+      for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1)
+      if (dx,dy,dz)!=(0,0,0)], dtype=np.int8)
+    random.seed(seed+3); np.random.seed(seed+7)
+    probability_vector = np.asarray(probability_vector, float); probability_vector /= probability_vector.sum()
+    mask  = np.zeros(dims, np.int8)
+    if sparse_holes:                       
+        idx = np.random.choice(mask.size, sparse_holes, replace=False)
+        mask.ravel()[idx] = -1
+
+    collapsed = -np.ones(dims, np.int16)
+    H = np.full(dims, 999., np.float32)
+
+    heap = [(H[i,j,k],i,j,k) for i in range(dims[0])
+                               for j in range(dims[1])
+                               for k in range(dims[2]) if mask[i,j,k]==0]
+    heapq.heapify(heap)
+
+    while heap:
+        h,i,j,k = heapq.heappop(heap)
+        if mask[i,j,k]:                    
+            continue
+
+        neigh = NEIGHBOR_OFFSETS + (i,j,k)
+        good  = ((neigh[:,0] >= 0) & (neigh[:,0] < dims[0]) &
+                 (neigh[:,1] >= 0) & (neigh[:,1] < dims[1]) &
+                 (neigh[:,2] >= 0) & (neigh[:,2] < dims[2]))
+        neigh = neigh[good]
+        labels = collapsed[tuple(neigh.T)]
+        labels = labels[labels >= 0]              
+
+        if labels.size:
+            counts = np.bincount(labels, minlength=len(type_array))
+            boost  = counts * (1-sparsity_factor)/len(type_array)
+            p = probability_vector + boost
+            p /= p.sum()
+        else:
+            p = probability_vector
+
+        choice = np.random.choice(type_array, p=p)
+        collapsed[i,j,k] = choice
+        mask[i,j,k] = 1
+        H[i,j,k] = 0.0
+
+        for ni,nj,nk in neigh:
+            if mask[ni,nj,nk]==0:
+                H[ni,nj,nk] = 1.0  
+                heapq.heappush(heap,(H[ni,nj,nk],ni,nj,nk))
+
+    return collapsed
+
+
+
+def generate_cube(grid_size_list=(10, 10, 10)):
+    """
+    Generate a 3D grid of points within a cube from -1 to 1 in each axis.
+
+    Args:
+        grid_size_list (tuple of int): Number of samples along each axis (nx, ny, nz).
+
+    Returns:
+        np.ndarray: An array of shape (nx*ny*nz, 3) containing the (x, y, z) coordinates.
+    """
+    nx, ny, nz = grid_size_list
+    xs = np.linspace(-1, 1, nx)
+    ys = np.linspace(-1, 1, ny)
+    zs = np.linspace(-1, 1, nz)
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+    return np.vstack((X.ravel(), Y.ravel(), Z.ravel())).T
+
+
+
+def transform_points(
+    points,
+    m = np.zeros(3, dtype=float),#translation
+    rot_theta = 0.0,
+    rot_phi = 0.0,
+    transform_matrix = np.eye(3),
+    plot = False
+    ):
+    """
+    Apply rotation, linear transformation, and translation to a set of 3D points.
+
+    Args:
+        points (np.ndarray): Array of shape (N,3) containing the original points.
+        m (np.ndarray):      Translation offset as a 3-vector.
+        rot_theta (float):   Rotation angle around the X-axis in degrees.
+        rot_phi (float):     Rotation angle around the Y-axis in degrees.
+        transform_matrix (np.ndarray): 3×3 matrix to apply after rotation.
+        plot (bool):         If True, display a 3D scatter of the transformed points.
+
+    Returns:
+        np.ndarray: Array of shape (N,3) with transformed coordinates.
+    """
+    pts = np.asarray(points, dtype=float)
+    
+    th = np.deg2rad(rot_theta)
+    ph = np.deg2rad(rot_phi)
+    Rx = np.array([[1,          0,           0],
+                   [0, np.cos(th), -np.sin(th)],
+                   [0, np.sin(th),  np.cos(th)]])
+    Ry = np.array([[ np.cos(ph), 0, np.sin(ph)],
+                   [          0, 1,          0],
+                   [-np.sin(ph), 0, np.cos(ph)]])
+    rotM = Ry @ Rx
+    
+    rotated = (rotM @ pts.T).T
+            
+    transformed = (transform_matrix @ rotated.T).T
+    
+    result = transformed + np.asarray(m, dtype=float)
+    
+    if plot:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(result[:,0], result[:,1], result[:,2], s=2)
+        ax.set_xlabel('X [mm]')
+        ax.set_ylabel('Y [mm]')
+        ax.set_zlabel('Z [mm]')
+        plt.show()
+    
+    return result
+
+
+
+def field(
+        positions: np.ndarray,
+        f1 = lambda x, y, z: np.zeros_like(x),
+        f2 = lambda x, y, z: np.zeros_like(x),
+        f3 = lambda x, y, z: np.zeros_like(x),
+        plot=False,    
+        normalize = False,
+        color_by_length = False,
+        cmap = 'viridis',
+        arrow_length = 0.1
+    ):
+    """
+    Compute a 3D vector field at given positions and optionally visualize it.
+
+    Args:
+        positions (np.ndarray): An (N,3) array of (x,y,z) coordinates.
+        f1, f2, f3 (callable):  Functions f1(x,y,z), f2(x,y,z), f3(x,y,z) defining
+                                the three vector components at each point.
+        plot (bool):           If True, display a 3D quiver plot of the field.
+        normalize (bool):      If True, normalize each vector to unit length before plotting.
+        color_by_length (bool): If True, color arrows by their original lengths.
+        cmap (str):             Name of the Matplotlib colormap to use when coloring.
+        arrow_length (float):   Scaling factor for arrow lengths in the plot.
+
+    Returns:
+        np.ndarray: An (N,3) array of the computed vectors [v1, v2, v3].
+    """
+    
+    x = positions[:, 0]
+    y = positions[:, 1]
+    z = positions[:, 2]
+
+    v1 = f1(x, y, z)
+    v2 = f2(x, y, z)
+    v3 = f3(x, y, z)
+    vectors = np.column_stack((v1, v2, v3))
+    if plot:
+        lengths = np.linalg.norm(vectors, axis=1)
+        U, V, W = v1.copy(), v2.copy(), v3.copy()
+        if normalize:
+            nonzero = lengths > 0
+            U[nonzero] /= lengths[nonzero]
+            V[nonzero] /= lengths[nonzero]
+            W[nonzero] /= lengths[nonzero]
+            U *= arrow_length
+            V *= arrow_length
+            W *= arrow_length
+        else:
+            U *= arrow_length
+            V *= arrow_length
+            W *= arrow_length
+
+        color_args = {}
+        if color_by_length:
+            normed = (lengths - lengths.min()) / (lengths.ptp() if lengths.ptp()>0 else 1)
+            cmap_obj = plt.get_cmap(cmap)
+            colors = cmap_obj(normed)
+            color_args['color'] = colors
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.quiver(
+            x, y, z,
+            U, V, W,
+            **color_args,
+            length=1.0,
+            normalize=False
+        )
+        ax.set_xlabel('X [mm]')
+        ax.set_ylabel('Y [mm]')
+        ax.set_zlabel('Z [mm]')
+        plt.show()
+    return vectors
+
+
+def generate_torus(
+        R = 1.0,
+        r = 0.3,
+        grid_size_list = (100, 40),
+    rot_theta=0,
+    rot_phi=0,
+    plot=False
+    ):
+    """
+    Generate a set of 3-D points on the surface of a torus.
+
+    The torus lies in the XY-plane, centred at the origin.  The major
+    radius R is the distance from the origin to the centre of the tube,
+    the minor radius r is the tube radius.
+
+    Args:
+        R (float):            Major radius (distance from origin to tube centre).
+        r (float):            Minor radius (tube radius).
+        grid_size_list (tuple of int):
+                              Number of samples along the two angular
+                              coordinates (n_theta, n_phi).  Higher numbers
+                              produce a denser point cloud.
+
+    Returns:
+        np.ndarray: Array of shape (n_theta * n_phi, 3) with (x, y, z)
+                    coordinates on the torus surface.
+    """
+    n_theta, n_phi = grid_size_list
+
+    
+    theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)  
+    phi   = np.linspace(0.0, 2.0 * np.pi, n_phi,   endpoint=False)  
+
+    a, b = np.meshgrid(theta, phi, indexing='ij')  
+
+    x = (R + r * np.cos(b)) * np.cos(a)
+    y = (R + r * np.cos(b)) * np.sin(a)
+    z =  r * np.sin(b)
+
+    return transform_points(np.vstack((x.ravel(), y.ravel(), z.ravel())).T,
+                            rot_theta=rot_theta, rot_phi=rot_phi, plot=plot)
 
 
 def simulate_vector_field_flow(
@@ -1330,6 +1405,22 @@ def simulate_vector_field_flow(
     if(create_object):
         return snapshots
     return positions
+
+def field_flow_iteration(
+                        positions=np.zeros(3),  # ← Plural
+                        f1 = lambda x, y, z: np.zeros_like(x),
+                        f2 = lambda x, y, z: np.zeros_like(x),
+                        f3 = lambda x, y, z: np.zeros_like(x)):
+    velocity = field(
+        positions=positions,
+        plot=False,
+        f1=f1,
+        f2=f2,
+        f3=f3
+    )
+    return positions + dt * velocity
+
+
 
 def add_local_attractor(
     m = np.zeros(3),
@@ -1565,7 +1656,6 @@ def anisotropic_wave_collapse(
     
     return collapsed
 
-
 # Wrapper für Backwards-Kompatibilität
 def wave_collapse_bio(
     dims,
@@ -1602,10 +1692,9 @@ def cluster_and_flow(
     dt,
     num_steps,
     old=True,
-    biological=False,  # NEU: Verwende anisotropen WFC
-    plot_clusters=True,
+    biological=False,
+    plot_clusters=False,
     title="Cluster-Flows",
-    # NEU: Optionale biologische Parameter
     vertical_bias=0.25,  # Nur relevant wenn biological=True
     layer_boundaries=None,  # z.B. [2, 5, 8] für Layer-Grenzen
     layer_type_modifiers=None  # z.B. {0: [0.8, 0.1, 0.1], 1: [0.3, 0.6, 0.1]}
@@ -1631,7 +1720,8 @@ def cluster_and_flow(
                                     Only used if biological=True.
     """
     # 1-2: Generate and transform grid
-    grid = generate_qube(grid_size)
+    grid = generate_cube(grid_size)
+    #### DIESER SHIT HIER pts sollte mein eigenes kluster  sein, von beliebiger form
     pts = transform_points(
         grid, m=m, rot_theta=rot_theta,
         rot_phi=rot_phi, transform_matrix=transform_matrix,
@@ -1702,8 +1792,95 @@ def cluster_and_flow(
     # 7: Return final positions
     return clusters
 
-
-####### NEST #######
+def cluster_and_flow_flexible(
+    points,  # Beliebige Punktwolke
+    grid_size,  # Grid für WFC
+    wave_params,
+    types,
+    flow_functions,
+    dt,
+    num_steps,
+    old=True,
+    biological=False,
+    plot_clusters=False,
+    title="Cluster-Flows",
+    vertical_bias=0.25,
+    layer_boundaries=None,
+    layer_type_modifiers=None
+):
+    """Flexible Version - mappt beliebige Punkte auf WFC-Grid"""
+    
+    # 1. WFC auf abstraktem Grid
+    if biological:
+        neuron_type_array = anisotropic_wave_collapse(
+            dims=grid_size,
+            type_array=types,
+            probability_vector=wave_params['probability_vector'],
+            sparsity_factor=wave_params['sparsity_factor'],
+            seed=wave_params.get('seed', 0),
+            sparse_holes=wave_params['sparse_holes'],
+            vertical_bias=vertical_bias,
+            layer_boundaries=layer_boundaries,
+            layer_type_modifiers=layer_type_modifiers
+        )
+    else:
+        neuron_type_array = wave_collapse(
+            dims=grid_size,
+            type_array=types,
+            probability_vector=wave_params['probability_vector'],
+            sparsity_factor=wave_params['sparsity_factor'],
+            seed=wave_params.get('seed', 0),
+            sparse_holes=wave_params['sparse_holes']
+        )
+    
+    # 2. Mapping der Punkte
+    points = np.asarray(points)
+    n_points = len(points)
+    
+    # Bounding Box
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    ranges = maxs - mins + 1e-10
+    
+    # Normalisiere auf [0,1]
+    normalized = (points - mins) / ranges
+    
+    # Map auf Grid
+    nx, ny, nz = grid_size
+    grid_indices = np.floor(normalized * [nx-1, ny-1, nz-1]).astype(int)
+    grid_indices = np.clip(grid_indices, [0,0,0], [nx-1, ny-1, nz-1])
+    
+    # 3. Typ-Zuweisung
+    point_types = neuron_type_array[grid_indices[:, 0], 
+                                    grid_indices[:, 1], 
+                                    grid_indices[:, 2]]
+    
+    # 4. Nach Typ gruppieren
+    clusters = []
+    for t in types:
+        mask = (point_types == t)
+        cluster_pts = points[mask]
+        clusters.append(cluster_pts)
+    
+    # 5. Flow anwenden
+    final_clusters = []
+    for (f1, f2, f3), cluster_pts in zip(flow_functions, clusters):
+        if len(cluster_pts) == 0:
+            final_clusters.append(cluster_pts)
+            continue
+            
+        final_positions = simulate_vector_field_flow(
+            initial_positions=cluster_pts,
+            dt=dt, f1=f1, f2=f2, f3=f3,
+            num_steps=num_steps,
+            plot=False
+        )
+        final_clusters.append(final_positions)
+    
+    if plot_clusters:
+        plot_point_clusters(final_clusters, title=title)
+    
+    return final_clusters
 
 
 def create_CCW(
@@ -1847,7 +2024,6 @@ def connect_cone(
     nest.Connect(nodes, nodes, conn_dict_inh, syn_spec_inh)
     return nodes
 
-
 def connect_cone_ccw(
         cone, 
         ccw,              
@@ -1901,6 +2077,7 @@ def connect_cone_ccw(
                 nest.Connect(j, i, conn_spec, syn_spec_weak)
 
 
+
 def create_blob_population(
     positions,
     conn_ex = {'rule': 'pairwise_bernoulli', 'p': 0.8, 'allow_autapses': False},
@@ -1951,6 +2128,7 @@ def create_blob_population(
         nest.PlotLayer(blob_pop)
     return blob_pop
 
+
 def blob(n = 100,
     m = np.zeros(3),
     r = 1.0,
@@ -1996,7 +2174,7 @@ def blob(n = 100,
     # Creates Blob.
     pos = blob_positions(
         n=n,
-        m=np.zeros(3),
+        m=m,
         r=1.0,
         scaling_factor=SCALING_FACTOR
     )
@@ -2152,6 +2330,7 @@ def grid2visual(
         conn_dict_layer: Connection rule for inter-layer connections.
         syn_dict_layer: Synapse spec (STDP) for inter-layer connections.
 
+
     Returns:
         poisson_generators: IDs of Poisson generators providing excitatory input.
         noise_generators: IDs of Poisson generators providing inhibitory noise.
@@ -2231,8 +2410,6 @@ def input_to_receptive_field(image_array, poisson_generators, max_rate=200.0):
     for i, rate in enumerate(scaled_rates):#the timing scares me.
         nest.SetStatus([poisson_generators[i]], {'rate': float(rate)})
 
-
-
 def clusters_to_neurons(
     clusters, 
     neuron_models
@@ -2264,6 +2441,7 @@ def clusters_to_neurons(
 
         populations.append(nodes)
     return populations
+
 
 def xy_distance(a, b):
     # ignore z: lateral distance
@@ -2457,7 +2635,6 @@ def vis_cortex_pos(
     return results, all_columns
 
 
-
 def vis2neurons(
     Vn_pop,
     area2models=None,
@@ -2491,176 +2668,182 @@ def vis2neurons(
                 nest.PlotLayer(pop)
     return Vn_neurons
 
-def generate_direction_similarity_matrix(
-    pop1=None,
-    pop2=None,
-    vecfield1=(
-        lambda x, y, z: 1.5 * x ** 2 + y + z,
-        lambda x, y, z: 1.3 * x ** 3 - y + z,
-        lambda x, y, z: 1.7 * x ** 2 + y - z,
-    ),
-    vecfield2=(
-        lambda x, y, z: 4.7 * x - np.sin(y),
-        lambda x, y, z: -1.9 * x ** 2 - y + 2,
-        lambda x, y, z: 1.7 * y ** 2 + x - y,
-    ),
-    eps: float = 1e-12,
-    plot: bool = False,
-    cmap: str = "plasma",
-    arrow_length: float = 0.2,
-):
-    """
-    Compute a cosine-similarity weight matrix W between two 3-D vector fields.
-    The fields are evaluated on point clouds *pop1* (sources) and *pop2*
-    (targets).  If either population is *None*, a default 4 × 4 × 4 grid is
-    generated and transformed with hard-coded parameters.
 
-    Parameters
-    ----------
-    pop1, pop2 : np.ndarray | None
-        Arrays with shape (N, 3) and (M, 3) giving the coordinates of the
-        source and target neurons.  When *None*, a default grid is built via
-        ``generate_qube`` and ``transform_points`` (see example).
-    vecfield1, vecfield2 : tuple(callable, callable, callable)
-        Component functions (f₁, f₂, f₃) mapping (x, y, z) → ℝ for each field.
-    eps : float
-        Floor for vector norms to avoid division by zero.
-    plot : bool
-        Forwarded to ``field`` to display 3-D quiver plots.
-    cmap : str
-        Matplotlib colour map used when *plot=True*.
-    arrow_length : float
-        Arrow scale in the quiver plots.
-
-    Returns
-    -------
-    numpy.ndarray
-        Weight matrix W with shape (len(pop2), len(pop1)); entries are cosine
-        similarities in [-1, 1].
-
-    Example
-    -------
-    >>> W = generate_direction_similarity_matrix()        # defaults
-    >>> nest.Connect(pop1_nodes, pop2_nodes,
-    ...              syn_spec={'weight': W.astype(np.float32)})
-    """
-    # ---------------------------------------------------------------------
-    if pop1 is None:
-        grid = generate_qube((4, 4, 4))
-        pop1 = transform_points(
-            grid, [1, 2, 3], 120, 120, transform_matrix=np.eye(3), plot=plot
-        )
-    if pop2 is None:
-        grid = generate_qube((4, 4, 4))
-        pop2 = transform_points(
-            grid, [3, 3, 1], 24, 77, transform_matrix=np.eye(3), plot=plot
-        )
-
-    f1v1, f2v1, f3v1 = vecfield1
-    f1v2, f2v2, f3v2 = vecfield2
-
-    vec1 = field(pop1, plot=plot, normalize=True, cmap=cmap,
-                 arrow_length=arrow_length, f1=f1v1, f2=f2v1, f3=f3v1)
-    vec2 = field(pop2, plot=plot, normalize=True, cmap=cmap,
-                 arrow_length=arrow_length, f1=f1v2, f2=f2v2, f3=f3v2)
-
-    u1 = vec1 / np.clip(np.linalg.norm(vec1, axis=1, keepdims=True), eps, None)
-    u2 = vec2 / np.clip(np.linalg.norm(vec2, axis=1, keepdims=True), eps, None)
-
-    return u2 @ u1.T
+node_parameters = {
+    "types": [0, 1, 2],
+    "neuron_models": ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_alpha"],
+    "grid_size": [10, 10, 10],
+    "m": [0.0, 0.0, 0.0],
+    "rot_theta": 0.0,
+    "rot_phi": 0.0,
+    "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "dt": 0.01,
+    "old": True,
+    "num_steps": 8,
+    "plot_clusters": True, 
+    "title": "3 populations",
+    "sparse_holes": 0,
+    "sparsity_factor": 0.9,
+    "probability_vector": [0.3, 0.2, 0.4],
+    "name": "TestNode",
+    "id": 0,
+    "distribution": [],
+    "conn_prob": [],
+    "polynom_max_power": 5,
+    "coefficients": None,
+    "center_of_mass": np.array((0.0, 0.0, 0.0)),
+    "displacement": np.array((0.0, 0.0, 0.0)),
+    "displacement_factor": 1.0,
+    "field": None,
+    
+    "encoded_polynoms_per_type": [
+        # Type 0 (x, y, z)
+        [
+            {'indices': [[0, 1], [0, 0]], 'coefficients': [1.5, 0.5], 'n': 5, 'decay': 0.5},
+            {'indices': [[1, 1], [1, 0]], 'coefficients': [1.0, 0.3], 'n': 5, 'decay': 0.5},
+            {'indices': [[2, 1], [2, 0]], 'coefficients': [0.8, 0.2], 'n': 5, 'decay': 0.5}
+        ],
+        # Type 1 (x, y, z)
+        [
+            {'indices': [[0, 1]], 'coefficients': [1.2], 'n': 5, 'decay': 0.5},
+            {'indices': [[1, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5},
+            {'indices': [[2, 1]], 'coefficients': [0.7], 'n': 5, 'decay': 0.5}
+        ],
+        # Type 2 (x, y, z)
+        [
+            {'indices': [[0, 1]], 'coefficients': [0.6], 'n': 5, 'decay': 0.5},
+            {'indices': [[1, 1]], 'coefficients': [1.1], 'n': 5, 'decay': 0.5},
+            {'indices': [[2, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5}
+        ]
+    ]
+}
 
 
-def generate_direction_similarity_matrix2(
-    grid_shape=(4, 4, 4),
-    transform1=None,
-    transform2=None,
-    stretch1=(1, 1, 1),
-    stretch2=(1, 1, 1),
-    vecfield1=(
-        lambda x, y, z: 1.5 * x ** 2 + y + z,
-        lambda x, y, z: 1.3 * x ** 3 - y + z,
-        lambda x, y, z: 1.7 * x ** 2 + y - z,
-    ),
-    vecfield2=(
-        lambda x, y, z: 4.7 * x - np.sin(y),
-        lambda x, y, z: -1.9 * x ** 2 - y + 2,
-        lambda x, y, z: 1.7 * y ** 2 + x - y,
-    ),
-    eps=1e-12,
-    plot=False,
-    cmap="plasma",
-    arrow_length=0.2,
-):
-    """
-    Generate a cosine-similarity weight matrix between two 3-D vector fields
-    evaluated on two separately transformed point grids.  See full docstring
-    below for details.
-    """
-    if transform1 is None:
-        transform1 = dict(m=[1, 2, 3], rot_theta=120, rot_phi=120)
-    if transform2 is None:
-        transform2 = dict(m=[3, 3, 1], rot_theta=24, rot_phi=77)
+neuron_colors = {
+    # AdEx Familie - Blautöne (adaptive exponential)
+    "aeif_cond_alpha": "#1E88E5",
+    "aeif_cond_alpha_multisynapse": "#1976D2",
+    "aeif_cond_beta_multisynapse": "#1565C0",
+    "aeif_cond_exp": "#0D47A1",
+    "aeif_psc_alpha": "#42A5F5",
+    "aeif_psc_delta": "#64B5F6",
+    "aeif_psc_delta_clopath": "#90CAF9",
+    "aeif_psc_exp": "#2196F3",
+    
+    # IAF Familie - Grüntöne (integrate-and-fire)
+    "iaf_cond_alpha": "#43A047",
+    "iaf_cond_beta": "#388E3C",
+    "iaf_cond_exp": "#2E7D32",
+    "iaf_cond_exp_sfa_rr": "#1B5E20",
+    "iaf_cond_alpha_mc": "#66BB6A",
+    "iaf_psc_alpha": "#4CAF50",
+    "iaf_psc_alpha_multisynapse": "#81C784",
+    "iaf_psc_delta": "#A5D6A7",
+    "iaf_psc_exp": "#66BB6A",
+    "iaf_psc_exp_multisynapse": "#8BC34A",
+    "iaf_tum_2000": "#9CCC65",
+    "iaf_chs_2007": "#AED581",
+    "iaf_chxk_2008": "#C5E1A5",
+    "iaf_psc_alpha_ps": "#558B2F",
+    "iaf_psc_delta_ps": "#689F38",
+    "iaf_psc_exp_htum": "#7CB342",
+    "iaf_psc_exp_ps": "#8BC34A",
+    "iaf_psc_exp_ps_lossless": "#9CCC65",
+    
+    # Hodgkin-Huxley Familie - Rottöne (biologisch realistisch)
+    "hh_cond_exp_traub": "#D32F2F",
+    "hh_cond_beta_gap_traub": "#C62828",
+    "hh_psc_alpha": "#B71C1C",
+    "hh_psc_alpha_clopath": "#E53935",
+    "hh_psc_alpha_gap": "#F44336",
+    
+    # GIF Familie - Violett/Lila (stochastisch)
+    "gif_cond_exp": "#7B1FA2",
+    "gif_cond_exp_multisynapse": "#6A1B9A",
+    "gif_psc_exp": "#4A148C",
+    "gif_psc_exp_multisynapse": "#8E24AA",
+    "gif_pop_psc_exp": "#9C27B0",
+    
+    # MAT Familie - Orangetöne (adaptive threshold)
+    "mat2_psc_exp": "#F57C00",
+    "amat2_psc_exp": "#EF6C00",
+    
+    # GLIF Familie - Cyan
+    "glif_cond": "#00ACC1",
+    "glif_psc": "#0097A7",
+    
+    # Spezielle Modelle - verschiedene Farben
+    "izhikevich": "#FFB300",  # Amber
+    "pp_psc_delta": "#5E35B1",  # Deep Purple
+    "pp_cond_exp_mc_urbanczik": "#3949AB",  # Indigo
+    "parrot_neuron": "#78909C",  # Blue Grey
+    "parrot_neuron_ps": "#90A4AE",  # Blue Grey Light
+    "mcculloch_pitts_neuron": "#455A64",  # Blue Grey Dark
+    "siegert_neuron": "#00897B",  # Teal
+    "ht_neuron": "#D81B60",  # Pink
+    "erfc_neuron": "#6D4C41",  # Brown
+    "ginzburg_neuron": "#8D6E63",  # Brown Light
+}
+successful_neuron_models = list(neuron_colors.keys())
 
-    grid = generate_qube(grid_shape)                       
-    pop1 = transform_points(
-        grid,
-        transform1["m"],
-        transform1["rot_theta"],
-        transform1["rot_phi"],
-        transform_matrix=np.diag(stretch1),
-        plot=plot,
-    )
-    pop2 = transform_points(
-        grid,
-        transform2["m"],
-        transform2["rot_theta"],
-        transform2["rot_phi"],
-        transform_matrix=np.diag(stretch2),
-        plot=plot,
-    )
+region_names = {
+    'Neocortex Layer 2/3': 'Neocortex_L23',
+    'Neocortex Layer 4': 'Neocortex_L4',
+    'Neocortex Layer 5': 'Neocortex_L5',
+    'Neocortex Layer 6': 'Neocortex_L6',
+    'Hippocampus CA1': 'Hippocampus_CA1',
+    'Hippocampus CA3': 'Hippocampus_CA3',
+    'Thalamus Relay': 'Thalamus_Relay',
+    'Thalamus Reticular Nucleus': 'Thalamus_Reticular'
+}
 
-    f1v1, f2v1, f3v1 = vecfield1
-    f1v2, f2v2, f3v2 = vecfield2
+distributions = {
+    'aeif_cond_alpha': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
+    'aeif_cond_alpha_multisynapse': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.60, 'Hippocampus_CA3': 0.60, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
+    'aeif_cond_beta_multisynapse': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.58, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.58, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
+    'aeif_cond_exp': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
+    'aeif_psc_alpha': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
+    'aeif_psc_delta': {'Neocortex_L23': 0.48, 'Neocortex_L4': 0.43, 'Neocortex_L5': 0.53, 'Neocortex_L6': 0.48, 'Hippocampus_CA1': 0.53, 'Hippocampus_CA3': 0.53, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
+    'aeif_psc_delta_clopath': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.50, 'Thalamus_Relay': 0.03, 'Thalamus_Reticular': 0.02},
+    'aeif_psc_exp': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
+    'amat2_psc_exp': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.58, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
+    'gif_cond_exp': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.05},
+    'hh_cond_beta_gap_traub': {'Neocortex_L23': 0.10, 'Neocortex_L4': 0.08, 'Neocortex_L5': 0.12, 'Neocortex_L6': 0.10, 'Hippocampus_CA1': 0.25, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.15},
+    'hh_psc_alpha': {'Neocortex_L23': 0.45, 'Neocortex_L4': 0.40, 'Neocortex_L5': 0.50, 'Neocortex_L6': 0.45, 'Hippocampus_CA1': 0.60, 'Hippocampus_CA3': 0.60, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
+    'hh_psc_alpha_clopath': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.40, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.50, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.03},
+    'hh_psc_alpha_gap': {'Neocortex_L23': 0.15, 'Neocortex_L4': 0.15, 'Neocortex_L5': 0.18, 'Neocortex_L6': 0.15, 'Hippocampus_CA1': 0.30, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.25},
+    'ht_neuron': {'Neocortex_L23': 0.05, 'Neocortex_L4': 0.08, 'Neocortex_L5': 0.05, 'Neocortex_L6': 0.10, 'Hippocampus_CA1': 0.03, 'Hippocampus_CA3': 0.03, 'Thalamus_Relay': 0.90, 'Thalamus_Reticular': 0.15},
+    'iaf_chs_2007': {'Neocortex_L23': 0.02, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.02, 'Neocortex_L6': 0.03, 'Hippocampus_CA1': 0.02, 'Hippocampus_CA3': 0.02, 'Thalamus_Relay': 0.95, 'Thalamus_Reticular': 0.05},
+    'iaf_chxk_2008': {'Neocortex_L23': 0.02, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.02, 'Neocortex_L6': 0.03, 'Hippocampus_CA1': 0.02, 'Hippocampus_CA3': 0.02, 'Thalamus_Relay': 0.95, 'Thalamus_Reticular': 0.05},
+    'iaf_cond_alpha': {'Neocortex_L23': 0.65, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.65, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.15},
+    'iaf_cond_alpha_mc': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
+    'iaf_cond_beta': {'Neocortex_L23': 0.65, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.65, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.15},
+    'iaf_cond_exp': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.65, 'Thalamus_Reticular': 0.18},
+    'iaf_cond_exp_sfa_rr': {'Neocortex_L23': 0.35, 'Neocortex_L4': 0.25, 'Neocortex_L5': 0.38, 'Neocortex_L6': 0.35, 'Hippocampus_CA1': 0.35, 'Hippocampus_CA3': 0.35, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
+    'iaf_psc_alpha': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.65, 'Thalamus_Reticular': 0.18},
+    'iaf_psc_alpha_multisynapse': {'Neocortex_L23': 0.72, 'Neocortex_L4': 0.67, 'Neocortex_L5': 0.72, 'Neocortex_L6': 0.72, 'Hippocampus_CA1': 0.77, 'Hippocampus_CA3': 0.77, 'Thalamus_Relay': 0.67, 'Thalamus_Reticular': 0.20},
+    'iaf_psc_delta': {'Neocortex_L23': 0.68, 'Neocortex_L4': 0.63, 'Neocortex_L5': 0.68, 'Neocortex_L6': 0.68, 'Hippocampus_CA1': 0.73, 'Hippocampus_CA3': 0.73, 'Thalamus_Relay': 0.63, 'Thalamus_Reticular': 0.17},
+    'iaf_psc_exp': {'Neocortex_L23': 0.75, 'Neocortex_L4': 0.70, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.75, 'Hippocampus_CA1': 0.78, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.70, 'Thalamus_Reticular': 0.20},
+    'iaf_psc_exp_multisynapse': {'Neocortex_L23': 0.75, 'Neocortex_L4': 0.70, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.75, 'Hippocampus_CA1': 0.78, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.70, 'Thalamus_Reticular': 0.20},
+    'iaf_tum_2000': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.68, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.72, 'Thalamus_Relay': 0.55, 'Thalamus_Reticular': 0.15},
+    'izhikevich': {'Neocortex_L23': 0.80, 'Neocortex_L4': 0.75, 'Neocortex_L5': 0.80, 'Neocortex_L6': 0.78, 'Hippocampus_CA1': 0.80, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.25},
+    'mat2_psc_exp': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.55, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.60, 'Hippocampus_CA1': 0.62, 'Hippocampus_CA3': 0.62, 'Thalamus_Relay': 0.12, 'Thalamus_Reticular': 0.08},
+    'mcculloch_pitts_neuron': {'Neocortex_L23': 0.05, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.05, 'Neocortex_L6': 0.05, 'Hippocampus_CA1': 0.05, 'Hippocampus_CA3': 0.05, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.05},
+    'parrot_neuron': {'Neocortex_L23': 0.01, 'Neocortex_L4': 0.01, 'Neocortex_L5': 0.01, 'Neocortex_L6': 0.01, 'Hippocampus_CA1': 0.01, 'Hippocampus_CA3': 0.01, 'Thalamus_Relay': 0.01, 'Thalamus_Reticular': 0.01},
+    'pp_psc_delta': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.55, 'Neocortex_L5': 0.62, 'Neocortex_L6': 0.60, 'Hippocampus_CA1': 0.65, 'Hippocampus_CA3': 0.65, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.05},
+    'siegert_neuron': {'Neocortex_L23': 0.80, 'Neocortex_L4': 0.75, 'Neocortex_L5': 0.80, 'Neocortex_L6': 0.80, 'Hippocampus_CA1': 0.85, 'Hippocampus_CA3': 0.85, 'Thalamus_Relay': 0.75, 'Thalamus_Reticular': 0.20}
+}
 
-    vec1 = field(pop1, plot=plot, normalize=True, cmap=cmap,
-                 arrow_length=arrow_length, f1=f1v1, f2=f2v1, f3=f3v1)
-    vec2 = field(pop2, plot=plot, normalize=True, cmap=cmap,
-                 arrow_length=arrow_length, f1=f1v2, f2=f2v2, f3=f3v2)
-
-    u1 = vec1 / np.clip(np.linalg.norm(vec1, axis=1, keepdims=True), eps, None)
-    u2 = vec2 / np.clip(np.linalg.norm(vec2, axis=1, keepdims=True), eps, None)
-
-    return u2 @ u1.T
-
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-################################################################################################################
-
-
-import nest
-import pyvista as pv
-import numpy as np
-import matplotlib.pyplot as plt
-import time
-from mpl_toolkits.mplot3d import Axes3D
-from neuron_toolbox import *
-from dataclasses import dataclass, asdict
-import json
-import copy
-import random
-from typing import List, Tuple, Callable, Optional, Dict, Any
-
-
+def get_probability_vector(region_full_name):
+    if region_full_name not in region_names:
+        raise ValueError("")
+    region_abbrev = region_names[region_full_name]
+    raw_values = [distributions[model][region_abbrev] for model in successful_neuron_models]
+    raw_array = np.array(raw_values)
+    total = np.sum(raw_array)
+    if total == 0:
+        raise ValueError("")
+    return raw_array / total
 
 def rand_prob_vector(num_classes):
     weights = np.random.rand(num_classes)
@@ -2731,59 +2914,6 @@ def plot_graph_3d(graph,
     ax.legend()
     plt.show()
 
-
-
-
-
-# Example Parameters:
-node_parameters = {
-    "types": [0, 1, 2],
-    "neuron_models": ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_alpha"],
-    "grid_size": [10, 10, 10],
-    "m": [0.0, 0.0, 0.0],
-    "rot_theta": 0.0,
-    "rot_phi": 0.0,
-    "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    "dt": 0.01,
-    "old": True,
-    "num_steps": 8,
-    "plot_clusters": True, 
-    "title": "3 populations",
-    "sparse_holes": 0,
-    "sparsity_factor": 0.9,
-    "probability_vector": [0.3, 0.2, 0.4],
-    "name": "TestNode",
-    "id": 0,
-    "distribution": [],
-    "conn_prob": [],
-    "polynom_max_power": 5,
-    "coefficients": None,
-    "center_of_mass": np.array((0.0, 0.0, 0.0)),
-    "displacement": np.array((0.0, 0.0, 0.0)),
-    "displacement_factor": 1.0,
-    "field": None,
-    
-    "encoded_polynoms_per_type": [
-        # Type 0 (x, y, z)
-        [
-            {'indices': [[0, 1], [0, 0]], 'coefficients': [1.5, 0.5], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1], [1, 0]], 'coefficients': [1.0, 0.3], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1], [2, 0]], 'coefficients': [0.8, 0.2], 'n': 5, 'decay': 0.5}
-        ],
-        # Type 1 (x, y, z)
-        [
-            {'indices': [[0, 1]], 'coefficients': [1.2], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1]], 'coefficients': [0.7], 'n': 5, 'decay': 0.5}
-        ],
-        # Type 2 (x, y, z)
-        [
-            {'indices': [[0, 1]], 'coefficients': [0.6], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1]], 'coefficients': [1.1], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5}
-        ]
-    ]
-}
 
 class Node:
     def __init__(self,
@@ -2857,6 +2987,7 @@ class Node:
         self.idx_class_dict = {i: t for i, t in enumerate(self.types)}
         self.positions = []
         self.population = []
+        self.nest_connections = []
         self.nest_references = {}
         self.spike_detectors = []
         self.spike_generators = []
@@ -2996,212 +3127,135 @@ class Node:
     
     def __repr__(self):
         return f"Node(id={self.id}, name={self.name}, pos={self.center_of_mass})"
-        
-        
-        
-        
-node_parameters = {
-    "types": [0, 1, 2],
-    "neuron_models": ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_alpha"],
-    "grid_size": [10, 10, 10],
-    "m": [0.0, 0.0, 0.0],
-    "rot_theta": 0.0,
-    "rot_phi": 0.0,
-    "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    "dt": 0.01,
-    "old": True,
-    "num_steps": 8,
-    "plot_clusters": True,  # Auf False für schnelleres Testen
-    "title": "3 populations",
-    "sparse_holes": 0,
-    "sparsity_factor": 0.9,
-    "probability_vector": [0.3, 0.2, 0.4],
-    "name": "TestNode",
-    "id": 0,
-    "distribution": [],
-    "conn_prob": [],
-    "polynom_max_power": 5,
-    "coefficients": None,
-    "center_of_mass": np.array((0.0, 0.0, 0.0)),
-    "displacement": np.array((0.0, 0.0, 0.0)),
-    "displacement_factor": 1.0,
-    "field": None,
-    
-    "encoded_polynoms_per_type": [
-        # Type 0 (x, y, z)
-        [
-            {'indices': [[0, 1], [0, 0]], 'coefficients': [1.5, 0.5], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1], [1, 0]], 'coefficients': [1.0, 0.3], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1], [2, 0]], 'coefficients': [0.8, 0.2], 'n': 5, 'decay': 0.5}
-        ],
-        # Type 1 (x, y, z)
-        [
-            {'indices': [[0, 1]], 'coefficients': [1.2], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1]], 'coefficients': [0.7], 'n': 5, 'decay': 0.5}
-        ],
-        # Type 2 (x, y, z)
-        [
-            {'indices': [[0, 1]], 'coefficients': [0.6], 'n': 5, 'decay': 0.5},
-            {'indices': [[1, 1]], 'coefficients': [1.1], 'n': 5, 'decay': 0.5},
-            {'indices': [[2, 1]], 'coefficients': [0.9], 'n': 5, 'decay': 0.5}
-        ]
-    ]
-}
-simple_params = {
-    "types": [0],
-    "neuron_models": ["iaf_psc_alpha"],
-    "grid_size": [10, 10, 10],
-    "m": [0.0, 0.0, 0.0],
-    "rot_theta": 0.0,
-    "rot_phi": 0.0,
-    "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    "dt": 0.01,
-    "old": True,
-    "num_steps": 15,
-    "plot_clusters": True,
-    "title": "simple test",
-    "sparse_holes": 0,
-    "sparsity_factor": 0.9,
-    "probability_vector": [1.0],
-    "name": "SimpleNode",
-    "id": 0,
-    
-    "encoded_polynoms_per_type": [
-        [  # Type 0
-            {'indices': [[1, 1]], 'coefficients': [1.1], 'n': 5, 'decay': 0.5},  # x
-            {'indices': [[1, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5},  # y
-            {'indices': [[2, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5}   # z
-        ]
-    ]
-}
-neuron_colors = {
-    # AdEx Familie - Blautöne (adaptive exponential)
-    "aeif_cond_alpha": "#1E88E5",
-    "aeif_cond_alpha_multisynapse": "#1976D2",
-    "aeif_cond_beta_multisynapse": "#1565C0",
-    "aeif_cond_exp": "#0D47A1",
-    "aeif_psc_alpha": "#42A5F5",
-    "aeif_psc_delta": "#64B5F6",
-    "aeif_psc_delta_clopath": "#90CAF9",
-    "aeif_psc_exp": "#2196F3",
-    
-    # IAF Familie - Grüntöne (integrate-and-fire)
-    "iaf_cond_alpha": "#43A047",
-    "iaf_cond_beta": "#388E3C",
-    "iaf_cond_exp": "#2E7D32",
-    "iaf_cond_exp_sfa_rr": "#1B5E20",
-    "iaf_cond_alpha_mc": "#66BB6A",
-    "iaf_psc_alpha": "#4CAF50",
-    "iaf_psc_alpha_multisynapse": "#81C784",
-    "iaf_psc_delta": "#A5D6A7",
-    "iaf_psc_exp": "#66BB6A",
-    "iaf_psc_exp_multisynapse": "#8BC34A",
-    "iaf_tum_2000": "#9CCC65",
-    "iaf_chs_2007": "#AED581",
-    "iaf_chxk_2008": "#C5E1A5",
-    "iaf_psc_alpha_ps": "#558B2F",
-    "iaf_psc_delta_ps": "#689F38",
-    "iaf_psc_exp_htum": "#7CB342",
-    "iaf_psc_exp_ps": "#8BC34A",
-    "iaf_psc_exp_ps_lossless": "#9CCC65",
-    
-    # Hodgkin-Huxley Familie - Rottöne (biologisch realistisch)
-    "hh_cond_exp_traub": "#D32F2F",
-    "hh_cond_beta_gap_traub": "#C62828",
-    "hh_psc_alpha": "#B71C1C",
-    "hh_psc_alpha_clopath": "#E53935",
-    "hh_psc_alpha_gap": "#F44336",
-    
-    # GIF Familie - Violett/Lila (stochastisch)
-    "gif_cond_exp": "#7B1FA2",
-    "gif_cond_exp_multisynapse": "#6A1B9A",
-    "gif_psc_exp": "#4A148C",
-    "gif_psc_exp_multisynapse": "#8E24AA",
-    "gif_pop_psc_exp": "#9C27B0",
-    
-    # MAT Familie - Orangetöne (adaptive threshold)
-    "mat2_psc_exp": "#F57C00",
-    "amat2_psc_exp": "#EF6C00",
-    
-    # GLIF Familie - Cyan
-    "glif_cond": "#00ACC1",
-    "glif_psc": "#0097A7",
-    
-    # Spezielle Modelle - verschiedene Farben
-    "izhikevich": "#FFB300",  # Amber
-    "pp_psc_delta": "#5E35B1",  # Deep Purple
-    "pp_cond_exp_mc_urbanczik": "#3949AB",  # Indigo
-    "parrot_neuron": "#78909C",  # Blue Grey
-    "parrot_neuron_ps": "#90A4AE",  # Blue Grey Light
-    "mcculloch_pitts_neuron": "#455A64",  # Blue Grey Dark
-    "siegert_neuron": "#00897B",  # Teal
-    "ht_neuron": "#D81B60",  # Pink
-    "erfc_neuron": "#6D4C41",  # Brown
-    "ginzburg_neuron": "#8D6E63",  # Brown Light
-}
-successful_neuron_models = list(neuron_colors.keys())
 
-region_names = {
-    'Neocortex Layer 2/3': 'Neocortex_L23',
-    'Neocortex Layer 4': 'Neocortex_L4',
-    'Neocortex Layer 5': 'Neocortex_L5',
-    'Neocortex Layer 6': 'Neocortex_L6',
-    'Hippocampus CA1': 'Hippocampus_CA1',
-    'Hippocampus CA3': 'Hippocampus_CA3',
-    'Thalamus Relay': 'Thalamus_Relay',
-    'Thalamus Reticular Nucleus': 'Thalamus_Reticular'
-}
 
-distributions = {
-    'aeif_cond_alpha': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
-    'aeif_cond_alpha_multisynapse': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.60, 'Hippocampus_CA3': 0.60, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
-    'aeif_cond_beta_multisynapse': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.58, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.58, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
-    'aeif_cond_exp': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
-    'aeif_psc_alpha': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
-    'aeif_psc_delta': {'Neocortex_L23': 0.48, 'Neocortex_L4': 0.43, 'Neocortex_L5': 0.53, 'Neocortex_L6': 0.48, 'Hippocampus_CA1': 0.53, 'Hippocampus_CA3': 0.53, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
-    'aeif_psc_delta_clopath': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.50, 'Thalamus_Relay': 0.03, 'Thalamus_Reticular': 0.02},
-    'aeif_psc_exp': {'Neocortex_L23': 0.50, 'Neocortex_L4': 0.45, 'Neocortex_L5': 0.55, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.02},
-    'amat2_psc_exp': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.58, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.03},
-    'gif_cond_exp': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.50, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.55, 'Hippocampus_CA1': 0.58, 'Hippocampus_CA3': 0.55, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.05},
-    'hh_cond_beta_gap_traub': {'Neocortex_L23': 0.10, 'Neocortex_L4': 0.08, 'Neocortex_L5': 0.12, 'Neocortex_L6': 0.10, 'Hippocampus_CA1': 0.25, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.15},
-    'hh_psc_alpha': {'Neocortex_L23': 0.45, 'Neocortex_L4': 0.40, 'Neocortex_L5': 0.50, 'Neocortex_L6': 0.45, 'Hippocampus_CA1': 0.60, 'Hippocampus_CA3': 0.60, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
-    'hh_psc_alpha_clopath': {'Neocortex_L23': 0.55, 'Neocortex_L4': 0.40, 'Neocortex_L5': 0.60, 'Neocortex_L6': 0.50, 'Hippocampus_CA1': 0.55, 'Hippocampus_CA3': 0.50, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.03},
-    'hh_psc_alpha_gap': {'Neocortex_L23': 0.15, 'Neocortex_L4': 0.15, 'Neocortex_L5': 0.18, 'Neocortex_L6': 0.15, 'Hippocampus_CA1': 0.30, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.25},
-    'ht_neuron': {'Neocortex_L23': 0.05, 'Neocortex_L4': 0.08, 'Neocortex_L5': 0.05, 'Neocortex_L6': 0.10, 'Hippocampus_CA1': 0.03, 'Hippocampus_CA3': 0.03, 'Thalamus_Relay': 0.90, 'Thalamus_Reticular': 0.15},
-    'iaf_chs_2007': {'Neocortex_L23': 0.02, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.02, 'Neocortex_L6': 0.03, 'Hippocampus_CA1': 0.02, 'Hippocampus_CA3': 0.02, 'Thalamus_Relay': 0.95, 'Thalamus_Reticular': 0.05},
-    'iaf_chxk_2008': {'Neocortex_L23': 0.02, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.02, 'Neocortex_L6': 0.03, 'Hippocampus_CA1': 0.02, 'Hippocampus_CA3': 0.02, 'Thalamus_Relay': 0.95, 'Thalamus_Reticular': 0.05},
-    'iaf_cond_alpha': {'Neocortex_L23': 0.65, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.65, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.15},
-    'iaf_cond_alpha_mc': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
-    'iaf_cond_beta': {'Neocortex_L23': 0.65, 'Neocortex_L4': 0.60, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.65, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.70, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.15},
-    'iaf_cond_exp': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.65, 'Thalamus_Reticular': 0.18},
-    'iaf_cond_exp_sfa_rr': {'Neocortex_L23': 0.35, 'Neocortex_L4': 0.25, 'Neocortex_L5': 0.38, 'Neocortex_L6': 0.35, 'Hippocampus_CA1': 0.35, 'Hippocampus_CA3': 0.35, 'Thalamus_Relay': 0.10, 'Thalamus_Reticular': 0.05},
-    'iaf_psc_alpha': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.70, 'Hippocampus_CA1': 0.75, 'Hippocampus_CA3': 0.75, 'Thalamus_Relay': 0.65, 'Thalamus_Reticular': 0.18},
-    'iaf_psc_alpha_multisynapse': {'Neocortex_L23': 0.72, 'Neocortex_L4': 0.67, 'Neocortex_L5': 0.72, 'Neocortex_L6': 0.72, 'Hippocampus_CA1': 0.77, 'Hippocampus_CA3': 0.77, 'Thalamus_Relay': 0.67, 'Thalamus_Reticular': 0.20},
-    'iaf_psc_delta': {'Neocortex_L23': 0.68, 'Neocortex_L4': 0.63, 'Neocortex_L5': 0.68, 'Neocortex_L6': 0.68, 'Hippocampus_CA1': 0.73, 'Hippocampus_CA3': 0.73, 'Thalamus_Relay': 0.63, 'Thalamus_Reticular': 0.17},
-    'iaf_psc_exp': {'Neocortex_L23': 0.75, 'Neocortex_L4': 0.70, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.75, 'Hippocampus_CA1': 0.78, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.70, 'Thalamus_Reticular': 0.20},
-    'iaf_psc_exp_multisynapse': {'Neocortex_L23': 0.75, 'Neocortex_L4': 0.70, 'Neocortex_L5': 0.75, 'Neocortex_L6': 0.75, 'Hippocampus_CA1': 0.78, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.70, 'Thalamus_Reticular': 0.20},
-    'iaf_tum_2000': {'Neocortex_L23': 0.70, 'Neocortex_L4': 0.65, 'Neocortex_L5': 0.70, 'Neocortex_L6': 0.68, 'Hippocampus_CA1': 0.70, 'Hippocampus_CA3': 0.72, 'Thalamus_Relay': 0.55, 'Thalamus_Reticular': 0.15},
-    'izhikevich': {'Neocortex_L23': 0.80, 'Neocortex_L4': 0.75, 'Neocortex_L5': 0.80, 'Neocortex_L6': 0.78, 'Hippocampus_CA1': 0.80, 'Hippocampus_CA3': 0.78, 'Thalamus_Relay': 0.60, 'Thalamus_Reticular': 0.25},
-    'mat2_psc_exp': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.55, 'Neocortex_L5': 0.65, 'Neocortex_L6': 0.60, 'Hippocampus_CA1': 0.62, 'Hippocampus_CA3': 0.62, 'Thalamus_Relay': 0.12, 'Thalamus_Reticular': 0.08},
-    'mcculloch_pitts_neuron': {'Neocortex_L23': 0.05, 'Neocortex_L4': 0.05, 'Neocortex_L5': 0.05, 'Neocortex_L6': 0.05, 'Hippocampus_CA1': 0.05, 'Hippocampus_CA3': 0.05, 'Thalamus_Relay': 0.05, 'Thalamus_Reticular': 0.05},
-    'parrot_neuron': {'Neocortex_L23': 0.01, 'Neocortex_L4': 0.01, 'Neocortex_L5': 0.01, 'Neocortex_L6': 0.01, 'Hippocampus_CA1': 0.01, 'Hippocampus_CA3': 0.01, 'Thalamus_Relay': 0.01, 'Thalamus_Reticular': 0.01},
-    'pp_psc_delta': {'Neocortex_L23': 0.60, 'Neocortex_L4': 0.55, 'Neocortex_L5': 0.62, 'Neocortex_L6': 0.60, 'Hippocampus_CA1': 0.65, 'Hippocampus_CA3': 0.65, 'Thalamus_Relay': 0.08, 'Thalamus_Reticular': 0.05},
-    'siegert_neuron': {'Neocortex_L23': 0.80, 'Neocortex_L4': 0.75, 'Neocortex_L5': 0.80, 'Neocortex_L6': 0.80, 'Hippocampus_CA1': 0.85, 'Hippocampus_CA3': 0.85, 'Thalamus_Relay': 0.75, 'Thalamus_Reticular': 0.20}
-}
-
-def get_probability_vector(region_full_name):
-    if region_full_name not in region_names:
-        raise ValueError("")
-    region_abbrev = region_names[region_full_name]
-    raw_values = [distributions[model][region_abbrev] for model in successful_neuron_models]
-    raw_array = np.array(raw_values)
-    total = np.sum(raw_array)
-    if total == 0:
-        raise ValueError("")
-    return raw_array / total
+def generate_node_parameters_list(n_nodes=5, 
+                                   n_types=5, 
+                                   vary_polynoms=True,
+                                   vary_types_per_node=True,
+                                   safe_mode=True,      
+                                   max_power=2,
+                                   max_coeff=0.8,
+                                 graph_id=0):      
+    """
+    Generiert Parameter-Liste für Nodes mit optionalem Safe Mode
     
-
+    Args:
+        n_nodes: Anzahl Nodes
+        n_types: Anzahl Types pro Node
+        vary_polynoms: Ob Polynome variiert werden
+        vary_types_per_node: Ob Type-Anzahl variiert
+        safe_mode: Verhindert Overflow in Polynomen
+        max_power: Maximale Potenz (0-2 empfohlen)
+        max_coeff: Maximaler Koeffizient
+    """
+    params_list = []
+    
+    for i in range(n_nodes):
+        if vary_types_per_node:
+            node_n_types = np.random.randint(1, n_types + 1)
+        else:
+            node_n_types = n_types
+        
+        types = list(range(node_n_types))
+        
+        available_models = ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_delta"]
+        neuron_models = [available_models[i % len(available_models)] 
+                        for i in range(node_n_types)]
+        
+        probability_vector = list(np.random.dirichlet([1] * node_n_types))
+        
+        params = {
+            "types": types,
+            "neuron_models": neuron_models,
+            "grid_size": [
+                np.random.randint(8, 15),
+                np.random.randint(8, 15),
+                np.random.randint(8, 15)
+            ],
+            "m": [
+                np.random.uniform(-1.0, 1.0),
+                np.random.uniform(-1.0, 1.0),
+                np.random.uniform(-1.0, 1.0)
+            ],
+            "rot_theta": np.random.uniform(-np.pi, np.pi),
+            "rot_phi": np.random.uniform(-np.pi, np.pi),
+            "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            "dt": np.random.uniform(0.005, 0.02),
+            "old": True,
+            "num_steps": np.random.randint(5, 12),
+            "plot_clusters": False,
+            "title": f"Node_{i}",
+            "sparse_holes": np.random.randint(0, 3),
+            "sparsity_factor": np.random.uniform(0.85, 0.95),
+            "probability_vector": probability_vector,
+            "name": f"Node_{i}",
+            "id": i,
+            "graph_id":graph_id,
+            "distribution": [],
+            "conn_prob": [],
+            "polynom_max_power": 5,
+            "coefficients": None,
+            "center_of_mass": np.array([0.0, 0.0, 0.0]),
+            "displacement": np.array([0.0, 0.0, 0.0]),
+            "displacement_factor": 1.0,
+            "field": None,
+        }
+        
+        if vary_polynoms:
+            encoded_polynoms = []
+            
+            for type_idx in range(node_n_types): 
+                type_polynoms = []
+                
+                for coord in range(3):  # x, y, z
+                    num_terms = np.random.randint(2, 5)  # Weniger Terms
+                    
+                    indices = []
+                    coeffs = []
+                    
+                    for _ in range(num_terms):
+                        idx = np.random.choice([0, 1, 2])
+                        
+                        if safe_mode:
+                            # Safe: kleinere Powers und Koeffizienten
+                            power = np.random.choice(range(min(max_power + 1, 4)))
+                            coeff = np.random.uniform(-max_coeff, max_coeff)
+                        else:
+                            # Original: kann overflow verursachen
+                            power = np.random.choice([0, 1, 2, 3])
+                            coeff = np.random.randn() * 0.5
+                        
+                        indices.append([idx, power])
+                        coeffs.append(float(coeff))
+                    
+                    poly_encoded = {
+                        'indices': indices,
+                        'coefficients': coeffs,
+                        'n': 5,
+                        'decay': 0.5
+                    }
+                    type_polynoms.append(poly_encoded)
+                
+                encoded_polynoms.append(type_polynoms)
+            
+            params["encoded_polynoms_per_type"] = encoded_polynoms
+        else:
+            # Identity polynoms
+            identity_polynoms = []
+            for type_idx in range(node_n_types):
+                type_polynoms = [
+                    {'indices': [[0, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5},
+                    {'indices': [[1, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5},
+                    {'indices': [[2, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5}
+                ]
+                identity_polynoms.append(type_polynoms)
+            
+            params["encoded_polynoms_per_type"] = identity_polynoms
+        
+        params_list.append(params)
+    
+    return params_list
 
 class Graph:
     def __init__(self,
@@ -3432,134 +3486,6 @@ class Graph:
     def __repr__(self):
         return f"Graph(nodes={self.nodes}, edges={sum(len(n.next) for n in self.node_list)})"
 
-def generate_node_parameters_list(n_nodes=5, 
-                                   n_types=5, 
-                                   vary_polynoms=True,
-                                   vary_types_per_node=True,
-                                   safe_mode=True,      
-                                   max_power=2,
-                                   max_coeff=0.8,
-                                 graph_id=0):      
-    """
-    Generiert Parameter-Liste für Nodes mit optionalem Safe Mode
-    
-    Args:
-        n_nodes: Anzahl Nodes
-        n_types: Anzahl Types pro Node
-        vary_polynoms: Ob Polynome variiert werden
-        vary_types_per_node: Ob Type-Anzahl variiert
-        safe_mode: Verhindert Overflow in Polynomen
-        max_power: Maximale Potenz (0-2 empfohlen)
-        max_coeff: Maximaler Koeffizient
-    """
-    params_list = []
-    
-    for i in range(n_nodes):
-        if vary_types_per_node:
-            node_n_types = np.random.randint(1, n_types + 1)
-        else:
-            node_n_types = n_types
-        
-        types = list(range(node_n_types))
-        
-        available_models = ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_delta"]
-        neuron_models = [available_models[i % len(available_models)] 
-                        for i in range(node_n_types)]
-        
-        probability_vector = list(np.random.dirichlet([1] * node_n_types))
-        
-        params = {
-            "types": types,
-            "neuron_models": neuron_models,
-            "grid_size": [
-                np.random.randint(8, 15),
-                np.random.randint(8, 15),
-                np.random.randint(8, 15)
-            ],
-            "m": [
-                np.random.uniform(-1.0, 1.0),
-                np.random.uniform(-1.0, 1.0),
-                np.random.uniform(-1.0, 1.0)
-            ],
-            "rot_theta": np.random.uniform(-np.pi, np.pi),
-            "rot_phi": np.random.uniform(-np.pi, np.pi),
-            "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-            "dt": np.random.uniform(0.005, 0.02),
-            "old": True,
-            "num_steps": np.random.randint(5, 12),
-            "plot_clusters": False,
-            "title": f"Node_{i}",
-            "sparse_holes": np.random.randint(0, 3),
-            "sparsity_factor": np.random.uniform(0.85, 0.95),
-            "probability_vector": probability_vector,
-            "name": f"Node_{i}",
-            "id": i,
-            "graph_id":graph_id,
-            "distribution": [],
-            "conn_prob": [],
-            "polynom_max_power": 5,
-            "coefficients": None,
-            "center_of_mass": np.array([0.0, 0.0, 0.0]),
-            "displacement": np.array([0.0, 0.0, 0.0]),
-            "displacement_factor": 1.0,
-            "field": None,
-        }
-        
-        if vary_polynoms:
-            encoded_polynoms = []
-            
-            for type_idx in range(node_n_types): 
-                type_polynoms = []
-                
-                for coord in range(3):  # x, y, z
-                    num_terms = np.random.randint(2, 5)  # Weniger Terms
-                    
-                    indices = []
-                    coeffs = []
-                    
-                    for _ in range(num_terms):
-                        idx = np.random.choice([0, 1, 2])
-                        
-                        if safe_mode:
-                            # Safe: kleinere Powers und Koeffizienten
-                            power = np.random.choice(range(min(max_power + 1, 4)))
-                            coeff = np.random.uniform(-max_coeff, max_coeff)
-                        else:
-                            # Original: kann overflow verursachen
-                            power = np.random.choice([0, 1, 2, 3])
-                            coeff = np.random.randn() * 0.5
-                        
-                        indices.append([idx, power])
-                        coeffs.append(float(coeff))
-                    
-                    poly_encoded = {
-                        'indices': indices,
-                        'coefficients': coeffs,
-                        'n': 5,
-                        'decay': 0.5
-                    }
-                    type_polynoms.append(poly_encoded)
-                
-                encoded_polynoms.append(type_polynoms)
-            
-            params["encoded_polynoms_per_type"] = encoded_polynoms
-        else:
-            # Identity polynoms
-            identity_polynoms = []
-            for type_idx in range(node_n_types):
-                type_polynoms = [
-                    {'indices': [[0, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5},
-                    {'indices': [[1, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5},
-                    {'indices': [[2, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5}
-                ]
-                identity_polynoms.append(type_polynoms)
-            
-            params["encoded_polynoms_per_type"] = identity_polynoms
-        
-        params_list.append(params)
-    
-    return params_list
-
 
 def createGraph(parameter_list=None, max_nodes=10, graph_id=0):
     parameter_list = parameter_list if parameter_list is not None else generate_node_parameters_list(n_nodes=max_nodes, n_types=3, graph_id=graph_id)
@@ -3617,56 +3543,6 @@ def graphInfo(graph, figsize_per_plot=(5, 4), marker_size=10, alpha=0.6, linewid
         for x in node.positions:
             pos.append(x)
     plot_point_clusters(pos)
-    
-    
-    
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
