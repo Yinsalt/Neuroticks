@@ -2356,7 +2356,6 @@ def grid2visual(
                 nest.Connect(noise, neuron, syn_spec=syn_dict_in)
                 poisson_generators.append(ex)
                 noise_generators.append(noise)
-                #simnulate the receptive field through poisson generators 
         populations.append(pop)
        
         
@@ -2364,7 +2363,7 @@ def grid2visual(
     blob_pop = blob(n=800,plot=False,m=m)
     
     
-    for idx in range(len(populations)-1):# all except for the last layer
+    for idx in range(len(populations)-1):
         nest.Connect(
             populations[idx],
             populations[idx+1],
@@ -2372,7 +2371,6 @@ def grid2visual(
             syn_spec=syn_dict_layer
         )
     
-    # Final layer -> visual blob: inhibitory mapping
     
     nest.Connect(populations[-1], blob_pop, conn_dict_ex, syn_spec_ex)
     nest.Connect(populations[-1], blob_pop, conn_dict_inh, syn_spec_inh)
@@ -2410,36 +2408,46 @@ def input_to_receptive_field(image_array, poisson_generators, max_rate=200.0):
     for i, rate in enumerate(scaled_rates):#the timing scares me.
         nest.SetStatus([poisson_generators[i]], {'rate': float(rate)})
 
-def clusters_to_neurons(
-    clusters, 
-    neuron_models
-    ):
+def clusters_to_neurons(positions, neuron_models, params_per_pop=None):
     """
-    Create NEST neuron populations from clusters of 3D coordinates.
-
+    Erstellt NEST Neuronen aus Clustern mit optionalen Parametern
+    
     Args:
-        clusters (List[np.ndarray]):
-            A list of NumPy arrays, each of shape (K_i, 3), representing the (x, y, z)
-            positions of K_i neurons in cluster i.
-        neuron_models (List[str]):
-            A list of NEST neuron model names (e.g. "iaf_psc_alpha", "izhikevich",
-            "hh_psc_alpha"), one for each cluster. Must have the same length as `clusters`.
-
+        positions: Liste von Neuron-Positionen pro Cluster (Liste von numpy arrays)
+        neuron_models: Liste von NEST Modell-Namen (z.B. ['iaf_psc_alpha', 'hh_psc_alpha'])
+        params_per_pop: Liste von Parameter-Dicts pro Population (optional)
+                       z.B. [{'C_m': 250.0, 'tau_m': 20.0}, {'C_m': 300.0}, ...]
+    
     Returns:
-        List[nest.NodeCollection]:
-            A list of NodeCollections, one per cluster, containing the created neurons
-            of the specified model placed at the given positions.
+        Liste von NEST NodeCollections
     """
     populations = []
-    for idx, pts in enumerate(clusters):
-        model = neuron_models[idx]
-
-        n_cells = pts.shape[0]
-
-        nodes = nest.Create(n=n_cells, model=model,positions=nest.spatial.free(pos=pts.tolist()))
-
-
-        populations.append(nodes)
+    
+    for i, cluster in enumerate(positions):
+        if len(cluster) == 0:
+            populations.append([])
+            continue
+        
+        model = neuron_models[i] if i < len(neuron_models) else neuron_models[0]
+        
+        if params_per_pop and i < len(params_per_pop):
+            params = params_per_pop[i]
+            print(f"  Pop {i}: Creating {len(cluster)} × {model} with {len(params)} custom params")
+        else:
+            params = {}
+            print(f"  Pop {i}: Creating {len(cluster)} × {model} with default params")
+        
+        try:
+            pop = nest.Create(model, len(cluster), params=params)
+            populations.append(pop)
+            
+            if params:
+                first_neuron_params = nest.GetStatus(pop[:1])[0]
+                print(f"    ✓ First neuron params: {list(params.keys())[:3]}...")
+        except Exception as e:
+            print(f" Error creating population {i} ({model}): {e}")
+            populations.append([])
+    
     return populations
 
 
@@ -2917,9 +2925,9 @@ def plot_graph_3d(graph,
 
 class Node:
     def __init__(self,
-                 function_generator=None,
-                 parameters=None,
-                 other=None):
+             function_generator=None,
+             parameters=None,
+             other=None):
         
         self.parent = other if other else None
         self.prev = []
@@ -2939,13 +2947,17 @@ class Node:
             "displacement": np.array([0.0, 0.0, 0.0]),
             "displacement_factor": 1.0,
             "field": None,
-            "coefficients": None
+            "coefficients": None,
+            "population_nest_params": []  # ✅ NEU! Default
         }
+        
+        self.connections = parameters.get('connections', [])
         
         if parameters:
             for k, v in default_params.items():
                 if k not in parameters:
                     parameters[k] = v
+            
             self.polynom_max_power = parameters["polynom_max_power"]
             self.polynom_parameters = parameters.get("encoded_polynoms", [])
             self.parameters = parameters
@@ -2958,9 +2970,12 @@ class Node:
             self.conn_probability = parameters.get("conn_prob", [])
             self.distribution = parameters.get("distribution", [])
             self.field = parameters.get("field", None)
-            self.graph_id=parameters.get("graph_id",0)
+            self.graph_id = parameters.get("graph_id", 0)
+            
+            # ✅ NEU: Population NEST Parameter extrahieren
+            self.population_nest_params = parameters.get("population_nest_params", [])
         else:
-            # Defaults
+            # Defaults...
             self.polynom_max_power = default_params["polynom_max_power"]
             self.polynom_parameters = default_params["encoded_polynoms"]
             self.parameters = default_params.copy()
@@ -2972,7 +2987,8 @@ class Node:
             self.conn_probability = default_params["conn_prob"]
             self.distribution = default_params["distribution"]
             self.field = default_params["field"]
-            self.graph_id=default_params["graph_id"]
+            self.graph_id = default_params["graph_id"]
+            self.population_nest_params = []
         
         if other is not None:
             self.prev.append(other)
@@ -3000,14 +3016,19 @@ class Node:
         if func_gen is not None:
             self.function_generator = func_gen
             self.coefficients = func_gen.coefficients.copy()
-        elif self.parent is not None:
-            self.function_generator = PolynomGenerator(n=self.polynom_max_power)
-            parent_coeffs = self.parent.function_generator.coefficients
-            self.coefficients = self.update_coefficients(coefficients=parent_coeffs)
-            self.function_generator.coefficients = self.coefficients
         else:
-            self.function_generator = PolynomGenerator(n=n)
-            self.coefficients = self.function_generator.coefficients.copy()
+            # Sicherstellen, dass n immer int ist
+            actual_n = self.polynom_max_power if self.polynom_max_power is not None else 5
+            if self.parent is not None:
+                self.function_generator = PolynomGenerator(n=actual_n)
+                parent_coeffs = self.parent.function_generator.coefficients
+                self.coefficients = self.update_coefficients(coefficients=parent_coeffs)
+            else:
+                self.function_generator = PolynomGenerator(n=actual_n)
+                self.coefficients = self.function_generator.coefficients.copy()
+            
+            # Jetzt sicher setzen
+            self.function_generator.coefficients = self.coefficients
     
     def update_coefficients(self, coefficients, learning_rate=0.01, update_matrix=None):
         coefficients = np.array(coefficients)
@@ -3063,27 +3084,50 @@ class Node:
         ############################################
         ############################################
         self.positions = cluster_and_flow(
-            grid_size=grid_size,
-            m=m,
-            rot_theta=rot_theta,
-            rot_phi=rot_phi,
-            transform_matrix=transform_matrix,
-            wave_params=wave_params,
-            types=types,
-            flow_functions=flow_functions,
-            dt=dt,
-            old=old,
-            num_steps=num_steps,
-            plot_clusters=plot_clusters,
-            title=title
-        )
+                grid_size=grid_size,
+                m=m,
+                rot_theta=rot_theta,
+                rot_phi=rot_phi,
+                transform_matrix=transform_matrix,
+                wave_params=wave_params,
+                types=types,
+                flow_functions=flow_functions,
+                dt=dt,
+                old=old,
+                num_steps=num_steps,
+                plot_clusters=plot_clusters,
+                title=title
+            )
+        if self.positions and any(len(cluster) > 0 for cluster in self.positions):
+            all_points = np.vstack([cluster for cluster in self.positions if len(cluster) > 0])
+            self.center_of_mass = all_points.mean(axis=0)
+        else:
+            # Fallback: ursprünglicher Mittelpunkt
+            self.center_of_mass = np.array(self.parameters.get("m", [0, 0, 0]))
         temp_graph_id=self.parameters["graph_id"]
         print(f"Metadata for graph_id {temp_graph_id} node_id  {self.id} successfully constructed.")
 
     def populate_node(self):
-        self.population = clusters_to_neurons(self.positions, self.parameters["neuron_models"])  # Singular!
-        print(f"Node {self.id} successfully populated.")
+        """Erstellt NEST Neuronen mit gespeicherten Parametern"""
+        self.population = clusters_to_neurons(
+            self.positions, 
+            self.parameters["neuron_models"],
+            self.population_nest_params  # ✅ NEU: Parameter übergeben
+        )
+        print(f"Node {self.id} successfully populated with custom parameters.")
 
+    def add_connection(self, target_node, conn_params):
+        # conn_params from Connection-Tool (like {'mask_type': 'circular', 'mask_params': {...}})
+        self.connections.append({'target': target_node, 'params': conn_params})
+
+    def connect(self):
+        for conn in self.connections:
+            target = conn['target']
+            params = conn['params']
+            for from_pop_idx, from_pop in enumerate(self.population):
+                for to_pop_idx, to_pop in enumerate(target.population):
+                    # here nest.Connect(from_pop, to_pop, conn_spec=params['conn_spec'], syn_spec=params['syn_spec'])
+                    print(f"Connecting Pop {from_pop_idx} to Target Pop {to_pop_idx} with {params['syn_model']}")
 
 
     def add_edge_to(self, other):
@@ -3437,7 +3481,9 @@ class Graph:
                 break
 
 
-
+    def build_connections(self):
+        for node in self.node_list:
+            node.connect()
                 
     def build_all(self):
         for i, node in enumerate(self.node_list, 1):
