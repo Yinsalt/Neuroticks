@@ -1414,15 +1414,6 @@
             "constraint": "none",
             "description": "Reset potential"
         },
-        "V_L": {
-            "default": -70.0,
-            "type": "float",
-            "unit": "mV",
-            "min": null,
-            "max": null,
-            "constraint": "none",
-            "description": "Leak reversal potential"
-        },
         "g_L": {
             "default": 16.667,
             "type": "float",
@@ -3042,15 +3033,6 @@
             "constraint": "positive",
             "description": "Noise level of escape rate"
         },
-        "tau_m": {
-            "default": 15.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Membrane time constant"
-        },
         "C_m": {
             "default": 250.0,
             "type": "float",
@@ -3177,6 +3159,15 @@
             "max": 20.0,
             "constraint": "positive",
             "description": "Time constants of the synaptic currents"
+        },
+        "tau_minus_triplet": {
+            "default": 15.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 100.0,
+            "constraint": "positive",
+            "description": "Membrane time constant"
         }
     },
     "hh_cond_exp_traub": {
@@ -3471,24 +3462,6 @@
             "max": 100.0,
             "constraint": "positive",
             "description": "Leak conductance"
-        },
-        "tau_ex": {
-            "default": 0.2,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Rise time of the excitatory synaptic alpha function"
-        },
-        "tau_in": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Rise time of the inhibitory synaptic alpha function"
         },
         "E_Na": {
             "default": 50.0,
@@ -4202,15 +4175,6 @@
             "constraint": "none",
             "description": "Membrane potential"
         },
-        "V_T": {
-            "default": -63.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -80.0,
-            "max": -40.0,
-            "constraint": "none",
-            "description": "Voltage offset controlling dynamics"
-        },
         "E_L": {
             "default": -60.0,
             "type": "float",
@@ -4265,24 +4229,6 @@
             "constraint": "non-negative",
             "description": "Refractory period"
         },
-        "E_ex": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -20.0,
-            "max": 20.0,
-            "constraint": "range",
-            "description": "Excitatory reversal potential"
-        },
-        "E_in": {
-            "default": -80.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -100.0,
-            "max": -60.0,
-            "constraint": "range",
-            "description": "Inhibitory reversal potential"
-        },
         "E_Na": {
             "default": 50.0,
             "type": "float",
@@ -4310,42 +4256,6 @@
             "constraint": "range",
             "description": "Potassium reversal potential"
         },
-        "g_K": {
-            "default": 8000.0,
-            "type": "float",
-            "unit": "nS",
-            "min": 1000.0,
-            "max": 20000.0,
-            "constraint": "positive",
-            "description": "Potassium peak conductance"
-        },
-        "E_M": {
-            "default": -100.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -120.0,
-            "max": -80.0,
-            "constraint": "range",
-            "description": "M-current reversal potential"
-        },
-        "g_M": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "nS",
-            "min": 0.0,
-            "max": 100.0,
-            "constraint": "non-negative",
-            "description": "M-current peak conductance"
-        },
-        "tau_max": {
-            "default": 1000.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 100.0,
-            "max": 5000.0,
-            "constraint": "positive",
-            "description": "M-current time constant"
-        },
         "I_e": {
             "default": 0.0,
             "type": "float",
@@ -4354,6 +4264,15 @@
             "max": 1000.0,
             "constraint": "none",
             "description": "External input current"
+        },
+        "g_Kv1": {
+            "default": 8000.0,
+            "type": "float",
+            "unit": "nS",
+            "min": 1000.0,
+            "max": 20000.0,
+            "constraint": "positive",
+            "description": "Potassium peak conductance"
         }
     },
     "iaf_cond_alpha_mc": {
@@ -4806,42 +4725,6 @@
             "constraint": "non-negative",
             "description": "Refractory period"
         },
-        "E_ex": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -20.0,
-            "max": 20.0,
-            "constraint": "range",
-            "description": "Excitatory reversal potential"
-        },
-        "E_in": {
-            "default": -85.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -100.0,
-            "max": -60.0,
-            "constraint": "range",
-            "description": "Inhibitory reversal potential"
-        },
-        "tau_syn_ex": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Excitatory synaptic time constant"
-        },
-        "tau_syn_in": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Inhibitory synaptic time constant"
-        },
         "I_e": {
             "default": 0.0,
             "type": "float",
@@ -4850,6 +4733,15 @@
             "max": 1000.0,
             "constraint": "none",
             "description": "External input current"
+        },
+        "tau_syn": {
+            "default": 1.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.1,
+            "max": 20.0,
+            "constraint": "positive",
+            "description": "Inhibitory synaptic time constant"
         }
     },
     "gif_pop_psc_exp": {
@@ -4954,15 +4846,6 @@
             "constraint": "positive",
             "description": "Membrane capacitance"
         },
-        "g_L": {
-            "default": 10.0,
-            "type": "float",
-            "unit": "nS",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Leak conductance"
-        },
         "E_L": {
             "default": -70.0,
             "type": "float",
@@ -4999,16 +4882,7 @@
             "constraint": "non-negative",
             "description": "Refractory period"
         },
-        "E_ex": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -20.0,
-            "max": 20.0,
-            "constraint": "range",
-            "description": "Excitatory reversal potential"
-        },
-        "E_in": {
+        "th_voltage_index": {
             "default": -85.0,
             "type": "float",
             "unit": "mV",
@@ -5017,16 +4891,16 @@
             "constraint": "range",
             "description": "Inhibitory reversal potential"
         },
-        "tau_syn_ex": {
-            "default": 2.0,
+        "g": {
+            "default": 10.0,
             "type": "float",
-            "unit": "ms",
+            "unit": "nS",
             "min": 0.1,
-            "max": 20.0,
+            "max": 100.0,
             "constraint": "positive",
-            "description": "Excitatory synaptic time constant"
+            "description": "Leak conductance"
         },
-        "tau_syn_in": {
+        "tau_syn": {
             "default": 2.0,
             "type": "float",
             "unit": "ms",
@@ -5091,16 +4965,7 @@
             "constraint": "non-negative",
             "description": "Refractory period"
         },
-        "tau_syn_ex": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Excitatory synaptic time constant"
-        },
-        "tau_syn_in": {
+        "tau_syn": {
             "default": 2.0,
             "type": "float",
             "unit": "ms",
@@ -5108,15 +4973,6 @@
             "max": 20.0,
             "constraint": "positive",
             "description": "Inhibitory synaptic time constant"
-        },
-        "I_e": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "pA",
-            "min": -1000.0,
-            "max": 1000.0,
-            "constraint": "none",
-            "description": "External input current"
         }
     },
     "iaf_psc_alpha_ps": {
@@ -5331,15 +5187,6 @@
             "constraint": "range",
             "description": "Reset potential"
         },
-        "t_ref": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Refractory period"
-        },
         "E_L": {
             "default": -70.0,
             "type": "float",
@@ -5375,6 +5222,15 @@
             "max": 1000.0,
             "constraint": "none",
             "description": "External input current"
+        },
+        "t_ref_tot": {
+            "default": 2.0,
+            "type": "float",
+            "unit": "ms",
+            "min": 0.0,
+            "max": 10.0,
+            "constraint": "non-negative",
+            "description": "Refractory period"
         }
     },
     "iaf_psc_exp_ps": {
@@ -5562,7 +5418,7 @@
         }
     },
     "pp_cond_exp_mc_urbanczik": {
-        "tau_m": {
+        "tau_minus_triplet": {
             "default": 10.0,
             "type": "float",
             "unit": "ms",
@@ -5570,99 +5426,9 @@
             "max": 1000.0,
             "constraint": "positive",
             "description": "Membrane time constant"
-        },
-        "C_m": {
-            "default": 250.0,
-            "type": "float",
-            "unit": "pF",
-            "min": 10.0,
-            "max": 1000.0,
-            "constraint": "positive",
-            "description": "Membrane capacitance"
-        },
-        "E_L": {
-            "default": -70.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -90.0,
-            "max": -50.0,
-            "constraint": "range",
-            "description": "Leak reversal potential"
-        },
-        "V_th": {
-            "default": -55.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -70.0,
-            "max": -30.0,
-            "constraint": "range",
-            "description": "Spike threshold"
-        },
-        "g_L": {
-            "default": 25.0,
-            "type": "float",
-            "unit": "nS",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Leak conductance"
-        },
-        "tau_syn_ex": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Excitatory synaptic time constant"
-        },
-        "tau_syn_in": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 20.0,
-            "constraint": "positive",
-            "description": "Inhibitory synaptic time constant"
-        },
-        "E_ex": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -20.0,
-            "max": 20.0,
-            "constraint": "range",
-            "description": "Excitatory reversal potential"
-        },
-        "E_in": {
-            "default": -85.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -100.0,
-            "max": -60.0,
-            "constraint": "range",
-            "description": "Inhibitory reversal potential"
         }
     },
     "erfc_neuron": {
-        "V_m": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -100.0,
-            "max": 100.0,
-            "constraint": "none",
-            "description": "Membrane potential"
-        },
-        "I_e": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "pA",
-            "min": -1000.0,
-            "max": 1000.0,
-            "constraint": "none",
-            "description": "External input current"
-        },
         "tau_m": {
             "default": 10.0,
             "type": "float",
@@ -5672,7 +5438,7 @@
             "constraint": "positive",
             "description": "Membrane time constant"
         },
-        "V_th": {
+        "h": {
             "default": 15.0,
             "type": "float",
             "unit": "mV",
@@ -5680,36 +5446,9 @@
             "max": 50.0,
             "constraint": "positive",
             "description": "Threshold for stochastic spiking"
-        },
-        "t_ref": {
-            "default": 2.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Refractory period"
         }
     },
     "ginzburg_neuron": {
-        "V_m": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "mV",
-            "min": -100.0,
-            "max": 100.0,
-            "constraint": "none",
-            "description": "Membrane potential"
-        },
-        "I_e": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "pA",
-            "min": -1000.0,
-            "max": 1000.0,
-            "constraint": "none",
-            "description": "External input current"
-        },
         "tau_m": {
             "default": 10.0,
             "type": "float",
@@ -5747,15 +5486,5 @@
             "description": "Ginzburg coefficient 3"
         }
     },
-    "parrot_neuron_ps": {
-        "t_ref": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Refractory period (minimal inter-spike interval)"
-        }
-    }
+    "parrot_neuron_ps": {}
 }
