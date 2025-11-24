@@ -2408,48 +2408,121 @@ def input_to_receptive_field(image_array, poisson_generators, max_rate=200.0):
     for i, rate in enumerate(scaled_rates):#the timing scares me.
         nest.SetStatus([poisson_generators[i]], {'rate': float(rate)})
 
-def clusters_to_neurons(positions, neuron_models, params_per_pop=None):
+
+
+try:
+    with open("functional_models.json") as f:
+        VALID_MODEL_PARAMS = json.load(f)
+except FileNotFoundError:
+    print(" Warning: functional_models.json not found - parameter validation disabled")
+    VALID_MODEL_PARAMS = {}
+
+def filter_params_for_model(model_name, params):
+
+    if not params:
+        return {}
+    
+    # Wenn wir keine Infos haben, gib leeres dict zurück (NEST defaults)
+    if model_name not in VALID_MODEL_PARAMS:
+        print(f"Keine Parameter-Info für {model_name} - verwende nur NEST defaults")
+        return {}
+    
+    # Hole gültige Parameter-Namen für dieses Modell
+    valid_param_names = set(VALID_MODEL_PARAMS[model_name].keys())
+    
+    # Filtere: behalte nur gültige Parameter
+    filtered = {}
+    invalid = []
+    
+    for key, value in params.items():
+        if key in valid_param_names:
+            filtered[key] = value
+        else:
+            invalid.append(key)
+    
+    # Info ausgeben wenn Parameter gefiltert wurden
+    if invalid:
+        print(f" Invalid Parameter: {', '.join(invalid)}")
+    
+    return filtered
+
+
+
+def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_positions=True):
     """
-    Erstellt NEST Neuronen aus Clustern mit optionalen Parametern
+    Erstellt NEST Neuronen aus Clustern mit optionalen RÄUMLICHEN Positionen.
     
     Args:
-        positions: Liste von Neuron-Positionen pro Cluster (Liste von numpy arrays)
-        neuron_models: Liste von NEST Modell-Namen (z.B. ['iaf_psc_alpha', 'hh_psc_alpha'])
-        params_per_pop: Liste von Parameter-Dicts pro Population (optional)
-                       z.B. [{'C_m': 250.0, 'tau_m': 20.0}, {'C_m': 300.0}, ...]
-    
+        positions: Liste von numpy arrays, jedes array shape (N, 3) für 3D Positionen
+        neuron_models: Liste von NEST model strings, z.B. ["iaf_psc_alpha", "hh_psc_alpha"]
+        params_per_pop: Liste von parameter dicts, eines pro Population (optional)
+        set_positions: Wenn True, werden räumliche Positionen gesetzt
+        
     Returns:
-        Liste von NEST NodeCollections
+        Liste von NEST NodeCollection objects (populations)
     """
     populations = []
     
     for i, cluster in enumerate(positions):
+        # Skip leere Cluster
         if len(cluster) == 0:
+            print(f"  Pop {i}: Leer - übersprungen")
             populations.append([])
             continue
         
+        # Wähle Modell
         model = neuron_models[i] if i < len(neuron_models) else neuron_models[0]
         
+        # ===== PARAMETER VORBEREITUNG UND VALIDIERUNG =====
         if params_per_pop and i < len(params_per_pop):
-            params = params_per_pop[i]
-            print(f"  Pop {i}: Creating {len(cluster)} × {model} with {len(params)} custom params")
+            raw_params = params_per_pop[i].copy() if params_per_pop[i] else {}
+            
+            # ✅ VALIDIERE: Filtere ungültige Parameter raus
+            validated_params = filter_params_for_model(model, raw_params)
+            
+            print(f"  Pop {i}: Erstelle {len(cluster)} × {model}")
+            print(f"    → {len(raw_params)} Parameter geliefert, {len(validated_params)} gültig")
         else:
-            params = {}
-            print(f"  Pop {i}: Creating {len(cluster)} × {model} with default params")
+            validated_params = {}
+            print(f"  Pop {i}: Erstelle {len(cluster)} × {model} mit NEST defaults")
         
+        # ===== NEST NEURON CREATION =====
         try:
-            pop = nest.Create(model, len(cluster), params=params)
+            if set_positions:
+                # Konvertiere zu Liste falls nötig
+                cluster_list = cluster.tolist() if isinstance(cluster, np.ndarray) else cluster
+                
+                # ✅ SPATIAL CREATION: positions + params
+                pop = nest.Create(
+                    model,
+                    positions=nest.spatial.free(pos=cluster_list),
+                    params=validated_params  # Nur validierte Parameter!
+                )
+                
+                print(f"    ✓ {len(cluster)} spatial neurons erstellt")
+                
+                # Verify positions
+                try:
+                    actual_pos = nest.GetPosition(pop)
+                    if len(actual_pos) == len(cluster):
+                        print(f"    ✓ Positionen verifiziert ({len(actual_pos)} Neuronen)")
+                    else:
+                        print(f"    ⚠️  Position mismatch: {len(actual_pos)} vs {len(cluster)}")
+                except Exception as e:
+                    print(f"    ⚠️  Position verification failed: {e}")
+            else:
+                # Non-spatial creation
+                pop = nest.Create(model, len(cluster), params=validated_params)
+                print(f"    ✓ {len(cluster)} non-spatial neurons erstellt")
+            
             populations.append(pop)
             
-            if params:
-                first_neuron_params = nest.GetStatus(pop[:1])[0]
-                print(f"    ✓ First neuron params: {list(params.keys())[:3]}...")
         except Exception as e:
-            print(f" Error creating population {i} ({model}): {e}")
+            print(f"    ✗ FEHLER bei Pop {i} ({model}): {e}")
+            print(f"       Versuchte Parameter: {list(validated_params.keys())}")
             populations.append([])
     
     return populations
-
 
 def xy_distance(a, b):
     # ignore z: lateral distance
@@ -3084,35 +3157,63 @@ class Node:
         ############################################
         ############################################
         self.positions = cluster_and_flow(
-                grid_size=grid_size,
-                m=m,
-                rot_theta=rot_theta,
-                rot_phi=rot_phi,
-                transform_matrix=transform_matrix,
-                wave_params=wave_params,
-                types=types,
-                flow_functions=flow_functions,
-                dt=dt,
-                old=old,
-                num_steps=num_steps,
-                plot_clusters=plot_clusters,
-                title=title
-            )
+            grid_size=grid_size,
+            m=m,    # ← Translation wird in transform_points() angewendet
+            rot_theta=rot_theta,
+            rot_phi=rot_phi,
+            transform_matrix=transform_matrix,
+            wave_params=wave_params,
+            types=types,
+            flow_functions=flow_functions,
+            dt=dt,
+            old=old,
+            num_steps=num_steps,
+            plot_clusters=plot_clusters,
+            title=title
+        )
+        
+
+        
+        # ✅ JETZT center_of_mass berechnen (mit verschobenen Positionen)
         if self.positions and any(len(cluster) > 0 for cluster in self.positions):
             all_points = np.vstack([cluster for cluster in self.positions if len(cluster) > 0])
             self.center_of_mass = all_points.mean(axis=0)
         else:
-            # Fallback: ursprünglicher Mittelpunkt
-            self.center_of_mass = np.array(self.parameters.get("m", [0, 0, 0]))
-        temp_graph_id=self.parameters["graph_id"]
-        print(f"Metadata for graph_id {temp_graph_id} node_id  {self.id} successfully constructed.")
-
+            # Fallback: user input
+            self.center_of_mass = m
+            pass
+        
+        temp_graph_id = self.parameters["graph_id"]
+        print(f"Metadata for graph_id {temp_graph_id} node_id {self.id} successfully constructed.")
     def populate_node(self):
         """Erstellt NEST Neuronen mit gespeicherten Parametern"""
+        
+        # ✅ FALLBACK: Wenn keine Populationen → Placeholder
+        if not self.positions or all(len(cluster) == 0 for cluster in self.positions):
+            print(f"⚠ Node {self.id} has no populations! Creating placeholder neuron...")
+            
+            # Erstelle ein einzelnes Neuron am center_of_mass
+            placeholder_pos = [self.center_of_mass]
+            
+            try:
+                placeholder_pop = nest.Create(
+                    "iaf_psc_alpha",  # Simples Standard-Modell
+                    1,
+                    positions=nest.spatial.free(placeholder_pos)
+                )
+                self.population = [placeholder_pop]
+                print(f"  ✓ Placeholder neuron created at {self.center_of_mass}")
+            except Exception as e:
+                print(f"  ✗ Failed to create placeholder: {e}")
+                self.population = []
+            
+            return
+        
+        # ✅ NORMAL: Reguläre Population mit Parametern
         self.population = clusters_to_neurons(
             self.positions, 
             self.parameters["neuron_models"],
-            self.population_nest_params  # ✅ NEU: Parameter übergeben
+            self.population_nest_params
         )
         print(f"Node {self.id} successfully populated with custom parameters.")
 
@@ -3358,10 +3459,17 @@ class Graph:
             params['name'] = f"Node_{node_id}"
         
         if other is not None:
-            if displacement is None:
-                displacement = self.random_direction(displacement_factor)
-            new_position = np.array(other.center_of_mass) + displacement
-            params['m'] = new_position.tolist()
+            # ✅ Nur auto-position wenn m nicht explizit gesetzt wurde
+            has_explicit_position = (
+                parameters and 'm' in parameters and 
+                not np.allclose(parameters['m'], [0.0, 0.0, 0.0])
+            )
+            
+            if not has_explicit_position:
+                if displacement is None:
+                    displacement = self.random_direction(displacement_factor)
+                new_position = np.array(other.center_of_mass) + displacement
+                params['m'] = new_position.tolist()
         elif not is_root and 'm' not in params:
             params['m'] = [0.0, 0.0, 0.0]
         
@@ -3375,7 +3483,6 @@ class Graph:
             parameters=params,
             other=other
         )
-        new_node.build()
         
         new_node.id = node_id
         new_node.name = params['name']
@@ -3391,7 +3498,7 @@ class Graph:
         
         if auto_build:
             try:
-                new_node.build()
+                new_node.build()  # ✅ Only build once when requested
             except Exception as e:
                 print(f"⚠ Build failed for Node {node_id}: {e}")
         
