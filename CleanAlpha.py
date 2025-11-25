@@ -10,6 +10,8 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from neuron_toolbox import *
 from WidgetLib import *
+from WidgetLib import GraphOverviewWidget
+from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder
 
 # ===== NEST INITIALIZATION =====
 # Structural Plasticity wird über Menüleiste gesteuert (default: enabled)
@@ -265,6 +267,64 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("🔄 Refresh Visualizations", self)
         refresh_action.triggered.connect(self.update_visualizations)
         view_menu.addAction(refresh_action)
+
+
+
+    def init_connection_system(self):
+        """
+        Initialize the connection system.
+        Call this in MainWindow.__init__() after graphs are created.
+        """
+        from connection_logic import ConnectionExecutor
+        
+        # Create executor with reference to graphs
+        self.connection_executor = ConnectionExecutor(self.graphs)
+        
+        # Connect ConnectionTool if it exists
+        if hasattr(self, 'connection_tool'):
+            self.connection_tool.set_graphs(self.graphs)
+    
+    def safe_reset_kernel(self, enable_structural_plasticity=False):
+        """
+        Safely reset NEST kernel and recreate everything.
+        
+        USE THIS INSTEAD OF bare nest.ResetKernel()!
+        
+        Args:
+            enable_structural_plasticity: Re-enable structural plasticity
+        
+        Returns:
+            Statistics dictionary
+        """
+        
+        # Update status
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage("Resetting NEST kernel...")
+        
+        # Perform safe reset
+        stats = safe_nest_reset_and_repopulate(
+            self.graphs,
+            enable_structural_plasticity=enable_structural_plasticity,
+            verbose=True
+        )
+        
+        # Update status
+        msg = (f"Reset complete: {stats['populations_created']} populations, "
+               f"{stats['connections_created']} connections")
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage(msg, 5000)
+        
+        # Update visualization if needed
+        if hasattr(self, 'update_visualization'):
+            self.update_visualization()
+        
+        return stats
+
+
+
+
+
+
     def rebuild_node_with_new_polynomials(self, node_idx, polynomials):
         """✅ NEU: Rebuildet Node mit neuen Polynomen"""
         # Finde den entsprechenden Graph (hier: letzter erstellter)
@@ -305,58 +365,67 @@ class MainWindow(QMainWindow):
         # Update visualization
         self.update_visualizations()
         print(f"✅ Node {node_idx} rebuilt successfully!")
-    def toggle_structural_plasticity(self, checked):
-        """Toggle Structural Plasticity mit NEST Reset"""
-        self.structural_plasticity_enabled = checked
+    def toggle_structural_plasticity(self, enabled):
+        """
+        Toggle structural plasticity (requires kernel reset).
         
-        print("\n" + "="*70)
-        if checked:
-            self.status_bar.set_status("🧠 Enabling Structural Plasticity...", color="#1976D2")
-            print("🧠 ENABLING Structural Plasticity")
-            nest.EnableStructuralPlasticity()
+        Replace your existing toggle_structural_plasticity method with this.
+        """
+        import nest
+        
+        if enabled:
+            # Reset and re-enable
+            self.safe_reset_kernel(enable_structural_plasticity=True)
         else:
-            self.status_bar.set_status("🚫 Disabling Structural Plasticity...", color="#1976D2")
-            print("🚫 DISABLING Structural Plasticity")
-            nest.DisableStructuralPlasticity()
+            # Just reset without enabling
+            self.safe_reset_kernel(enable_structural_plasticity=False)
+    
+    def on_graph_created(self, graph):
+        """
+        Called when a new graph is created.
+        Ensures connection system is updated.
+        """
+        # Add to graphs dict
+        self.graphs[graph.graph_id] = graph
         
-        self.status_bar.set_progress(20)
-        QApplication.processEvents()
+        # Update connection tool
+        if hasattr(self, 'connection_tool'):
+            self.connection_tool.set_graphs(self.graphs)
+    
+    def on_graph_deleted(self, graph_id):
+        """
+        Called when a graph is deleted.
+        Ensures connection system is updated.
+        """
+        if graph_id in self.graphs:
+            del self.graphs[graph_id]
         
-        # Reset NEST
-        self.status_bar.set_status("🔄 Resetting NEST Kernel...", color="#1976D2")
-        print("🔄 Resetting NEST Kernel...")
-        nest.ResetKernel()
-        self.status_bar.set_progress(40)
-        QApplication.processEvents()
+        # Update connection tool
+        if hasattr(self, 'connection_tool'):
+            self.connection_tool.set_graphs(self.graphs)
+    
+    def get_connection_summary(self):
+        """Get summary of all connections."""
+        return get_all_connections_summary(self.graphs)
+    
+    def export_connections(self, filepath):
+        """Export all connections to JSON file."""
+        import json
         
-        # Repopulate all graphs
-        if graph_list:
-            print(f"📊 Repopulating {len(graph_list)} graphs...")
-            total_graphs = len(graph_list)
-            
-            for i, graph in enumerate(graph_list):
-                self.status_bar.set_status(f"📊 Repopulating graph {i+1}/{total_graphs}...", color="#1976D2")
-                self.status_bar.set_progress(40 + int(40 * (i+1) / total_graphs))
-                QApplication.processEvents()
-                
-                print(f"  • Graph {graph.graph_id}: {graph.graph_name}")
-                for node in graph.node_list:
-                    node.populate_node()
-            
-            # Update visualizations
-            self.status_bar.set_status("📊 Updating visualizations...", color="#1976D2")
-            self.status_bar.set_progress(90)
-            QApplication.processEvents()
-            
-            self.update_visualizations()
-            self.graph_overview.update_tree()
-            print("✅ All graphs repopulated successfully!")
-            
-            self.status_bar.show_success("Plasticity toggled successfully!")
-        else:
-            self.status_bar.show_success("Plasticity toggled (no graphs)")
+        connections = export_connections_to_dict(self.graphs)
+        with open(filepath, 'w') as f:
+            json.dump(connections, f, indent=2)
         
-        print("="*70 + "\n")
+        return len(connections)
+    
+    def import_connections(self, filepath, clear_existing=True):
+        """Import connections from JSON file."""
+        import json
+        
+        with open(filepath, 'r') as f:
+            connections = json.load(f)
+        
+        return import_connections_from_dict(self.graphs, connections, clear_existing)
     
     def manual_nest_reset(self):
         """Manueller NEST Reset"""
@@ -482,8 +551,7 @@ class MainWindow(QMainWindow):
         # Top section (60%)
         top_layout = QHBoxLayout()
         top_left = self.create_top_left()
-        self.graph_overview = GraphOverviewWidget(graph_list=graph_list)
-        
+        self.graph_overview = GraphOverviewWidget(self, graph_list=graph_list)        
         top_layout.addLayout(top_left, 7)
         top_layout.addWidget(self.graph_overview, 3)
         
@@ -516,7 +584,7 @@ class MainWindow(QMainWindow):
         
         btn_neurons = QPushButton("Neurons")
         btn_graph = QPushButton("Graph")
-        btn_sim = QPushButton("Simulation")
+        btn_sim = QPushButton("Firing patterns Preview")
         btn_other = QPushButton("Other")
         
         scene_layout.addWidget(btn_neurons)
@@ -543,7 +611,7 @@ class MainWindow(QMainWindow):
         # Buttons verbinden
         btn_neurons.clicked.connect(lambda: self.vis_stack.setCurrentIndex(0))
         btn_graph.clicked.connect(lambda: self.vis_stack.setCurrentIndex(1))
-        btn_sim.clicked.connect(lambda: self.vis_stack.setCurrentIndex(2))
+        btn_sim.clicked.connect(lambda: (self.vis_stack.setCurrentIndex(2), self.blink_widget.build_scene()))
         
         # Button für "Other" zeigt jetzt das Blinken
         btn_other.clicked.connect(lambda: self.vis_stack.setCurrentIndex(3))
@@ -614,30 +682,28 @@ class MainWindow(QMainWindow):
             
         return layout
     def closeEvent(self, event):
-        """Proper cleanup beim Schließen"""
         print("\nCleaning up...")
-        
         try:
-            # Clear PyVista plotters
+            # 1. Timer stoppen BEVOR Plotter geschlossen werden
+            if hasattr(self, 'blink_widget'):
+                self.blink_widget.stop_animation()
+            
+            # 2. Plotter schließen
             if hasattr(self, 'neuron_plotter'):
-                self.neuron_plotter.clear()
                 self.neuron_plotter.close()
-            
             if hasattr(self, 'graph_plotter'):
-                self.graph_plotter.clear()
                 self.graph_plotter.close()
-            
-            print("PyVista cleanup done")
+                
         except Exception as e:
             print(f"Cleanup error: {e}")
-        
         event.accept()
 
+        
     def create_bottom_right(self):
-        """Tool selector buttons and plots."""
+        """Tool selector buttons and Simulation Controls."""
         layout = QHBoxLayout()
         
-        # Tool buttons
+        # Tool buttons (Links)
         btn_widget = QWidget()
         btn_layout = QVBoxLayout()
         
@@ -647,11 +713,13 @@ class MainWindow(QMainWindow):
         btn_connect = QPushButton("Connections")
         btn_rebuild = QPushButton("Rebuild")
         btn_rebuild.setStyleSheet("background-color: #FF5722; color: white; font-weight: bold;")
+        
         btn_create.clicked.connect(lambda: self.tool_stack.setCurrentIndex(0))
         btn_flow.clicked.connect(lambda: self.tool_stack.setCurrentIndex(1))
         btn_edit.clicked.connect(lambda: self.tool_stack.setCurrentIndex(2))
         btn_connect.clicked.connect(lambda: self.tool_stack.setCurrentIndex(3))
-        btn_rebuild.clicked.connect(self.rebuild_all_graphs)        
+        btn_rebuild.clicked.connect(self.rebuild_all_graphs)
+        
         btn_layout.addWidget(btn_create)
         btn_layout.addWidget(btn_flow)
         btn_layout.addWidget(btn_edit)
@@ -659,11 +727,17 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(btn_rebuild)
         btn_widget.setLayout(btn_layout)
         
-        # Plots
-        plots = Color("lightgreen")
+        # Control Panel (Rechts - ersetzt Color("lightgreen"))
+        self.control_panel = SimulationControlWidget()
         
-        layout.addWidget(btn_widget, 7)
-        layout.addWidget(plots, 3)
+        # Signale verbinden
+        self.control_panel.btn_start.clicked.connect(self.start_simulation)
+        self.control_panel.btn_stop.clicked.connect(self.stop_simulation)
+        self.control_panel.btn_save.clicked.connect(self.save_all_graphs_dialog)
+        self.control_panel.btn_load.clicked.connect(self.load_all_graphs_dialog)
+        
+        layout.addWidget(btn_widget, 6)
+        layout.addWidget(self.control_panel, 4)
         
         return layout
     
@@ -799,11 +873,231 @@ class MainWindow(QMainWindow):
     def rebuild_all_graphs(self):
         
         print("REBUILD NOT FINISHED")
-        
+    
+    def start_simulation(self):
+        print("▶ Simulation started (Not implemented yet)")
+        self.status_bar.set_status("Simulation running...", color="#4CAF50")
 
-# ===== MAIN =====
+    def stop_simulation(self):
+        print("⏹ Simulation stopped")
+        self.status_bar.set_status("Simulation stopped", color="#F44336")
+
+    def save_all_graphs_dialog(self):
+        """Öffnet Dialog zum Speichern ALLER Graphen in einer Projektdatei."""
+        if not graph_list:
+            QMessageBox.warning(self, "Save Error", "No graphs to save!")
+            return
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
+        )
+
+        if filepath:
+            if not filepath.endswith('.json'):
+                filepath += '.json'
+            
+            try:
+                # Wir nutzen die interne Logik von save_graph, aber für eine Liste
+                project_data = {
+                    'meta': {
+                        'version': '2.0',
+                        'type': 'neuroticks_project',
+                        'timestamp': str(np.datetime64('now'))
+                    },
+                    'graphs': []
+                }
+
+                # Sammle Daten für jeden Graph
+                for graph in graph_list:
+                    # Wir simulieren die save_graph Logik, aber geben das Dict zurück
+                    # Dazu nutzen wir die Helper aus graph_io.py (NumpyEncoder muss dort importiert sein)
+                    
+                    nodes_data = []
+                    for node in graph.node_list:
+                        node_data = {
+                            'id': node.id,
+                            'name': node.name,
+                            'graph_id': graph.graph_id,
+                            'parameters': _clean_params(node.parameters),
+                            # WICHTIG: Positionen speichern!
+                            'positions': [pos.tolist() if isinstance(pos, np.ndarray) else list(pos) 
+                                          for pos in node.positions] if node.positions else [],
+                            'center_of_mass': list(node.center_of_mass),
+                            'connections': _serialize_connections(node.connections)
+                        }
+                        nodes_data.append(node_data)
+
+                    graph_data = {
+                        'graph_id': graph.graph_id,
+                        'graph_name': getattr(graph, 'graph_name', f'Graph_{graph.graph_id}'),
+                        'max_nodes': graph.max_nodes,
+                        'init_position': list(graph.init_position),
+                        'polynom_max_power': graph.polynom_max_power,
+                        'nodes': nodes_data
+                    }
+                    project_data['graphs'].append(graph_data)
+
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(project_data, f, cls=NumpyEncoder, indent=2)
+                
+                self.status_bar.show_success(f"Project saved to {filepath}")
+                print(f"✅ Project saved: {len(graph_list)} graphs.")
+
+            except Exception as e:
+                self.status_bar.show_error(f"Save failed: {e}")
+                print(f"❌ Save failed: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def load_all_graphs_dialog(self):
+        """Lädt Graphen, baut sie und erstellt Verbindungen."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Project", "", "JSON Files (*.json);;All Files (*)"
+        )
+
+        if not filepath:
+            return
+
+        try:
+            self.status_bar.set_status("📂 Loading project...", color="#2196F3")
+            self.status_bar.set_progress(10)
+            QApplication.processEvents()
+
+            with open(filepath, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+
+            if 'graphs' not in project_data:
+                raise ValueError("Invalid file format: 'graphs' key missing")
+
+            # 1. Alles zurücksetzen
+            print("\n🔄 Resetting Environment for Load...")
+            nest.ResetKernel()
+            global graph_list
+            graph_list.clear()
+            
+            # Globale IDs zurücksetzen (falls nötig)
+            global next_graph_id
+            next_graph_id = 0
+
+            total_graphs = len(project_data['graphs'])
+            
+            # 2. Graphen und Nodes rekonstruieren
+            for i, g_data in enumerate(project_data['graphs']):
+                self.status_bar.set_status(f"Building Graph {i+1}/{total_graphs}...")
+                self.status_bar.set_progress(20 + int(40 * (i/total_graphs)))
+                QApplication.processEvents()
+
+                # Graph Objekt erstellen
+                graph = Graph(
+                    graph_name=g_data.get('graph_name', 'LoadedGraph'),
+                    graph_id=g_data['graph_id'],
+                    parameter_list=[],
+                    polynom_max_power=g_data.get('polynom_max_power', 5),
+                    position=g_data.get('init_position', [0,0,0]),
+                    max_nodes=g_data.get('max_nodes', 100)
+                )
+                
+                # IDs synchronisieren
+                next_graph_id = max(next_graph_id, g_data['graph_id'] + 1)
+
+                # Nodes erstellen
+                for nd in g_data['nodes']:
+                    params = nd['parameters'].copy()
+                    # Wichtige Attribute wiederherstellen
+                    params['id'] = nd['id']
+                    params['name'] = nd['name']
+                    params['graph_id'] = nd['graph_id']
+                    params['connections'] = nd.get('connections', [])
+                    
+                    if 'center_of_mass' in nd:
+                        params['center_of_mass'] = np.array(nd['center_of_mass'])
+                    
+                    # Node erstellen (ohne auto_build, wir laden Positionen)
+                    new_node = graph.create_node(
+                        parameters=params,
+                        is_root=(nd['id']==0), # Vereinfacht
+                        auto_build=False
+                    )
+                    
+                    # Positionen laden (Punktwolken)
+                    if nd.get('positions'):
+                        new_node.positions = [np.array(pos) for pos in nd['positions']]
+                        # Da positions existieren, wird populate_node() diese nutzen und 
+                        # keine neuen generieren!
+                    
+                    # NEST Neuronen erstellen
+                    new_node.populate_node()
+
+                graph_list.append(graph)
+                print(f"✅ Graph '{graph.graph_name}' loaded and populated.")
+
+            # 3. Verbindungen wiederherstellen (über alle Graphen hinweg)
+            self.status_bar.set_status("🔗 Recreating Connections...")
+            self.status_bar.set_progress(80)
+            QApplication.processEvents()
+
+            # Wir nutzen die "Large Function" aus connection_logic
+            # create_nest_connections_from_stored erwartet ein Dict {id: graph}
+            graphs_dict = {g.graph_id: g for g in graph_list}
+            
+            created, failed, _ = create_nest_connections_from_stored(graphs_dict, verbose=True)
+
+            # 4. GUI Refresh
+            self.status_bar.set_status("🎨 Refreshing View...")
+            self.status_bar.set_progress(95)
+            QApplication.processEvents()
+
+            self.update_visualizations()
+            self.graph_overview.update_tree()
+            self.connection_tool.refresh()
+            self.graph_editor.refresh_graph_list()
+
+            msg = f"Loaded {total_graphs} graphs. Connections: {created} created, {failed} failed."
+            self.status_bar.show_success("Project loaded successfully!")
+            print(f"\n✅ {msg}")
+            QMessageBox.information(self, "Load Complete", msg)
+
+        except Exception as e:
+            self.status_bar.show_error(f"Load failed: {e}")
+            print(f"❌ Load failed: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Load Error", str(e))
+
+
+
+
+# ============================================================================
+# USAGE EXAMPLES
+# ============================================================================
+
 if __name__ == "__main__":
+    run_tests()
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    app.exec()
+    print("\n🧪 Testing generate_node_parameters_list with self-connections:\n")
+    
+    params = generate_node_parameters_list(
+        n_nodes=3,
+        n_types=2,
+        graph_id=0,
+        add_self_connections=True,
+        self_conn_probability=1.0
+    )
+    
+    for p in params:
+        print(f"Node {p['id']}: {len(p['connections'])} connections")
+        for conn in p['connections']:
+            src = conn['source']
+            tgt = conn['target']
+            print(f"  - {conn['name']}: G{src['graph_id']}N{src['node_id']}P{src['pop_id']} → "
+                  f"G{tgt['graph_id']}N{tgt['node_id']}P{tgt['pop_id']}")
+            if src['node_id'] == tgt['node_id']:
+                print("    ✅ Self-Connection!")
+    
+    print("\n✅ Test passed!")
+
+
+# ===== MAIN =====
