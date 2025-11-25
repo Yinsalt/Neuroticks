@@ -2418,31 +2418,35 @@ except FileNotFoundError:
     VALID_MODEL_PARAMS = {}
 
 def filter_params_for_model(model_name, params):
-
     if not params:
         return {}
     
-    # Wenn wir keine Infos haben, gib leeres dict zurück (NEST defaults)
     if model_name not in VALID_MODEL_PARAMS:
-        print(f"Keine Parameter-Info für {model_name} - verwende nur NEST defaults")
         return {}
     
-    # Hole gültige Parameter-Namen für dieses Modell
-    valid_param_names = set(VALID_MODEL_PARAMS[model_name].keys())
-    
-    # Filtere: behalte nur gültige Parameter
+    model_def = VALID_MODEL_PARAMS[model_name]
     filtered = {}
-    invalid = []
     
     for key, value in params.items():
-        if key in valid_param_names:
-            filtered[key] = value
-        else:
-            invalid.append(key)
-    
-    # Info ausgeben wenn Parameter gefiltert wurden
-    if invalid:
-        print(f" Invalid Parameter: {', '.join(invalid)}")
+        if key in model_def:
+            param_info = model_def[key]
+            expected_type = param_info.get('type', 'float')
+            
+            # AUTO-FIX: Float zu Array konvertieren, wenn Array erwartet
+            if expected_type == 'array' and isinstance(value, (int, float)):
+                print(f"  ⚠️ Auto-fixing param '{key}' for {model_name}: {value} -> [{value}]")
+                filtered[key] = [float(value)]
+            
+            # AUTO-FIX: Array zu Float, wenn Float erwartet (und Array Länge 1 hat)
+            elif expected_type == 'float' and isinstance(value, (list, tuple, np.ndarray)):
+                if len(value) == 1:
+                    print(f"  ⚠️ Auto-fixing param '{key}' for {model_name}: {value} -> {value[0]}")
+                    filtered[key] = float(value[0])
+                else:
+                    print(f"  ❌ Cannot auto-fix param '{key}' for {model_name}: Expected float, got vector {value}")
+                    continue
+            else:
+                filtered[key] = value
     
     return filtered
 
