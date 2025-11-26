@@ -1112,8 +1112,7 @@ class GraphOverviewWidget(QWidget):
     node_selected = pyqtSignal(int, int)
     population_selected = pyqtSignal(int, int, int)
     connection_selected = pyqtSignal(dict)
-    
-    # Farben (High Contrast)
+    requestConnectionCreation = pyqtSignal(int, int, int) # graph_id, node_id, pop_id    # Farben (High Contrast)
     COLOR_GRAPH_BG = "#000000"      
     COLOR_GRAPH_FG = "#87CEEB"      
     COLOR_NODE_BG = "#8B0000"       
@@ -1216,6 +1215,8 @@ class GraphOverviewWidget(QWidget):
                 image: url(none); /* Qt Standard Pfeile nutzen oder custom icons hier setzen */
             }
         """)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.tree)
         
@@ -1223,7 +1224,47 @@ class GraphOverviewWidget(QWidget):
         self.status_label = QLabel("No graphs")
         self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 3px;") 
         layout.addWidget(self.status_label)
-    
+
+    def _show_context_menu(self, position):
+        """Zeigt Kontextmenü bei Rechtsklick auf ein Item."""
+        item = self.tree.itemAt(position)
+        if not item:
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        item_type = data.get('type')
+
+        # Wir erlauben das Menü für Nodes UND Populationen
+        if item_type in ['node', 'population']:
+            graph_id = data['graph_id']
+            node_id = data['node_id']
+
+            # Wenn Node geklickt -> Pop -1 (oder 0), wenn Pop geklickt -> echte ID
+            pop_id = data.get('pop_id', 0) 
+
+            menu = QMenu(self)
+            menu.setStyleSheet("""
+                QMenu { background-color: #2b2b2b; border: 1px solid #555; color: white; }
+                QMenu::item:selected { background-color: #2196F3; }
+            """)
+
+            # Text anpassen je nach Typ
+            target_name = f"Pop {pop_id}" if item_type == 'population' else "Node (Pop 0)"
+
+            action_add = QAction(f"Create connection from ({target_name}) to ...", self)
+
+            # Signal emitten mit 3 Argumenten
+            action_add.triggered.connect(
+                lambda: self.requestConnectionCreation.emit(graph_id, node_id, pop_id)
+            )
+            menu.addAction(action_add)
+
+            menu.exec(self.tree.viewport().mapToGlobal(position))
+
+
     def update_tree(self):
         """Baut den Baum neu auf."""
         self.tree.clear()
@@ -3734,6 +3775,36 @@ class ConnectionTool(QWidget):
         if self.target_graph_combo.count() > 0:
             self.target_graph_combo.setCurrentIndex(0)
 
+    def set_source(self, graph_id, node_id, pop_id=None):
+        """Setzt die Source-Comboboxen programmatisch."""
+        print(f"🤖 Auto-setting source: G{graph_id} N{node_id} P{pop_id}")
+        
+        # 1. Graph setzen
+        idx_g = self.source_graph_combo.findData(graph_id)
+        if idx_g >= 0:
+            self.source_graph_combo.setCurrentIndex(idx_g)
+            
+            # 2. Node setzen 
+            # (Die Node-Liste aktualisiert sich automatisch durch das Signal von Graph-Combo)
+            idx_n = self.source_node_combo.findData(node_id)
+            if idx_n >= 0:
+                self.source_node_combo.setCurrentIndex(idx_n)
+                
+                # 3. Population setzen
+                # (Die Pop-Liste aktualisiert sich automatisch durch das Signal von Node-Combo)
+                if pop_id is not None:
+                    idx_p = self.source_pop_combo.findData(pop_id)
+                    if idx_p >= 0:
+                        self.source_pop_combo.setCurrentIndex(idx_p)
+                    else:
+                        # Fallback auf 0, falls Pop nicht gefunden
+                        if self.source_pop_combo.count() > 0:
+                            self.source_pop_combo.setCurrentIndex(0)
+            else:
+                print(f"⚠ Node {node_id} nicht in Combo gefunden.")
+        else:
+            print(f"⚠ Graph {graph_id} nicht in Combo gefunden.")
+
 """
 for graph in self.graph_list:
     for node in graph.node_list:
@@ -4411,7 +4482,47 @@ class ConnectionExecutor:
         source_info = connection['source']
         target_info = connection['target']
         params = connection['params']
-        
+        conn_spec = {'rule': params['rule']}
+                
+        # Standard Rule Params (indegree, etc.)
+        if 'indegree' in params: conn_spec['indegree'] = params['indegree']
+        if 'outdegree' in params: conn_spec['outdegree'] = params['outdegree']
+        if 'N' in params: conn_spec['N'] = params['N']
+        if 'p' in params: conn_spec['p'] = params['p']
+                
+        conn_spec['allow_autapses'] = params.get('allow_autapses', True)
+        conn_spec['allow_multapses'] = params.get('allow_multapses', True)
+                
+        if params.get('use_spatial', False):
+                    
+            radius = params.get('mask_radius', 1.0)
+            inner = params.get('mask_inner_radius', 0.0)
+            m_type = params.get('mask_type', 'sphere')
+                    
+            mask = None
+            if m_type == 'sphere':
+                mask = nest.spatial.sphere(radius)
+            elif m_type == 'box':
+                mask = nest.spatial.box([radius*2, radius*2, radius*2])
+            elif m_type == 'doughnut':
+                mask = nest.spatial.doughnut(inner, radius)
+                    
+            if mask:
+                conn_spec['mask'] = mask
+                print(f"     Applying Spatial Mask: {m_type} (r={radius})")
+
+            syn_spec = {
+                    'synapse_model': params.get('synapse_model', 'static_synapse'),
+                    'delay': params.get('delay', 1.0)
+                }
+                
+            base_weight = params.get('weight', 1.0)
+                
+            if params.get('distance_dependent_weight', False):
+                syn_spec['weight'] = base_weight * nest.spatial.distance
+                print("     Using distance-dependent weights")
+            else:
+                syn_spec['weight'] = base_weight    
         # Get populations
         source_pop = self._get_population(
             source_info['graph_id'],
@@ -4955,6 +5066,43 @@ class ConnectionToolExtended(QWidget):
         
         #  SYNAPSE PARAMETERS 
         synapse_group = QGroupBox("Synapse Parameters")
+        # === SPATIAL CONSTRAINTS (NEU) ===
+        spatial_group = QGroupBox("Spatial Constraints (Masks)")
+        spatial_group.setCheckable(True)
+        spatial_group.setChecked(False)
+        self.spatial_group = spatial_group # Referenz für Logik
+        
+        spatial_layout = QFormLayout(spatial_group)
+        
+        # Mask Type
+        self.mask_type_combo = QComboBox()
+        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
+        spatial_layout.addRow("Mask Type:", self.mask_type_combo)
+        
+        # Radius / Size
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.01, 1000.0)
+        self.radius_spin.setValue(1.0)
+        self.radius_spin.setSuffix(" mm")
+        spatial_layout.addRow("Radius (Outer):", self.radius_spin)
+        
+        # Inner Radius (für Doughnut)
+        self.inner_radius_spin = QDoubleSpinBox()
+        self.inner_radius_spin.setRange(0.0, 1000.0)
+        self.inner_radius_spin.setValue(0.0)
+        self.inner_radius_spin.setSuffix(" mm")
+        spatial_layout.addRow("Radius (Inner):", self.inner_radius_spin)
+        
+        # Distance Dependency Checkbox
+        self.dist_dep_check = QCheckBox("Weight depends on Distance")
+        self.dist_dep_check.setToolTip("If checked, weight = weight * distance")
+        spatial_layout.addRow(self.dist_dep_check)
+        
+        layout.addWidget(spatial_group)
+
+
+
+
         synapse_layout = QFormLayout(synapse_group)
         self.receptor_spin = QSpinBox()
         self.receptor_spin.setRange(0, 100)
@@ -5216,6 +5364,11 @@ class ConnectionToolExtended(QWidget):
             'allow_autapses': self.autapses_check.isChecked(),
             'allow_multapses': self.multapses_check.isChecked(),
             'receptor_type': self.receptor_spin.value(),
+            'use_spatial': self.spatial_group.isChecked(),
+            'mask_type': self.mask_type_combo.currentText(),
+            'mask_radius': self.radius_spin.value(),
+            'mask_inner_radius': self.inner_radius_spin.value(),
+            'distance_dependent_weight': self.dist_dep_check.isChecked()
         }
         
         # Rule-specific params
@@ -6024,3 +6177,94 @@ class ToolsWidget(QWidget):
         layout.addWidget(info)
         
         layout.addStretch()
+
+
+class FlowFieldWidget(QWidget):
+    """
+    Visualisiert die Vektorfelder (Flow Fields) an den Positionen der Neuronen.
+    Zeigt Pfeile, die in die Richtung zeigen, in die die Neuronen 'fließen' würden.
+    """
+    def __init__(self, graph_list, parent=None):
+        super().__init__(parent)
+        self.graph_list = graph_list
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        # PyVista Setup
+        self.plotter = QtInteractor(self)
+        self.plotter.set_background("black")
+        self.layout.addWidget(self.plotter)
+        
+        self.build_scene()
+
+    def build_scene(self):
+        self.plotter.clear()
+        
+        if not self.graph_list:
+            return
+
+        for graph in self.graph_list:
+            for node in graph.node_list:
+                if not hasattr(node, 'positions') or not node.positions:
+                    continue
+
+                # 1. Parameter und Generator holen
+                params = node.parameters
+                encoded_per_type = params.get("encoded_polynoms_per_type", [])
+                
+                # Polynom Generator initialisieren (wichtig für decode)
+                poly_gen = PolynomGenerator(n=params.get('polynom_max_power', 5))
+
+                for pop_idx, positions in enumerate(node.positions):
+                    if positions is None or len(positions) == 0:
+                        continue
+                    
+                    # 2. Flow-Funktionen für diesen Typ dekodieren
+                    f1, f2, f3 = None, None, None
+                    
+                    if pop_idx < len(encoded_per_type):
+                        # encoded_per_type[pop_idx] ist eine Liste aus 3 Dicts (x, y, z)
+                        try:
+                            funcs = poly_gen.decode_multiple(encoded_per_type[pop_idx])
+                            if len(funcs) == 3:
+                                f1, f2, f3 = funcs
+                        except Exception as e:
+                            print(f"Error decoding polynomials for Node {node.id} Pop {pop_idx}: {e}")
+                    
+                    if f1 is None: 
+                        continue # Kein Flow definiert
+
+                    # 3. Vektoren berechnen
+                    # positions ist (N, 3)
+                    x = positions[:, 0]
+                    y = positions[:, 1]
+                    z = positions[:, 2]
+                    
+                    # Vektorfeld auswerten
+                    u = f1(x, y, z)
+                    v = f2(x, y, z)
+                    w = f3(x, y, z)
+                    
+                    vectors = np.column_stack((u, v, w))
+                    
+                    # 4. Visualisierung mit PyVista Glyphs (Pfeilen)
+                    pdata = pv.PolyData(positions)
+                    pdata['vectors'] = vectors
+                    
+                    # Skalierung:
+                    # scale=True: Pfeilgröße hängt von Vektorlänge ab (zeigt Stärke des Sogs)
+                    # factor: Globaler Skalierungsfaktor
+                    arrows = pdata.glyph(orient='vectors', scale=True, factor=0.8)
+                    
+                    # Farbe basierend auf Neuron-Typ
+                    neuron_type = node.neuron_models[pop_idx] if pop_idx < len(node.neuron_models) else "unknown"
+                    color = neuron_colors.get(neuron_type, "#ffffff")
+
+                    # Pfeile hinzufügen
+                    self.plotter.add_mesh(arrows, color=color, opacity=0.8)
+                    
+                    # Optional: Kleine Punkte für die Ursprungspositionen (damit man sieht wo der Pfeil startet)
+                    self.plotter.add_mesh(pv.PolyData(positions), color=color, point_size=3, opacity=0.4)
+
+        self.plotter.reset_camera()
+        self.plotter.update()
