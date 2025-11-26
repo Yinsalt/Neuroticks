@@ -1,5 +1,5 @@
 import sys
-from PyQt6.QtWidgets import QApplication,QAbstractSpinBox,QListWidget, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QApplication,QAbstractSpinBox,QListWidget,QSlider, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLabel,QGroupBox, QStackedWidget, QToolBar, QMenu, QGridLayout, QStackedLayout
 from PyQt6.QtGui import QColor, QPalette, QAction,QIcon,QBrush
 from PyQt6.QtCore import QSize, Qt, pyqtSignal,QTimer
@@ -8,6 +8,8 @@ from pyvistaqt import QtInteractor
 from matplotlib.backends.backend_qtagg import FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
+import time
+from typing import Dict, Any, Tuple, Optional, List
 import matplotlib.colors as mcolors
 from datetime import datetime
 from pathlib import Path
@@ -35,244 +37,694 @@ graph_parameters = {}     #graph_id
 next_graph_id = 0
 
 
+# WidgetLib.py
 
-synapse_models = {
+NODE_TOOLS = {
+    "custom": {
+        "label": "🌊 WFC & Flow Field (Custom)",
+        "params": ["grid_size", "sparsity_factor", "sparse_holes", "num_steps", "dt"]
+    },
+    "CCW": {
+        "label": "⭕ CCW Ring (Attractor)",
+        # Hier fügen wir 'k' und 'bidirectional' hinzu
+        "params": ["n_neurons", "radius", "k", "bidirectional"] 
+    },
+    "Blob": {
+        "label": "☁ Random Blob",
+        "params": ["n_neurons", "radius"]
+    },
+    "Cone": {
+        "label": "hk Cone / Column",
+        "params": ["n_neurons", "radius_bottom", "radius_top", "height"]
+    },
+    "Grid": {
+        "label": "▦ 2D Grid",
+        "params": ["grid_side_length"]
+    }
+}
+
+___all__ = [
+    'SYNAPSE_MODELS',
+    'create_nest_mask',
+    'create_distance_dependent_weight',
+    'SynapseParamWidget',
+    'SynapseCreationWidget',
+    'ConnectionExecutor',
+    'ConnectionQueueWidget',
+    'BlinkingNetworkWidget', 
+    'FlowFieldWidget',       
+    'GraphCreatorWidget',
+    'EditGraphWidget',
+    'GraphOverviewWidget',
+    'ConnectionTool',
+    'ToolsWidget',
+    'SimulationControlWidget',
+    'graph_parameters',
+    'next_graph_id',
+    '_clean_params',
+    '_serialize_connections',
+    'NumpyEncoder',
+    # --- NEU HINZUGEFÜGT ---
+    'create_nest_connections_from_stored',
+    'safe_nest_reset_and_repopulate',
+    'repopulate_all_graphs',
+    'get_all_connections_summary',
+    'export_connections_to_dict',
+    'import_connections_from_dict'
+]
+
+SYNAPSE_MODELS = {
+    # === STATIC & BASIC ===
+    "static_synapse": {
+        "category": "basic",
+        "description": "Standard-Synapse mit konstantem Gewicht",
+        "params": {}
+    },
+    
     "bernoulli_synapse": {
-        "p_transmit": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Transmission probability"
+        "category": "basic",
+        "description": "Stochastische Synapse mit Transmissionswahrscheinlichkeit",
+        "params": {
+            "p_transmit": {
+                "default": 1.0, "type": "float", "min": 0.0, "max": 1.0,
+                "unit": "", "description": "Transmission probability"
+            }
         }
     },
-    "clopath_synapse": {
-        "tau_x": {
-            "default": 10.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Time constant of the trace of the presynaptic spike train"
-        },
-        "Wmax": {
-            "default": 10.0,
-            "type": "float",
-            "unit": "pA",
-            "min": 0.0,
-            "max": 100.0,
-            "constraint": "non-negative",
-            "description": "Maximum allowed weight"
-        },
-        "Wmin": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "pA",
-            "min": 0.0,
-            "max": 100.0,
-            "constraint": "non-negative",
-            "description": "Minimum allowed weight"
-        }
+
+    "cont_delay_synapse": {
+        "category": "basic",
+        "description": "Synapse mit kontinuierlichem Delay",
+        "params": {}
     },
-    "cont_delay_synapse": {},
-    "diffusion_connection": {},
-    "gap_junction": {},
-    "quantal_stp_synapse": {
-        "U": {
-            "default": 0.5,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Maximal fraction of available resources"
-        },
-        "u": {
-            "default": 0.5,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Available fraction of resources"
-        },
-        "n": {
-            "default": 1,
-            "type": "integer",
-            "unit": "dimensionless",
-            "min": 1,
-            "max": 100,
-            "constraint": "positive",
-            "description": "Total number of release sites"
-        },
-        "a": {
-            "default": 1,
-            "type": "integer",
-            "unit": "dimensionless",
-            "min": 1,
-            "max": 100,
-            "constraint": "positive",
-            "description": "Number of available release sites"
-        },
-        "tau_fac": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.0,
-            "max": 1000.0,
-            "constraint": "non-negative",
-            "description": "Time constant for facilitation"
-        },
-        "tau_rec": {
-            "default": 800.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 1000.0,
-            "constraint": "positive",
-            "description": "Time constant for depression"
-        }
+
+    # === GAP JUNCTION ===
+    "gap_junction": {
+        "category": "electrical",
+        "description": "Elektrische Synapse (Kein Delay!)",
+        "no_delay": True,
+        "params": {}
     },
-    "rate_connection_delayed": {},
-    "rate_connection_instantaneous": {},
-    "static_synapse": {},
-    "stdp_dopamine_synapse": {},
-    "stdp_facetshw_synapse_hom": {},
-    "stdp_gg_synapse": {},
-    "stdp_pl_synapse_hom": {},
+
+    # === STDP (Spike-Timing Dependent Plasticity) ===
     "stdp_synapse": {
-        "tau_plus": {
-            "default": 20.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Time constant of STDP window, potentiation"
-        },
-        "lambda": {
-            "default": 0.01,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "non-negative",
-            "description": "Step size"
-        },
-        "alpha": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Asymmetry parameter"
-        },
-        "mu_plus": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Weight dependence exponent, potentiation"
-        },
-        "mu_minus": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 10.0,
-            "constraint": "non-negative",
-            "description": "Weight dependence exponent, depression"
-        },
-        "Wmax": {
-            "default": 100.0,
-            "type": "float",
-            "unit": "pA",
-            "min": 0.0,
-            "max": 1000.0,
-            "constraint": "non-negative",
-            "description": "Maximum allowed weight"
+        "category": "plasticity",
+        "description": "Standard STDP nach Song et al.",
+        "params": {
+            "tau_plus": {"default": 20.0, "type": "float", "min": 0.1, "max": 1000.0, "unit": "ms",
+                         "description": "Time constant of potentiation window"},
+            "lambda": {"default": 0.01, "type": "float", "min": 0.0, "max": 1.0, "unit": "",
+                       "description": "Learning rate"},
+            "alpha": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
+                      "description": "Asymmetry parameter (depression scale)"},
+            "mu_plus": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
+                        "description": "Weight dependence exponent (potentiation)"},
+            "mu_minus": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
+                         "description": "Weight dependence exponent (depression)"},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "max": 10000.0, "unit": "",
+                     "description": "Maximum weight"}
         }
     },
-    "stdp_synapse_hom": {},
-    "stdp_triplet_synapse": {},
-    "stdp_triplet_synapse_hom": {},
-    "tsodyks2_synapse": {},
+
+    "stdp_synapse_hom": {
+        "category": "plasticity",
+        "description": "Homeostatic STDP",
+        "params": {
+            "tau_plus": {"default": 20.0, "type": "float", "min": 0.1, "max": 1000.0, "unit": "ms"},
+            "lambda": {"default": 0.01, "type": "float", "min": 0.0, "max": 1.0, "unit": ""},
+            "alpha": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": ""},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "max": 10000.0, "unit": ""}
+        }
+    },
+
+    "stdp_triplet_synapse": {
+        "category": "plasticity",
+        "description": "Triplet STDP (Pfister & Gerstner 2006)",
+        "params": {
+            "tau_plus": {"default": 16.8, "type": "float", "min": 0.1, "unit": "ms",
+                         "description": "Time constant of 1st potentiation window"},
+            "tau_minus": {"default": 33.7, "type": "float", "min": 0.1, "unit": "ms",
+                          "description": "Time constant of 1st depression window"},
+            "tau_x": {"default": 101.0, "type": "float", "min": 0.1, "unit": "ms",
+                      "description": "Time constant of presynaptic trace"},
+            "tau_y": {"default": 125.0, "type": "float", "min": 0.1, "unit": "ms",
+                      "description": "Time constant of postsynaptic trace"},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "unit": ""}
+        }
+    },
+
+    "stdp_dopamine_synapse": {
+        "category": "plasticity",
+        "description": "Neuromoduliertes STDP (Reward-Learning)",
+        "params": {
+            "b": {"default": 0.0, "type": "float", "min": -10.0, "max": 10.0, "unit": "",
+                  "description": "Dopamine baseline concentration"},
+            "tau_plus": {"default": 20.0, "type": "float", "min": 0.1, "unit": "ms"},
+            "tau_n": {"default": 200.0, "type": "float", "min": 0.1, "unit": "ms",
+                      "description": "Time constant of eligibility trace"},
+            "Wmin": {"default": 0.0, "type": "float", "min": -10000.0, "unit": ""},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "unit": ""}
+        }
+    },
+
+    "vogels_sprekeler_synapse": {
+        "category": "plasticity",
+        "description": "Inhibitory STDP (Vogels et al. 2011)",
+        "params": {
+            "tau": {"default": 20.0, "type": "float", "min": 0.1, "unit": "ms",
+                    "description": "STDP time constant"},
+            "eta": {"default": 0.001, "type": "float", "min": 0.0, "unit": "",
+                    "description": "Learning rate"},
+            "alpha": {"default": 0.12, "type": "float", "min": 0.0, "unit": "",
+                      "description": "Target firing rate parameter"},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "unit": ""}
+        }
+    },
+
+    "clopath_synapse": {
+        "category": "plasticity",
+        "description": "Voltage-based STDP (Clopath et al. 2010)",
+        "params": {
+            "tau_x": {"default": 10.0, "type": "float", "min": 0.1, "unit": "ms"},
+            "A_LTP": {"default": 0.00014, "type": "float", "min": 0.0, "unit": "",
+                      "description": "LTP amplitude"},
+            "A_LTD": {"default": 0.00008, "type": "float", "min": 0.0, "unit": "",
+                      "description": "LTD amplitude"},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "unit": ""}
+        }
+    },
+
+    "urbanczik_synapse": {
+        "category": "plasticity",
+        "description": "Gradient-based learning (Dendritic)",
+        "params": {
+            "tau_Delta": {"default": 100.0, "type": "float", "min": 0.1, "unit": "ms",
+                          "description": "Time constant of eligibility trace"},
+            "eta": {"default": 0.01, "type": "float", "min": 0.0, "unit": "",
+                    "description": "Learning rate"},
+            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "unit": ""}
+        }
+    },
+
+    # === SHORT-TERM PLASTICITY (STP) ===
     "tsodyks_synapse": {
-        "U": {
-            "default": 0.5,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Parameter determining the increase in u with each spike"
-        },
-        "tau_psc": {
-            "default": 3.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 100.0,
-            "constraint": "positive",
-            "description": "Time constant of synaptic current"
-        },
-        "tau_fac": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.0,
-            "max": 1000.0,
-            "constraint": "non-negative",
-            "description": "Time constant for facilitation"
-        },
-        "tau_rec": {
-            "default": 800.0,
-            "type": "float",
-            "unit": "ms",
-            "min": 0.1,
-            "max": 1000.0,
-            "constraint": "positive",
-            "description": "Time constant for depression"
-        },
-        "x": {
-            "default": 1.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Initial fraction of synaptic vesicles in the readily releasable pool"
-        },
-        "y": {
-            "default": 0.0,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Initial fraction of synaptic vesicles in the synaptic cleft"
-        },
-        "u": {
-            "default": 0.5,
-            "type": "float",
-            "unit": "dimensionless",
-            "min": 0.0,
-            "max": 1.0,
-            "constraint": "range",
-            "description": "Initial release probability of synaptic vesicles"
+        "category": "stp",
+        "description": "Short-Term Plasticity (Tsodyks & Markram)",
+        "params": {
+            "U": {"default": 0.5, "type": "float", "min": 0.0, "max": 1.0, "unit": "",
+                  "description": "Utilization of synaptic efficacy"},
+            "tau_rec": {"default": 800.0, "type": "float", "min": 0.1, "unit": "ms",
+                        "description": "Recovery time constant"},
+            "tau_fac": {"default": 0.0, "type": "float", "min": 0.0, "unit": "ms",
+                        "description": "Facilitation time constant"},
+            "x": {"default": 1.0, "type": "float", "min": 0.0, "max": 1.0, "unit": "",
+                  "description": "Initial fraction of resources"}
         }
     },
-    "vogels_sprekeler_synapse": {}
+
+    "tsodyks2_synapse": {
+        "category": "stp",
+        "description": "Short-Term Plasticity (Alternative)",
+        "params": {
+            "U": {"default": 0.5, "type": "float", "min": 0.0, "max": 1.0, "unit": ""},
+            "tau_rec": {"default": 800.0, "type": "float", "min": 0.1, "unit": "ms"},
+            "tau_fac": {"default": 0.0, "type": "float", "min": 0.0, "unit": "ms"}
+        }
+    },
+
+    "quantal_stp_synapse": {
+        "category": "stp",
+        "description": "Quantal STP mit Release Sites",
+        "params": {
+            "U": {"default": 0.5, "type": "float", "min": 0.0, "max": 1.0, "unit": ""},
+            "tau_rec": {"default": 800.0, "type": "float", "min": 0.1, "unit": "ms"},
+            "tau_fac": {"default": 0.0, "type": "float", "min": 0.0, "unit": "ms"},
+            "n": {"default": 1, "type": "int", "min": 1, "max": 100, "unit": "",
+                  "description": "Number of release sites"},
+            "a": {"default": 1, "type": "int", "min": 0, "max": 100, "unit": "",
+                  "description": "Initial available release sites"}
+        }
+    },
+
+    # === SPECIAL ===
+    "ht_synapse": {
+        "category": "special",
+        "description": "Hill-Tononi Synapse",
+        "params": {}
+    },
+
+    "diffusion_connection": {
+        "category": "special",
+        "description": "Diffusion-Verbindung (rate neurons)",
+        "params": {}
+    },
+
+    "rate_connection_instantaneous": {
+        "category": "special",
+        "description": "Instantane Rate-Verbindung",
+        "no_delay": True,
+        "params": {}
+    },
+
+    "rate_connection_delayed": {
+        "category": "special",
+        "description": "Verzögerte Rate-Verbindung",
+        "params": {}
+    }
 }
 
 
+def create_nest_mask(mask_type: str, params: Dict[str, Any]) -> Optional[Any]:
+    """
+    Erstellt eine NEST-Maske für räumliche Verbindungen.
+    """
+    try:
+        if mask_type == 'spherical' or mask_type == 'sphere':
+            # NEST verlangt oft 'radius' explizit statt 'r' in neueren Versionen bei CreateMask
+            radius = float(params.get('radius', params.get('r', 1.0)))
+            return nest.CreateMask('spherical', {'radius': radius}) # 'r' -> 'radius' geändert
+            
+        elif mask_type == 'rectangular' or mask_type == 'box':
+            size = float(params.get('size', params.get('r', 1.0)))
+            return nest.CreateMask('rectangular', {
+                'lower_left': [-size, -size, -size],
+                'upper_right': [size, size, size]
+            })
+            
+        elif mask_type == 'elliptical':
+            major = float(params.get('major_axis', 1.0))
+            minor = float(params.get('minor_axis', 0.5))
+            return nest.CreateMask('elliptical', {
+                'major_axis': major,
+                'minor_axis': minor
+            })
+            
+        elif mask_type == 'doughnut':
+            inner = float(params.get('inner_radius', params.get('inner', 0.2)))
+            outer = float(params.get('outer_radius', params.get('outer', 1.0)))
+            return nest.CreateMask('doughnut', {
+                'inner_radius': inner,
+                'outer_radius': outer
+            })
+            
+        else:
+            print(f"⚠ Unknown mask type: {mask_type}")
+            return None
+            
+    except Exception as e:
+        print(f"⚠ Mask creation failed: {e}")
+        return None
 
+
+def create_distance_dependent_weight(base_weight: float, 
+                                     factor: float = 1.0, 
+                                     offset: float = 0.0,
+                                     mode: str = 'linear') -> Any:
+    """
+    Erstellt ein distanzabhängiges Gewicht für NEST.
+    
+    Args:
+        base_weight: Basisgewicht
+        factor: Multiplikator für Distanz
+        offset: Offset
+        mode: 'linear', 'exponential', 'gaussian'
+        
+    Returns:
+        NEST Parameter expression oder float
+    """
+    try:
+        dist = nest.spatial.distance
+        
+        if mode == 'linear':
+            # weight = base + distance * factor
+            return base_weight + dist * factor + offset
+            
+        elif mode == 'exponential':
+            # weight = base * exp(-distance * factor)
+            import nest.math as nm
+            return base_weight * nm.exp(-dist * factor)
+            
+        elif mode == 'gaussian':
+            # weight = base * exp(-(distance/sigma)^2)
+            import nest.math as nm
+            sigma = factor if factor > 0 else 1.0
+            return base_weight * nm.exp(-(dist / sigma) ** 2)
+            
+        else:
+            return base_weight
+            
+    except Exception as e:
+        print(f"⚠ Distance weight creation failed: {e}, using base weight")
+        return base_weight
+class SynapseParamWidget(QWidget):
+    """Dynamisches Widget für einen einzelnen Synapse-Parameter."""
+    
+    valueChanged = pyqtSignal()
+    
+    def __init__(self, name: str, info: Dict[str, Any], parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.info = info
+        self._init_ui()
+        
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        
+        # Label mit Tooltip
+        label = QLabel(f"{self.name}:")
+        label.setMinimumWidth(100)
+        desc = self.info.get('description', self.name)
+        unit = self.info.get('unit', '')
+        if unit:
+            label.setToolTip(f"{desc} [{unit}]")
+        else:
+            label.setToolTip(desc)
+        layout.addWidget(label)
+        
+        # Input Widget basierend auf Typ
+        ptype = self.info.get('type', 'float')
+        default = self.info.get('default', 0.0)
+        
+        if ptype == 'float':
+            self.input = QDoubleSpinBox()
+            self.input.setDecimals(6)
+            self.input.setRange(
+                self.info.get('min', -1e10),
+                self.info.get('max', 1e10)
+            )
+            self.input.setValue(float(default))
+            self.input.valueChanged.connect(self.valueChanged.emit)
+            
+        elif ptype == 'int' or ptype == 'integer':
+            self.input = QSpinBox()
+            self.input.setRange(
+                int(self.info.get('min', 0)),
+                int(self.info.get('max', 10000))
+            )
+            self.input.setValue(int(default))
+            self.input.valueChanged.connect(self.valueChanged.emit)
+            
+        elif ptype == 'bool':
+            self.input = QCheckBox()
+            self.input.setChecked(bool(default))
+            self.input.stateChanged.connect(self.valueChanged.emit)
+            
+        else:
+            self.input = QLineEdit(str(default))
+            self.input.textChanged.connect(self.valueChanged.emit)
+        
+        layout.addWidget(self.input, 1)
+        
+        # Unit Label
+        if unit:
+            unit_label = QLabel(unit)
+            unit_label.setStyleSheet("color: #888; font-size: 10px;")
+            layout.addWidget(unit_label)
+    
+    def get_value(self):
+        """Gibt den aktuellen Wert zurück."""
+        if isinstance(self.input, (QDoubleSpinBox, QSpinBox)):
+            return self.input.value()
+        elif isinstance(self.input, QCheckBox):
+            return self.input.isChecked()
+        else:
+            return self.input.text()
+    
+    def set_value(self, value):
+        """Setzt den Wert."""
+        if isinstance(self.input, (QDoubleSpinBox, QSpinBox)):
+            self.input.setValue(value)
+        elif isinstance(self.input, QCheckBox):
+            self.input.setChecked(bool(value))
+        else:
+            self.input.setText(str(value))
+
+class SynapseCreationWidget(QWidget):
+    """
+    Widget zum Erstellen und Bearbeiten von Synapse-Modellen.
+    
+    Features:
+    - Auswahl aus verfügbaren NEST Synapse-Modellen
+    - Dynamische Parameter-Eingabe
+    - Kategorisierte Ansicht
+    - CopyModel-Unterstützung für Custom-Synapsen
+    """
+    
+    synapseCreated = pyqtSignal(str, dict)  # (model_name, params)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.param_widgets: Dict[str, SynapseParamWidget] = {}
+        self.custom_synapses: Dict[str, Dict] = {}  # Gespeicherte Custom-Modelle
+        self._init_ui()
+        
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # === Header ===
+        header = QLabel("⚡ Synapse Configuration")
+        header.setStyleSheet("font-size: 14px; font-weight: bold; color: #2196F3;")
+        main_layout.addWidget(header)
+        
+        # === Model Selection ===
+        sel_group = QGroupBox("Model Selection")
+        sel_layout = QFormLayout(sel_group)
+        
+        # Kategorie Filter
+        self.category_combo = QComboBox()
+        self.category_combo.addItems(["All", "basic", "plasticity", "stp", "electrical", "special"])
+        self.category_combo.currentTextChanged.connect(self._filter_models)
+        sel_layout.addRow("Category:", self.category_combo)
+        
+        # Model Dropdown
+        self.model_combo = QComboBox()
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        sel_layout.addRow("Synapse Model:", self.model_combo)
+        
+        # Description
+        self.desc_label = QLabel("")
+        self.desc_label.setWordWrap(True)
+        self.desc_label.setStyleSheet("color: #888; font-style: italic; padding: 5px;")
+        sel_layout.addRow(self.desc_label)
+        
+        main_layout.addWidget(sel_group)
+        
+        # === Base Parameters ===
+        base_group = QGroupBox("Base Parameters")
+        base_layout = QFormLayout(base_group)
+        
+        # Weight
+        self.weight_spin = QDoubleSpinBox()
+        self.weight_spin.setRange(-100000, 100000)
+        self.weight_spin.setValue(1.0)
+        self.weight_spin.setDecimals(4)
+        base_layout.addRow("Weight:", self.weight_spin)
+        
+        # Delay
+        self.delay_spin = QDoubleSpinBox()
+        self.delay_spin.setRange(0.1, 10000)
+        self.delay_spin.setValue(1.0)
+        self.delay_spin.setDecimals(2)
+        self.delay_spin.setSuffix(" ms")
+        base_layout.addRow("Delay:", self.delay_spin)
+        
+        # Delay Warning
+        self.delay_warning = QLabel("")
+        self.delay_warning.setStyleSheet("color: #FF9800; font-size: 10px;")
+        base_layout.addRow(self.delay_warning)
+        
+        main_layout.addWidget(base_group)
+        
+        # === Model-Specific Parameters ===
+        params_group = QGroupBox("Model-Specific Parameters")
+        self.params_scroll = QScrollArea()
+        self.params_scroll.setWidgetResizable(True)
+        self.params_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.params_scroll.setMaximumHeight(200)
+        
+        self.params_container = QWidget()
+        self.params_layout = QVBoxLayout(self.params_container)
+        self.params_layout.setContentsMargins(5, 5, 5, 5)
+        self.params_scroll.setWidget(self.params_container)
+        
+        params_group_layout = QVBoxLayout(params_group)
+        params_group_layout.addWidget(self.params_scroll)
+        main_layout.addWidget(params_group)
+        
+        # === Custom Model (CopyModel) ===
+        custom_group = QGroupBox("Custom Model (Optional)")
+        custom_layout = QFormLayout(custom_group)
+        
+        self.custom_name_input = QLineEdit()
+        self.custom_name_input.setPlaceholderText("Leave empty to use base model")
+        custom_layout.addRow("Custom Name:", self.custom_name_input)
+        
+        save_btn = QPushButton("💾 Save as Preset")
+        save_btn.clicked.connect(self._save_preset)
+        custom_layout.addRow(save_btn)
+        
+        main_layout.addWidget(custom_group)
+        
+        # === Actions ===
+        action_layout = QHBoxLayout()
+        
+        self.apply_btn = QPushButton("✓ Apply Synapse")
+        self.apply_btn.setStyleSheet("background-color: #4CAF50; font-weight: bold;")
+        self.apply_btn.clicked.connect(self._emit_synapse)
+        action_layout.addWidget(self.apply_btn)
+        
+        reset_btn = QPushButton("↺ Reset")
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        action_layout.addWidget(reset_btn)
+        
+        main_layout.addLayout(action_layout)
+        main_layout.addStretch()
+        
+        # Initial population
+        self._filter_models("All")
+        
+    def _filter_models(self, category: str):
+        """Filtert die Modell-Liste nach Kategorie."""
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        
+        for name, info in SYNAPSE_MODELS.items():
+            if category == "All" or info.get('category', 'basic') == category:
+                self.model_combo.addItem(name)
+        
+        self.model_combo.blockSignals(False)
+        if self.model_combo.count() > 0:
+            self._on_model_changed(self.model_combo.currentText())
+    
+    def _on_model_changed(self, model_name: str):
+        """Aktualisiert UI wenn Modell geändert wird."""
+        if not model_name or model_name not in SYNAPSE_MODELS:
+            return
+            
+        info = SYNAPSE_MODELS[model_name]
+        
+        # Description
+        self.desc_label.setText(info.get('description', ''))
+        
+        # Delay Warning
+        if info.get('no_delay', False):
+            self.delay_spin.setEnabled(False)
+            self.delay_warning.setText("⚠ This synapse type does not use delay!")
+        else:
+            self.delay_spin.setEnabled(True)
+            self.delay_warning.setText("")
+        
+        # Clear old params
+        for widget in self.param_widgets.values():
+            widget.deleteLater()
+        self.param_widgets.clear()
+        
+        # Add new params
+        params = info.get('params', {})
+        for param_name, param_info in params.items():
+            widget = SynapseParamWidget(param_name, param_info)
+            self.params_layout.addWidget(widget)
+            self.param_widgets[param_name] = widget
+        
+        # Add stretch at end
+        self.params_layout.addStretch()
+    
+    def _reset_to_defaults(self):
+        """Setzt alle Parameter auf Standardwerte."""
+        model = self.model_combo.currentText()
+        if model in SYNAPSE_MODELS:
+            info = SYNAPSE_MODELS[model]
+            for name, widget in self.param_widgets.items():
+                if name in info.get('params', {}):
+                    default = info['params'][name].get('default', 0)
+                    widget.set_value(default)
+        
+        self.weight_spin.setValue(1.0)
+        self.delay_spin.setValue(1.0)
+        self.custom_name_input.clear()
+    
+    def _save_preset(self):
+        """Speichert aktuelle Konfiguration als Preset."""
+        name = self.custom_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Name Required", 
+                              "Please enter a custom name to save as preset.")
+            return
+        
+        self.custom_synapses[name] = self.get_synapse_config()
+        QMessageBox.information(self, "Saved", 
+                               f"Synapse preset '{name}' saved!")
+    
+    def get_synapse_config(self) -> Dict[str, Any]:
+        """Gibt die komplette Synapse-Konfiguration zurück."""
+        model = self.model_combo.currentText()
+        info = SYNAPSE_MODELS.get(model, {})
+        
+        config = {
+            'base_model': model,
+            'weight': self.weight_spin.value(),
+            'delay': self.delay_spin.value() if not info.get('no_delay') else None,
+            'custom_name': self.custom_name_input.text().strip() or None,
+            'no_delay': info.get('no_delay', False),
+            'params': {}
+        }
+        
+        for name, widget in self.param_widgets.items():
+            config['params'][name] = widget.get_value()
+        
+        return config
+    
+    def set_synapse_config(self, config: Dict[str, Any]):
+        """Lädt eine Synapse-Konfiguration."""
+        model = config.get('base_model', 'static_synapse')
+        
+        # Find category
+        if model in SYNAPSE_MODELS:
+            cat = SYNAPSE_MODELS[model].get('category', 'All')
+            self.category_combo.setCurrentText(cat)
+        
+        idx = self.model_combo.findText(model)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        
+        self.weight_spin.setValue(config.get('weight', 1.0))
+        if config.get('delay') is not None:
+            self.delay_spin.setValue(config['delay'])
+        
+        self.custom_name_input.setText(config.get('custom_name', '') or '')
+        
+        for name, value in config.get('params', {}).items():
+            if name in self.param_widgets:
+                self.param_widgets[name].set_value(value)
+    
+    def _emit_synapse(self):
+        """Emittiert das synapseCreated Signal."""
+        config = self.get_synapse_config()
+        name = config['custom_name'] or config['base_model']
+        self.synapseCreated.emit(name, config)
+
+
+
+
+def create_nest_mask_safe(mask_type, params):
+    try:
+        if mask_type in ('sphere', 'spherical'):
+            return nest.CreateMask('spherical', {'r': params.get('radius', 1.0)})
+        elif mask_type in ('box', 'rectangular'):
+            s = params.get('size', 1.0)
+            return nest.CreateMask('rectangular', {
+                'lower_left': [-s, -s, -s], 'upper_right': [s, s, s]
+            })
+        elif mask_type == 'doughnut':
+            return nest.CreateMask('doughnut', {
+                'inner_radius': params.get('inner', 0.2),
+                'outer_radius': params.get('outer', 1.0)
+            })
+    except Exception as e:
+        print(f"⚠ Mask: {e}")
+    return None
 
 
 class DoubleInputField(QWidget):
@@ -509,47 +961,108 @@ class NodeParametersWidget(QWidget):
         scroll.setWidget(content)
         layout.addWidget(scroll)
         
+        # --- 1. SECTION: TYPE SELECTOR ---
+        self.add_section("Node Type")
+        self.tool_combo = QComboBox()
+        # NODE_TOOLS muss oben in WidgetLib definiert sein (siehe vorherigen Schritt)
+        for key, info in NODE_TOOLS.items():
+            self.tool_combo.addItem(info["label"], key)
+        self.tool_combo.currentIndexChanged.connect(self.on_tool_changed)
+        self.content_layout.addWidget(self.tool_combo)
+        self.widgets['tool_type'] = {'type': 'combo', 'widget': self.tool_combo}
+        
+        # --- 2. SECTION: BASIC INFO ---
         self.add_section("Basic Info")
         self.add_text_field("name", "Name")
-        self.add_int_field("id", "ID", min_val=0, max_val=1000)
+        self.add_int_field("id", "ID", min_val=0)
         
-        self.add_section("Position & Center")
-        #self.add_vector3_field("m", "Center (m)")
-        self.add_vector3_field("center_of_mass", "Center of Mass")
-        self.add_vector3_field("displacement", "Displacement")
-        self.add_float_field("displacement_factor", "Displacement Factor", min_val=0.0, max_val=10.0)
-        self.add_section("Stretch (Transform)")
-        self.add_float_field("stretch_x", "Stretch X", min_val=0.0001, max_val=10000.0)
-        self.add_float_field("stretch_y", "Stretch Y", min_val=0.0001, max_val=10000.0)
-        self.add_float_field("stretch_z", "Stretch Z", min_val=0.0001, max_val=10000.0)
-        self.add_section("Rotation")
-        self.add_float_field("rot_theta", "Theta (°)", min_val=-360.0, max_val=360.0)
-        self.add_float_field("rot_phi", "Phi (°)", min_val=-360.0, max_val=360.0)
+        # --- 3. SECTION: POSITION ---
+        self.add_section("Position")
+        self.add_vector3_field("center_of_mass", "Center")
         
-        self.add_section("Grid Settings")
-        self.add_vector3_int_field("grid_size", "Grid Size")
-        self.add_float_field("sparsity_factor", "Sparsity Factor", min_val=0.0, max_val=1.0)
-        self.add_int_field("sparse_holes", "Sparse Holes", min_val=0, max_val=1000)
+        # --- 4. SECTION: GEOMETRY PARAMS (Dynamisch) ---
+        self.geo_group = QWidget()
+        self.geo_layout = QVBoxLayout(self.geo_group)
+        self.content_layout.addWidget(self.geo_group)
         
-        self.add_section("Algorithm")
-        self.add_int_field("num_steps", "WFC Steps", min_val=1, max_val=100)
-        self.add_int_field("polynom_max_power", "Max Polynomial Power", min_val=1, max_val=20)
-        self.add_float_field("dt", "Time Step (dt)", min_val=0.001, max_val=1.0)
-        self.add_bool_field("old", "Use Old Algorithm")
+        # Alle möglichen Felder erstellen (versteckt)
+        self.create_all_param_fields()
         
+        # --- 5. SECTION: PROBABILITY VECTOR (WICHTIG: HIER WIEDER EINGEFÜGT) ---
         self.add_section("Probability Vector (Population Weights)")
         self.probability_container = QWidget()
         self.probability_layout = QVBoxLayout(self.probability_container)
         self.content_layout.addWidget(self.probability_container)
         
+        # --- FINISH ---
+        self.on_tool_changed() # Initialen Status setzen
         self.content_layout.addStretch()
         
+    def create_all_param_fields(self):
+        """Erstellt alle Felder für alle Tools (versteckt oder sichtbar)."""
+        
+        # --- SECTION: TRANSFORMATIONS (Immer da, aber hier definiert) ---
+        # Diese Sektion fehlte vorher im UI-Setup!
+        self.add_vector3_field("displacement", "Displacement", parent=self.geo_layout)
+        self.add_float_field("displacement_factor", "Disp. Factor", 0.0, 100.0, parent=self.geo_layout)
+        
+        self.add_float_field("rot_theta", "Rot X (Theta)", -360, 360, parent=self.geo_layout)
+        self.add_float_field("rot_phi", "Rot Y (Phi)", -360, 360, parent=self.geo_layout)
+        
+        self.add_float_field("stretch_x", "Scale X", 0.1, 100.0, parent=self.geo_layout)
+        self.add_float_field("stretch_y", "Scale Y", 0.1, 100.0, parent=self.geo_layout)
+        self.add_float_field("stretch_z", "Scale Z", 0.1, 100.0, parent=self.geo_layout)
+
+        # --- WFC Params ---
+        self.add_vector3_int_field("grid_size", "Grid Size", parent=self.geo_layout)
+        self.add_float_field("sparsity_factor", "Sparsity", 0, 1, parent=self.geo_layout)
+        self.add_int_field("sparse_holes", "Holes", parent=self.geo_layout)
+        self.add_int_field("num_steps", "Steps", parent=self.geo_layout)
+        
+        # --- Shape Params ---
+        self.add_int_field("n_neurons", "Num Neurons", min_val=1, max_val=100000, parent=self.geo_layout)
+        self.add_float_field("radius", "Radius", min_val=0.1, parent=self.geo_layout)
+        self.add_float_field("radius_top", "Radius Top", min_val=0.0, parent=self.geo_layout)
+        self.add_float_field("radius_bottom", "Radius Bottom", min_val=0.0, parent=self.geo_layout)
+        self.add_float_field("height", "Height", min_val=0.1, parent=self.geo_layout)
+        self.add_int_field("grid_side_length", "Side Length", min_val=1, parent=self.geo_layout)
+
+        # --- Circuit Params (CCW) ---
+        self.add_float_field("k", "Inhibition (k)", min_val=0.0, max_val=1000.0, parent=self.geo_layout)
+        self.add_bool_field("bidirectional", "Bidirectional", parent=self.geo_layout)
+
+
+    def on_tool_changed(self):
+        """Zeigt nur die Felder an, die zum gewählten Tool gehören + Standard-Felder."""
+        tool_id = self.tool_combo.currentData()
+        required_params = NODE_TOOLS.get(tool_id, {}).get("params", [])
+        
+        # Diese Felder bleiben IMMER sichtbar, egal welches Tool
+        always_visible = [
+            'name', 'id', 'center_of_mass', 'tool_type', 'probability_vector',
+            # Transformationen:
+            'displacement', 'displacement_factor', 
+            'rot_theta', 'rot_phi', 
+            'stretch_x', 'stretch_y', 'stretch_z'
+        ]
+        
+        for key, info in self.widgets.items():
+            widget_row = info.get('row_layout')
+            if widget_row:
+                # Zeigen, wenn in der Whitelist ODER spezifisch für das Tool gefordert
+                should_show = (key in always_visible) or (key in required_params)
+                _set_visible(widget_row, should_show)
+        
+        self.on_change() # Trigger save
+
     def add_section(self, title):
         label = QLabel(title)
         label.setStyleSheet("font-weight: bold; font-size: 13px; color: #2196F3; margin-top: 10px; border-bottom: 2px solid #2196F3; padding-bottom: 5px;")
         self.content_layout.addWidget(label)
-    
-    def add_text_field(self, key, label):
+    # --- HIER DIE KORRIGIERTEN METHODEN EINFÜGEN ---
+
+    def add_text_field(self, key, label, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
@@ -558,10 +1071,12 @@ class NodeParametersWidget(QWidget):
         edit.textChanged.connect(self.on_change)
         row.addWidget(lbl)
         row.addWidget(edit)
-        self.content_layout.addLayout(row)
-        self.widgets[key] = {'type': 'text', 'widget': edit}
-    
-    def add_int_field(self, key, label, min_val=0, max_val=10000):
+        target_layout.addLayout(row)
+        # Wichtig: row_layout speichern für Sichtbarkeit
+        self.widgets[key] = {'type': 'text', 'widget': edit, 'row_layout': row}
+
+    def add_int_field(self, key, label, min_val=0, max_val=10000, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
@@ -571,10 +1086,11 @@ class NodeParametersWidget(QWidget):
         spin.valueChanged.connect(self.on_change)
         row.addWidget(lbl)
         row.addWidget(spin)
-        self.content_layout.addLayout(row)
-        self.widgets[key] = {'type': 'int', 'widget': spin}
-    
-    def add_float_field(self, key, label, min_val=-1000.0, max_val=1000.0):
+        target_layout.addLayout(row)
+        self.widgets[key] = {'type': 'int', 'widget': spin, 'row_layout': row}
+
+    def add_float_field(self, key, label, min_val=-1000.0, max_val=1000.0, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
@@ -585,10 +1101,11 @@ class NodeParametersWidget(QWidget):
         spin.valueChanged.connect(self.on_change)
         row.addWidget(lbl)
         row.addWidget(spin)
-        self.content_layout.addLayout(row)
-        self.widgets[key] = {'type': 'float', 'widget': spin}
-    
-    def add_bool_field(self, key, label):
+        target_layout.addLayout(row)
+        self.widgets[key] = {'type': 'float', 'widget': spin, 'row_layout': row}
+
+    def add_bool_field(self, key, label, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
@@ -598,69 +1115,54 @@ class NodeParametersWidget(QWidget):
         row.addWidget(lbl)
         row.addWidget(check)
         row.addStretch()
-        self.content_layout.addLayout(row)
-        self.widgets[key] = {'type': 'bool', 'widget': check}
-    
-    def add_vector3_field(self, key, label):
+        target_layout.addLayout(row)
+        self.widgets[key] = {'type': 'bool', 'widget': check, 'row_layout': row}
+
+    def add_vector3_field(self, key, label, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
         lbl.setStyleSheet("font-weight: bold;")
         
-        x_spin = QDoubleSpinBox()
-        x_spin.setRange(-1000.0, 1000.0)
-        x_spin.setDecimals(3)
-        x_spin.setPrefix("X: ")
-        x_spin.valueChanged.connect(self.on_change)
-        
-        y_spin = QDoubleSpinBox()
-        y_spin.setRange(-1000.0, 1000.0)
-        y_spin.setDecimals(3)
-        y_spin.setPrefix("Y: ")
-        y_spin.valueChanged.connect(self.on_change)
-        
-        z_spin = QDoubleSpinBox()
-        z_spin.setRange(-1000.0, 1000.0)
-        z_spin.setDecimals(3)
-        z_spin.setPrefix("Z: ")
-        z_spin.valueChanged.connect(self.on_change)
+        widgets = []
+        for prefix in ["X: ", "Y: ", "Z: "]:
+            spin = QDoubleSpinBox()
+            spin.setRange(-1000.0, 1000.0)
+            spin.setDecimals(3)
+            spin.setPrefix(prefix)
+            spin.valueChanged.connect(self.on_change)
+            widgets.append(spin)
         
         row.addWidget(lbl)
-        row.addWidget(x_spin)
-        row.addWidget(y_spin)
-        row.addWidget(z_spin)
-        self.content_layout.addLayout(row)
+        for w in widgets:
+            row.addWidget(w)
         
-        self.widgets[key] = {'type': 'vector3', 'widgets': [x_spin, y_spin, z_spin]}
-    
-    def add_vector3_int_field(self, key, label):
+        target_layout.addLayout(row)
+        self.widgets[key] = {'type': 'vector3', 'widgets': widgets, 'row_layout': row}
+
+    def add_vector3_int_field(self, key, label, parent=None):
+        target_layout = parent if parent else self.content_layout
         row = QHBoxLayout()
         lbl = QLabel(f"{label}:")
         lbl.setMinimumWidth(150)
         lbl.setStyleSheet("font-weight: bold;")
         
-        x_spin = QSpinBox()
-        x_spin.setRange(1, 1000)
-        x_spin.setPrefix("X: ")
-        x_spin.valueChanged.connect(self.on_change)
-        
-        y_spin = QSpinBox()
-        y_spin.setRange(1, 1000)
-        y_spin.setPrefix("Y: ")
-        y_spin.valueChanged.connect(self.on_change)
-        
-        z_spin = QSpinBox()
-        z_spin.setRange(1, 1000)
-        z_spin.setPrefix("Z: ")
-        z_spin.valueChanged.connect(self.on_change)
+        widgets = []
+        for prefix in ["X: ", "Y: ", "Z: "]:
+            spin = QSpinBox()
+            spin.setRange(1, 1000)
+            spin.setPrefix(prefix)
+            spin.valueChanged.connect(self.on_change)
+            widgets.append(spin)
         
         row.addWidget(lbl)
-        row.addWidget(x_spin)
-        row.addWidget(y_spin)
-        row.addWidget(z_spin)
-        self.content_layout.addLayout(row)
-        
-        self.widgets[key] = {'type': 'vector3_int', 'widgets': [x_spin, y_spin, z_spin]}
+        for w in widgets:
+            row.addWidget(w)
+            
+        target_layout.addLayout(row)
+        self.widgets[key] = {'type': 'vector3_int', 'widgets': widgets, 'row_layout': row}
+
     
     def on_change(self):
         if self.auto_save:
@@ -711,6 +1213,7 @@ class NodeParametersWidget(QWidget):
         for key, info in self.widgets.items():
             wtype = info['type']
             
+            # Zugriff erfolgt jetzt typsicher
             if wtype == 'text':
                 result[key] = info['widget'].text()
             elif wtype == 'int':
@@ -719,16 +1222,20 @@ class NodeParametersWidget(QWidget):
                 result[key] = info['widget'].value()
             elif wtype == 'bool':
                 result[key] = info['widget'].isChecked()
+            elif wtype == 'combo':
+                result[key] = info['widget'].currentData()
             elif wtype == 'vector3':
-                result[key] = [s.value() for s in info['widgets']]
+                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
             elif wtype == 'vector3_int':
-                result[key] = [s.value() for s in info['widgets']]
+                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
             elif wtype == 'prob_list':
-                result[key] = [s.value() for s in info['widgets']]
+                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
         
+        # Center of Mass Logik
         if 'center_of_mass' in result:
             result['m'] = result['center_of_mass'].copy()
         
+        # Scaling defaults
         sx = result.get('stretch_x', 1.0)
         sy = result.get('stretch_y', 1.0)
         sz = result.get('stretch_z', 1.0)
@@ -760,6 +1267,10 @@ class NodeParametersWidget(QWidget):
                 info['widget'].setValue(float(value))
             elif wtype == 'bool':
                 info['widget'].setChecked(bool(value))
+            elif wtype == 'combo':
+                index = info['widget'].findData(value)
+                if index >= 0:
+                    info['widget'].setCurrentIndex(index)
             elif wtype in ['vector3', 'vector3_int']:
                 if isinstance(value, (list, tuple, np.ndarray)) and len(value) >= 3:
                     for i, spin in enumerate(info['widgets']):
@@ -774,6 +1285,7 @@ class NodeParametersWidget(QWidget):
                             info['widgets'][i].setValue(float(v))
                             info['widgets'][i].blockSignals(False)
 
+        # Matrix Handling
         if 'transform_matrix' in data:
             mat = data['transform_matrix']
             try:
@@ -791,13 +1303,23 @@ class NodeParametersWidget(QWidget):
             except Exception as e:
                 print(f"Error parsing transform_matrix: {e}")
 
+        # Sicherstellen, dass Skalierung nicht 0 ist
         for stretch_key in ['stretch_x', 'stretch_y', 'stretch_z']:
-
             if stretch_key in self.widgets and self.widgets[stretch_key]['widget'].value() == 0.0: 
                  self.widgets[stretch_key]['widget'].setValue(1.0)
 
         self.auto_save = True
 
+
+
+# Helper Funktion um Layouts zu verstecken (muss in die Klasse oder global)
+def _set_visible(layout, visible):
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        if item.widget():
+            item.widget().setVisible(visible)
+        if item.layout():
+            _set_visible(item.layout(), visible)
 
 class PolynomialTrioWidget(QGroupBox):
     """
@@ -1625,11 +2147,18 @@ class GraphCreatorWidget(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         
-        #  HEADER 
+        # HEADER
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("Graph Name:"))
         self.graph_name_input = QLineEdit()
+        
+        # --- ÄNDERUNG START: Automatischen Namen setzen ---
+        # Wir greifen auf die globale Variable zu
+        global next_graph_id 
+        self.graph_name_input.setText(f"Graph_{next_graph_id}")
         self.graph_name_input.setPlaceholderText("e.g., Visual Cortex")
+        # --- ÄNDERUNG ENDE ---
+        
         header_layout.addWidget(self.graph_name_input)
         main_layout.addLayout(header_layout)
         
@@ -1793,27 +2322,33 @@ class GraphCreatorWidget(QWidget):
             print("ERROR: Add at least one node!")
             return
         
+        # --- Validierung ---
         for i, node in enumerate(self.node_list):
-            if not node['populations']:
-                print(f"ERROR: Node {i+1} has no populations! Please add populations to all nodes.")
+            tool_type = node['params'].get('tool_type', 'custom')
+            
+            # Nur für Custom Nodes (WFC) sind manuelle Populationen zwingend
+            if tool_type == 'custom' and not node['populations']:
+                print(f"ERROR: Node {i+1} (Custom) has no populations! Please add populations.")
                 return
             
-            prob_vec = node['params'].get('probability_vector', [])
-            total_prob = sum(prob_vec)
-            if abs(total_prob - 1.0) > 0.01:
-                print(f"ERROR: Node {i+1} probability vector sums to {total_prob:.2f}, must be 1.0!")
-                return
+            # Probability Check nur wenn manuelle Populationen da sind
+            if node['populations']:
+                prob_vec = node['params'].get('probability_vector', [])
+                total_prob = sum(prob_vec)
+                if abs(total_prob - 1.0) > 0.01:
+                    print(f"ERROR: Node {i+1} probability vector sums to {total_prob:.2f}, must be 1.0!")
+                    return
         
+        # Aktuelle GUI-Werte des selektierten Nodes speichern
         if self.current_node_idx is not None:
-            #print(f"[DEBUG] Saving current node {self.current_node_idx} params before create...")
             current_params = self.node_param_widget.get_current_params()
             if 'center_of_mass' in current_params:
                 current_params['m'] = current_params['center_of_mass'].copy()
             self.node_list[self.current_node_idx]['params'] = current_params
-            #print(f"[DEBUG] Node {self.current_node_idx} center_of_mass: {current_params.get('center_of_mass')}")
         
         self.save_current_population_params()
         
+        # Polynomials speichern (falls vorhanden)
         if hasattr(self, '_last_polynomial_node_idx') and self._last_polynomial_node_idx is not None:
             last_node = self.node_list[self._last_polynomial_node_idx]
             all_polynomials = self.polynom_manager.get_all_polynomials()
@@ -1827,35 +2362,47 @@ class GraphCreatorWidget(QWidget):
         converted_nodes = []
         
         for node_idx, node in enumerate(self.node_list):
+            tool_type = node['params'].get('tool_type', 'custom')
             populations = node['populations']
             
-            neuron_models = [pop['model'] for pop in populations]
-            types = list(range(len(populations)))
-            
-            encoded_polynoms_per_type = []
-            for pop in populations:
-                poly_dict = pop.get('polynomials', None)
-                if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
-                    encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
-                else:
-                    encoded_polynoms_per_type.append([])
-            num_pops = len(populations)
-            prob_vec = node['params'].get('probability_vector', [])
-            
-            if not prob_vec or len(prob_vec) != num_pops:
-                if num_pops > 0:
-                    prob_vec = [1.0 / num_pops] * num_pops
-                else:
-                    prob_vec = []
-            
-            if num_pops > 0 and abs(sum(prob_vec) - 1.0) > 0.01:
-                s = sum(prob_vec)
-                if s > 0:
-                    prob_vec = [p/s for p in prob_vec] 
-                else:
-                    prob_vec = [1.0 / num_pops] * num_pops 
+            # === LOGIK-WEICHE: TOOL VS CUSTOM ===
+            if tool_type != 'custom' and not populations:
+                # AUTOMATISCHE KONFIGURATION FÜR TOOLS (z.B. CCW)
+                # Wir tun so, als gäbe es 1 Population, damit der Node gebaut wird.
+                print(f"Auto-configuring {tool_type} node structure...")
+                neuron_models = ['iaf_psc_alpha'] # Default Modell
+                types = [0]
+                encoded_polynoms_per_type = [[]] # Keine Flow-Fields für starre Strukturen nötig
+                prob_vec = [1.0]
+                pop_nest_params = [{}]
+            else:
+                # STANDARD LOGIK (WFC / Manuelle Pops)
+                neuron_models = [pop['model'] for pop in populations]
+                types = list(range(len(populations)))
+                
+                encoded_polynoms_per_type = []
+                for pop in populations:
+                    poly_dict = pop.get('polynomials', None)
+                    if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
+                        encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
+                    else:
+                        encoded_polynoms_per_type.append([])
+                
+                num_pops = len(populations)
+                prob_vec = node['params'].get('probability_vector', [])
+                if not prob_vec or len(prob_vec) != num_pops:
+                    prob_vec = [1.0 / num_pops] * num_pops if num_pops > 0 else []
+                
+                # Normalisieren
+                if num_pops > 0 and abs(sum(prob_vec) - 1.0) > 0.01:
+                    s = sum(prob_vec)
+                    prob_vec = [p/s for p in prob_vec] if s > 0 else [1.0/num_pops]*num_pops
+                
+                pop_nest_params = [pop.get('params', {}) for pop in populations]
 
+            # Parameter zusammenbauen
             node_params = {
+                # Geometrie & Position
                 'grid_size': node['params'].get('grid_size', [10, 10, 10]),
                 'm': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
                 'center_of_mass': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
@@ -1863,34 +2410,51 @@ class GraphCreatorWidget(QWidget):
                 'displacement_factor': node['params'].get('displacement_factor', 1.0),
                 'rot_theta': node['params'].get('rot_theta', 0.0),
                 'rot_phi': node['params'].get('rot_phi', 0.0),
-                'transform_matrix': node['params'].get('transform_matrix', [[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
-                'dt': node['params'].get('dt', 0.01),
-                'old': node['params'].get('old', True),
+                
+                # Tool Settings
+                'tool_type': tool_type,
+                'n_neurons': node['params'].get('n_neurons', 100),
+                'radius': node['params'].get('radius', 5.0),
+                'radius_top': node['params'].get('radius_top', 1.0),
+                'radius_bottom': node['params'].get('radius_bottom', 5.0),
+                'height': node['params'].get('height', 10.0),
+                'grid_side_length': node['params'].get('grid_side_length', 10),
+                
+                # Circuit Specifics (CCW)
+                'k': node['params'].get('k', 10.0),
+                'bidirectional': node['params'].get('bidirectional', False),
+                
+                # Transformations Matrix
                 'stretch_x': node['params'].get('stretch_x', 1.0),
                 'stretch_y': node['params'].get('stretch_y', 1.0),
                 'stretch_z': node['params'].get('stretch_z', 1.0),
-                'num_steps': node['params'].get('num_steps', 8),
                 'transform_matrix': node['params'].get('transform_matrix', [[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
+                
+                # WFC Stuff
+                'dt': node['params'].get('dt', 0.01),
+                'old': node['params'].get('old', True),
+                'num_steps': node['params'].get('num_steps', 8),
                 'sparse_holes': node['params'].get('sparse_holes', 0),
                 'sparsity_factor': node['params'].get('sparsity_factor', 0.9),
-                'probability_vector': prob_vec,    
-                'distribution': prob_vec,          
-                'polynom_max_power': node['params'].get('polynom_max_power', 5),
+                
+                # NEST / Structure
                 'name': node['params'].get('name', f'Node_{node_idx}'),
                 'id': node_idx,
+                'graph_id': graph_id,
                 'neuron_models': neuron_models,
                 'types': types,
+                'probability_vector': prob_vec,    
+                'distribution': prob_vec,          
                 'encoded_polynoms_per_type': encoded_polynoms_per_type,
-                'graph_id': graph_id,
-                'grid_size': node['params'].get('grid_size', [10, 10, 10]),
-                'm': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
-                'center_of_mass': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
-                'population_nest_params': [pop.get('params', {}) for pop in populations],
+                'population_nest_params': pop_nest_params,
+                'polynom_max_power': node['params'].get('polynom_max_power', 5),
                 'conn_prob': [],
                 'field': None,
                 'coefficients': None,
                 'connections': []
             }
+            
+            # Originale Populations-Liste für GUI-Status mitschleifen
             node['populations'] = populations.copy()
             converted_nodes.append(node_params)
         
@@ -1904,6 +2468,7 @@ class GraphCreatorWidget(QWidget):
         
         self.graphCreated.emit(graph_id)
         self.reset()
+        
     def add_node(self):
         node_idx = len(self.node_list)
         node_btn = QPushButton(f"Node {node_idx + 1}")
@@ -2034,11 +2599,14 @@ class GraphCreatorWidget(QWidget):
         return f"0x{r:02x}{g:02x}{b:02x}"
     
     def reset(self):
-        self.save_current_population_params()
+        # 1. Interne Auswahl zurücksetzen
+        self.current_node_idx = None
+        self.current_pop_idx = None
         
-        self.graph_name_input.clear()
+        # 2. Listen leeren
         self.node_list.clear()
         
+        # 3. UI-Layouts leeren (Buttons entfernen)
         while self.node_list_layout.count():
             item = self.node_list_layout.takeAt(0)
             if item.widget():
@@ -2049,10 +2617,22 @@ class GraphCreatorWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         
-        self.current_node_idx = None
-        self.current_pop_idx = None
+        # 4. Editor-Ansicht zurücksetzen
         self.editor_stack.setCurrentIndex(0)
         self.add_pop_btn.setEnabled(False)
+        
+        # --- NEU: Tool-Auswahl auf Standard ("custom") zurücksetzen ---
+        # Sucht den Index für "custom" und setzt ihn aktiv
+        custom_idx = self.node_param_widget.tool_combo.findData("custom")
+        if custom_idx >= 0:
+            self.node_param_widget.tool_combo.setCurrentIndex(custom_idx)
+        
+        # 5. NAME AKTUALISIEREN
+        global next_graph_id
+        next_name = f"Graph_{next_graph_id}"
+        
+        self.graph_name_input.setText(next_name)
+        self.graph_name_input.setCursorPosition(len(next_name))
 
 
 
@@ -2667,7 +3247,9 @@ class EditGraphWidget(QWidget):
             if not node['populations']:
                 print(f"ERROR: Node {i+1} has no populations!")
                 return
-        
+        # Update graph name im Objekt
+        new_name = self.graph_name_input.text()
+        self.current_graph.graph_name = new_name
         self.save_current_population_params()
         
         # Save polynomials
@@ -2762,7 +3344,13 @@ class EditGraphWidget(QWidget):
         print(f"Graph '{self.current_graph.graph_name}' updated!")
         
         self.graphUpdated.emit(-1)
-        self.refresh_graph_list()
+        # --- ÄNDERUNG: ComboBox Text aktualisieren ohne Auswahl zu verlieren ---
+        # Wir aktualisieren den Text des aktuell ausgewählten Items
+        idx = self.graph_selector.currentIndex()
+        if idx >= 0:
+            new_label = f"{new_name} (ID: {self.current_graph_id})"
+            self.graph_selector.setItemText(idx, new_label)
+        #self.refresh_graph_list()
 
     def _node_was_edited(self, node_data):
 
@@ -2969,841 +3557,607 @@ class EditGraphWidget(QWidget):
             self.graphUpdated.emit(-1)
 
 
+# In WidgetLib.py, ersetze die komplette class ConnectionTool
+
 
 class ConnectionTool(QWidget):
     def __init__(self, graph_list):
         super().__init__()
         self.graph_list = graph_list
-        self.connections = []  
+        self.connections = []
         self.next_conn_id = 0
         self.current_conn_idx = None
         self.syn_param_widgets = {} 
         self.init_ui()
-    
+    def refresh(self):
+        """Alias für refresh_graph_list, wird von CleanAlpha aufgerufen."""
+        self.refresh_graph_list()
     def init_ui(self):
         main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        #  COLUMN 1: SOURCE & TARGET 
+        # ==========================================
+        # SPALTE 1: SOURCE & TARGET (Links)
+        # ==========================================
         left_col = QVBoxLayout()
-        left_col.addWidget(QLabel("SOURCE", alignment=Qt.AlignmentFlag.AlignCenter))
         
-        # Source Graph
-        source_graph_layout = QHBoxLayout()
-        source_graph_layout.addWidget(QLabel("Graph:"))
+        # --- Source Group ---
+        src_group = QGroupBox("Source Population")
+        src_group.setStyleSheet("QGroupBox { border: 1px solid #4CAF50; margin-top: 10px; } QGroupBox::title { color: #4CAF50; }")
+        src_layout = QFormLayout(src_group)
+        
         self.source_graph_combo = QComboBox()
         self.source_graph_combo.currentIndexChanged.connect(self.on_source_graph_changed)
-        source_graph_layout.addWidget(self.source_graph_combo)
-        left_col.addLayout(source_graph_layout)
+        src_layout.addRow("Graph:", self.source_graph_combo)
         
-        # Source Node
-        source_node_layout = QHBoxLayout()
-        source_node_layout.addWidget(QLabel("Node:"))
         self.source_node_combo = QComboBox()
         self.source_node_combo.currentIndexChanged.connect(self.on_source_node_changed)
-        source_node_layout.addWidget(self.source_node_combo)
-        left_col.addLayout(source_node_layout)
+        src_layout.addRow("Node:", self.source_node_combo)
         
-        # Source Population
-        source_pop_layout = QHBoxLayout()
-        source_pop_layout.addWidget(QLabel("Population:"))
         self.source_pop_combo = QComboBox()
-        source_pop_layout.addWidget(self.source_pop_combo)
-        left_col.addLayout(source_pop_layout)
+        src_layout.addRow("Pop:", self.source_pop_combo)
         
-        left_col.addSpacing(20)
+        left_col.addWidget(src_group)
         
-        # Target Section
-        left_col.addWidget(QLabel("TARGET", alignment=Qt.AlignmentFlag.AlignCenter))
+        lbl_arrow = QLabel("⬇ connects to ⬇")
+        lbl_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_arrow.setStyleSheet("font-weight: bold; color: #777; margin: 5px;")
+        left_col.addWidget(lbl_arrow)
         
-        # Target Graph
-        target_graph_layout = QHBoxLayout()
-        target_graph_layout.addWidget(QLabel("Graph:"))
+        # --- Target Group ---
+        tgt_group = QGroupBox("Target Population")
+        tgt_group.setStyleSheet("QGroupBox { border: 1px solid #FF9800; margin-top: 10px; } QGroupBox::title { color: #FF9800; }")
+        tgt_layout = QFormLayout(tgt_group)
+        
         self.target_graph_combo = QComboBox()
         self.target_graph_combo.currentIndexChanged.connect(self.on_target_graph_changed)
-        target_graph_layout.addWidget(self.target_graph_combo)
-        left_col.addLayout(target_graph_layout)
+        tgt_layout.addRow("Graph:", self.target_graph_combo)
         
-        # Target Node
-        target_node_layout = QHBoxLayout()
-        target_node_layout.addWidget(QLabel("Node:"))
         self.target_node_combo = QComboBox()
         self.target_node_combo.currentIndexChanged.connect(self.on_target_node_changed)
-        target_node_layout.addWidget(self.target_node_combo)
-        left_col.addLayout(target_node_layout)
+        tgt_layout.addRow("Node:", self.target_node_combo)
         
-        # Target Population
-        target_pop_layout = QHBoxLayout()
-        target_pop_layout.addWidget(QLabel("Population:"))
         self.target_pop_combo = QComboBox()
-        target_pop_layout.addWidget(self.target_pop_combo)
-        left_col.addLayout(target_pop_layout)
+        tgt_layout.addRow("Pop:", self.target_pop_combo)
         
+        left_col.addWidget(tgt_group)
         left_col.addStretch()
+        
         main_layout.addLayout(left_col, 2)
         
-        #  COLUMN 2: PARAMETERS 
-        middle_col = QVBoxLayout()
-        middle_col.addWidget(QLabel("CONNECTION PARAMETERS", alignment=Qt.AlignmentFlag.AlignCenter))
+        # ==========================================
+        # SPALTE 2: PARAMETER (Mitte)
+        # ==========================================
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         
-        params_scroll = QScrollArea()
-        params_scroll.setWidgetResizable(True)
-        params_widget = QWidget()
-        self.params_layout = QVBoxLayout(params_widget) 
+        middle_container = QWidget()
+        middle_col = QVBoxLayout(middle_container)
+        middle_col.setContentsMargins(10, 0, 10, 0)
         
-        # Connection Name
+        # Name
         name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("Connection Name:"))
         self.conn_name_input = QLineEdit()
-        self.conn_name_input.setPlaceholderText("Auto-generated if empty")
+        self.conn_name_input.setPlaceholderText("Connection Name (Optional)")
+        name_layout.addWidget(QLabel("Name:"))
         name_layout.addWidget(self.conn_name_input)
-        self.params_layout.addLayout(name_layout)
+        middle_col.addLayout(name_layout)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #444; }
+            QTabBar::tab { background: #333; color: #AAA; padding: 8px 20px; }
+            QTabBar::tab:selected { background: #2196F3; color: white; font-weight: bold; }
+        """)
         
-        # Connection Rule
-        rule_layout = QHBoxLayout()
-        rule_layout.addWidget(QLabel("Rule:"))
-        self.rule_combo = QComboBox()
-        self.rule_combo.addItems([
-            "all_to_all",
-            "one_to_one",
-            "fixed_indegree",
-            "fixed_outdegree",
-            "fixed_total_number",
-            "pairwise_bernoulli",
-            "pairwise_bernoulli_on_source",
-            "pairwise_bernoulli_on_target",
-            "symmetric_pairwise_bernoulli"
-        ])
-        self.rule_combo.currentTextChanged.connect(self.on_rule_changed)
-        rule_layout.addWidget(self.rule_combo)
-        self.params_layout.addLayout(rule_layout)
+        self.tab_spatial = QWidget()
+        self._init_spatial_tab()
+        self.tabs.addTab(self.tab_spatial, "🌍 Spatial (Geometric)")
         
-        #  DYNAMIC RULE PARAMETERS 
+        self.tab_topo = QWidget()
+        self._init_topological_tab()
+        self.tabs.addTab(self.tab_topo, "🕸️ Topological (Graph)")
         
-        # Indegree
-        self.indegree_layout = QHBoxLayout()
-        self.indegree_layout.addWidget(QLabel("Indegree:"))
-        self.indegree_spin = QSpinBox()
-        self.indegree_spin.setRange(1, 10000)
-        self.indegree_spin.setValue(100)
-        self.indegree_layout.addWidget(self.indegree_spin)
-        self.params_layout.addLayout(self.indegree_layout)
+        middle_col.addWidget(self.tabs)
         
-        # Outdegree
-        self.outdegree_layout = QHBoxLayout()
-        self.outdegree_layout.addWidget(QLabel("Outdegree:"))
-        self.outdegree_spin = QSpinBox()
-        self.outdegree_spin.setRange(1, 10000)
-        self.outdegree_spin.setValue(100)
-        self.outdegree_layout.addWidget(self.outdegree_spin)
-        self.params_layout.addLayout(self.outdegree_layout)
+        # Synapse Settings
+        syn_group = QGroupBox("Synapse Properties")
+        syn_layout = QFormLayout(syn_group)
         
-        # Total Number
-        self.total_num_layout = QHBoxLayout()
-        self.total_num_layout.addWidget(QLabel("Total Number:"))
-        self.total_num_spin = QSpinBox()
-        self.total_num_spin.setRange(1, 100000)
-        self.total_num_spin.setValue(1000)
-        self.total_num_layout.addWidget(self.total_num_spin)
-        self.params_layout.addLayout(self.total_num_layout)
+        self.syn_model_combo = QComboBox()
+        self.syn_model_combo.addItems(sorted(SYNAPSE_MODELS.keys()))
+        self.syn_model_combo.currentTextChanged.connect(self.on_synapse_model_changed)
+        syn_layout.addRow("Model:", self.syn_model_combo)
         
-        # Probability
-        self.prob_layout = QHBoxLayout()
-        self.prob_layout.addWidget(QLabel("Probability:"))
-        self.prob_spin = QDoubleSpinBox()
-        self.prob_spin.setRange(0.0, 1.0)
-        self.prob_spin.setValue(0.1)
-        self.prob_spin.setSingleStep(0.05)
-        self.prob_spin.setDecimals(4)
-        self.prob_layout.addWidget(self.prob_spin)
-        self.params_layout.addLayout(self.prob_layout)
-        
-        #  STANDARD SYNAPSE PARAMETERS 
-        
-        # Weight
-        weight_layout = QHBoxLayout()
-        weight_layout.addWidget(QLabel("Weight:"))
+        wd_layout = QHBoxLayout()
         self.weight_spin = QDoubleSpinBox()
-        self.weight_spin.setRange(-1000.0, 1000.0)
+        self.weight_spin.setRange(-10000, 10000)
         self.weight_spin.setValue(1.0)
         self.weight_spin.setDecimals(3)
-        weight_layout.addWidget(self.weight_spin)
-        self.params_layout.addLayout(weight_layout)
+        self.weight_spin.setPrefix("W: ")
         
-        # Delay
-        delay_layout = QHBoxLayout()
-        delay_layout.addWidget(QLabel("Delay (ms):"))
         self.delay_spin = QDoubleSpinBox()
-        self.delay_spin.setRange(0.1, 100.0)
+        self.delay_spin.setRange(0.1, 1000)
         self.delay_spin.setValue(1.0)
         self.delay_spin.setDecimals(2)
-        delay_layout.addWidget(self.delay_spin)
-        self.params_layout.addLayout(delay_layout)
+        self.delay_spin.setPrefix("D: ")
+        self.delay_spin.setSuffix(" ms")
         
-        # Synapse Model Selection
-        syn_layout = QHBoxLayout()
-        syn_layout.addWidget(QLabel("Synapse Model:"))
-        self.syn_model_combo = QComboBox()
-        self.syn_model_combo.addItems(sorted(synapse_models.keys()))
-        self.syn_model_combo.currentTextChanged.connect(self.on_synapse_model_changed)
-        syn_layout.addWidget(self.syn_model_combo)
-        self.params_layout.addLayout(syn_layout)
+        wd_layout.addWidget(self.weight_spin)
+        wd_layout.addWidget(self.delay_spin)
+        syn_layout.addRow("Base Params:", wd_layout)
         
-        #  DYNAMIC SYNAPSE PARAMETER CONTAINER 
         self.dynamic_syn_params_container = QWidget()
         self.dynamic_syn_params_layout = QVBoxLayout(self.dynamic_syn_params_container)
-        self.dynamic_syn_params_layout.setContentsMargins(0, 0, 0, 0)
-        self.params_layout.addWidget(self.dynamic_syn_params_container)
+        self.dynamic_syn_params_layout.setContentsMargins(0,0,0,0)
+        syn_layout.addRow(self.dynamic_syn_params_container)
         
-        # Allow Autapses
-        autapses_layout = QHBoxLayout()
-        self.allow_autapses_check = QCheckBox("Allow Autapses (self-connections)")
+        opts_layout = QHBoxLayout()
+        self.allow_autapses_check = QCheckBox("Autapses")
         self.allow_autapses_check.setChecked(True)
-        autapses_layout.addWidget(self.allow_autapses_check)
-        self.params_layout.addLayout(autapses_layout)
-        
-        # Allow Multapses
-        multapses_layout = QHBoxLayout()
-        self.allow_multapses_check = QCheckBox("Allow Multapses (multiple connections)")
+        self.allow_multapses_check = QCheckBox("Multapses")
         self.allow_multapses_check.setChecked(True)
-        multapses_layout.addWidget(self.allow_multapses_check)
-        self.params_layout.addLayout(multapses_layout)
+        self.receptor_spin = QSpinBox()
+        self.receptor_spin.setRange(0, 255)
+        self.receptor_spin.setPrefix("Receptor: ")
         
-        self.params_layout.addStretch()
-        params_scroll.setWidget(params_widget)
-        middle_col.addWidget(params_scroll)
+        opts_layout.addWidget(self.allow_autapses_check)
+        opts_layout.addWidget(self.allow_multapses_check)
+        opts_layout.addWidget(self.receptor_spin)
+        syn_layout.addRow(opts_layout)
         
-        main_layout.addLayout(middle_col, 3)
+        middle_col.addWidget(syn_group)
+        middle_col.addStretch()
         
-        #  COLUMN 3: CONNECTIONS LIST 
+        scroll_area.setWidget(middle_container)
+        main_layout.addWidget(scroll_area, 3)
+        
+        # ==========================================
+        # SPALTE 3: LISTE & ACTIONS (Rechts)
+        # ==========================================
         right_col = QVBoxLayout()
-        right_col.addWidget(QLabel("CONNECTIONS", alignment=Qt.AlignmentFlag.AlignCenter))
+        right_col.addWidget(QLabel("Connection Queue", alignment=Qt.AlignmentFlag.AlignCenter))
         
-        # Connections List
-        conn_scroll = QScrollArea()
-        conn_scroll.setWidgetResizable(True)
         self.conn_list_widget = QWidget()
         self.conn_list_layout = QVBoxLayout(self.conn_list_widget)
+        conn_scroll = QScrollArea()
+        conn_scroll.setWidgetResizable(True)
         conn_scroll.setWidget(self.conn_list_widget)
         right_col.addWidget(conn_scroll)
         
         # Buttons
-        btn_layout = QVBoxLayout()
-        
-        self.add_conn_btn = QPushButton("+ Add Connection")
-        self.add_conn_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.add_conn_btn = QPushButton("⬇ Add to Queue")
+        self.add_conn_btn.setStyleSheet("background-color: #2196F3; font-weight: bold; padding: 8px;")
         self.add_conn_btn.clicked.connect(self.add_connection)
-        btn_layout.addWidget(self.add_conn_btn)
+        right_col.addWidget(self.add_conn_btn)
         
-        self.delete_conn_btn = QPushButton("🗑️ Delete Connection")
-        self.delete_conn_btn.setStyleSheet("background-color: #F44336; color: white; font-weight: bold;")
+        self.delete_conn_btn = QPushButton("Remove Selected")
         self.delete_conn_btn.clicked.connect(self.delete_connection)
         self.delete_conn_btn.setEnabled(False)
-        btn_layout.addWidget(self.delete_conn_btn)
+        right_col.addWidget(self.delete_conn_btn)
         
-        self.create_all_btn = QPushButton("🚀 CREATE ALL CONNECTIONS")
-        self.create_all_btn.setMinimumHeight(60)
-        self.create_all_btn.setStyleSheet(
-            "background-color: #FF5722; color: white; font-weight: bold; font-size: 16px;"
-        )
+        self.create_all_btn = QPushButton("🚀 CREATE IN NEST")
+        self.create_all_btn.setMinimumHeight(50)
+        self.create_all_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px;")
         self.create_all_btn.clicked.connect(self.create_all_connections)
-        btn_layout.addWidget(self.create_all_btn)
+        right_col.addWidget(self.create_all_btn)
         
-        right_col.addLayout(btn_layout)
+        # ✅ HIER FEHLTE DAS STATUS LABEL
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: #bbb; font-size: 11px; font-weight: bold;")
+        self.status_label.setWordWrap(True)
+        right_col.addWidget(self.status_label)
+        # ==========================================
+        
         main_layout.addLayout(right_col, 2)
         
-        # Initial setup
+        # Initial Refresh
         self.refresh_graph_list()
-        self.on_rule_changed(self.rule_combo.currentText())
         if self.syn_model_combo.count() > 0:
             self.on_synapse_model_changed(self.syn_model_combo.currentText())
-    
-    def on_rule_changed(self, rule):
-        self.hide_layout(self.indegree_layout)
-        self.hide_layout(self.outdegree_layout)
-        self.hide_layout(self.total_num_layout)
-        self.hide_layout(self.prob_layout)
+
+    def _init_spatial_tab(self):
+        layout = QVBoxLayout(self.tab_spatial)
+        info = QLabel("Connects neurons based on spatial positions.")
+        info.setStyleSheet("color: #AAA; font-style: italic;")
+        layout.addWidget(info)
+        form = QFormLayout()
+        self.mask_type_combo = QComboBox()
+        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
+        form.addRow("Mask Shape:", self.mask_type_combo)
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.01, 1000.0)
+        self.radius_spin.setValue(0.5)
+        self.radius_spin.setSuffix(" mm")
+        form.addRow("Outer Radius/Size:", self.radius_spin)
+        self.inner_radius_spin = QDoubleSpinBox()
+        self.inner_radius_spin.setRange(0.0, 1000.0)
+        self.inner_radius_spin.setValue(0.0)
+        self.inner_radius_spin.setSuffix(" mm")
+        form.addRow("Inner Radius:", self.inner_radius_spin)
+        layout.addLayout(form)
+
+
+        dist_layout = QHBoxLayout()
         
-        if rule == "fixed_indegree":
-            self.show_layout(self.indegree_layout)
-        elif rule == "fixed_outdegree":
-            self.show_layout(self.outdegree_layout)
-        elif rule == "fixed_total_number":
-            self.show_layout(self.total_num_layout)
-        elif rule in ["pairwise_bernoulli", "pairwise_bernoulli_on_source", 
-                      "pairwise_bernoulli_on_target", "symmetric_pairwise_bernoulli"]:
-            self.show_layout(self.prob_layout)
-            
+        self.dist_dep_check = QCheckBox("Scale Weight by Distance")
+        self.dist_dep_check.setToolTip("Multiply base weight by (distance * factor) + offset")
+        self.dist_dep_check.toggled.connect(self._toggle_dist_inputs)
+        
+        self.dist_factor_spin = QDoubleSpinBox()
+        self.dist_factor_spin.setRange(-100.0, 100.0)
+        self.dist_factor_spin.setValue(1.0)
+        self.dist_factor_spin.setPrefix("Factor: ")
+        self.dist_factor_spin.setEnabled(False)
+        
+        self.dist_offset_spin = QDoubleSpinBox()
+        self.dist_offset_spin.setRange(-100.0, 100.0)
+        self.dist_offset_spin.setValue(0.0)
+        self.dist_offset_spin.setPrefix("Offset: ")
+        self.dist_offset_spin.setEnabled(False)
+
+        dist_layout.addWidget(self.dist_dep_check)
+        dist_layout.addWidget(self.dist_factor_spin)
+        dist_layout.addWidget(self.dist_offset_spin)
+        
+        layout.addLayout(dist_layout)
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("Connectivity:"))
+        prob_layout = QHBoxLayout()
+        prob_layout.addWidget(QLabel("Probability (p):"))
+        self.spatial_prob_spin = QDoubleSpinBox()
+        self.spatial_prob_spin.setRange(0.0, 1.0)
+        self.spatial_prob_spin.setValue(1.0)
+        self.spatial_prob_spin.setSingleStep(0.1)
+        prob_layout.addWidget(self.spatial_prob_spin)
+        layout.addLayout(prob_layout)
+        layout.addStretch()
+    def reset_interface(self):
+        """Setzt die Eingabefelder auf Standardwerte zurück."""
+        self.conn_name_input.clear()
+        
+        # Spatial Tab Defaults
+        self.mask_type_combo.setCurrentIndex(0) # sphere
+        self.radius_spin.setValue(0.5)
+        self.inner_radius_spin.setValue(0.0)
+        self.dist_dep_check.setChecked(False)
+        self.spatial_prob_spin.setValue(1.0)
+        
+        # Dist inputs (die werden durch toggle automatisch disabled)
+        self.dist_factor_spin.setValue(1.0)
+        self.dist_offset_spin.setValue(0.0)
+        
+        # Topological Tab Defaults
+        self.rule_combo.setCurrentIndex(0) # all_to_all
+        self.indegree_spin.setValue(10)
+        self.outdegree_spin.setValue(10)
+        self.total_num_spin.setValue(100)
+        self.topo_prob_spin.setValue(0.1)
+        
+        # Synapse Defaults
+        # Tipp: Wir lassen das Synapsen-Modell absichtlich stehen, 
+        # damit man schneller mehrere ähnliche Verbindungen erstellen kann.
+        self.weight_spin.setValue(1.0)
+        self.delay_spin.setValue(1.0)
+        self.allow_autapses_check.setChecked(True)
+        self.allow_multapses_check.setChecked(True)
+        self.receptor_spin.setValue(0)
+        
+        # Source/Target Combos lassen wir so, wie sie sind, 
+        # damit der Workflow nicht unterbrochen wird.
+    def _toggle_dist_inputs(self, checked):
+        self.dist_factor_spin.setEnabled(checked)
+        self.dist_offset_spin.setEnabled(checked)
+        
+    def _init_topological_tab(self):
+        layout = QVBoxLayout(self.tab_topo)
+        self.rule_combo = QComboBox()
+        self.rule_combo.addItems(["all_to_all", "fixed_indegree", "fixed_outdegree", "fixed_total_number", "pairwise_bernoulli", "one_to_one"])
+        self.rule_combo.currentTextChanged.connect(self.on_rule_changed)
+        layout.addWidget(QLabel("Connection Rule:"))
+        layout.addWidget(self.rule_combo)
+        self.topo_params_widget = QWidget()
+        self.topo_params_layout = QFormLayout(self.topo_params_widget)
+        layout.addWidget(self.topo_params_widget)
+        self.indegree_spin = QSpinBox(); self.indegree_spin.setRange(1, 100000); self.indegree_spin.setValue(10)
+        self.outdegree_spin = QSpinBox(); self.outdegree_spin.setRange(1, 100000); self.outdegree_spin.setValue(10)
+        self.total_num_spin = QSpinBox(); self.total_num_spin.setRange(1, 1000000); self.total_num_spin.setValue(100)
+        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1)
+        self.on_rule_changed("all_to_all")
+        layout.addStretch()
+
+    def on_rule_changed(self, rule):
+        while self.topo_params_layout.count():
+            item = self.topo_params_layout.takeAt(0)
+            if item.widget(): item.widget().setParent(None)
+        if rule == "fixed_indegree": self.topo_params_layout.addRow("Indegree:", self.indegree_spin)
+        elif rule == "fixed_outdegree": self.topo_params_layout.addRow("Outdegree:", self.outdegree_spin)
+        elif rule == "fixed_total_number": self.topo_params_layout.addRow("Total Connections:", self.total_num_spin)
+        elif "bernoulli" in rule: self.topo_params_layout.addRow("Probability:", self.topo_prob_spin)
+
+    def _get_current_params(self):
+        """Sammelt Parameter basierend auf dem aktiven Tab."""
+        is_spatial = (self.tabs.currentIndex() == 0)
+        
+        params = {
+            'synapse_model': self.syn_model_combo.currentText(), # ✅ FIX: self.syn_model_combo
+            'weight': self.weight_spin.value(),
+            'delay': self.delay_spin.value(),
+            'allow_autapses': self.allow_autapses_check.isChecked(),
+            'allow_multapses': self.allow_multapses_check.isChecked(),
+            'receptor_type': self.receptor_spin.value(),
+            'use_spatial': is_spatial
+        }
+        
+        if is_spatial:
+            params['rule'] = 'pairwise_bernoulli'
+            params['p'] = self.spatial_prob_spin.value()
+            params['mask_type'] = self.mask_type_combo.currentText()
+            params['mask_radius'] = self.radius_spin.value()
+            params['mask_inner_radius'] = self.inner_radius_spin.value()
+            params['distance_dependent_weight'] = self.dist_dep_check.isChecked()
+            params['dist_factor'] = self.dist_factor_spin.value()
+            params['dist_offset'] = self.dist_offset_spin.value()
+        else:
+            rule = self.rule_combo.currentText()
+            params['rule'] = rule
+            if rule == 'fixed_indegree': params['indegree'] = self.indegree_spin.value()
+            elif rule == 'fixed_outdegree': params['outdegree'] = self.outdegree_spin.value()
+            elif rule == 'fixed_total_number': params['N'] = self.total_num_spin.value()
+            elif 'bernoulli' in rule: params['p'] = self.topo_prob_spin.value()
+                
+        for name, widget in self.syn_param_widgets.items():
+             params[name] = widget.get_value()
+        return params
+
     def on_synapse_model_changed(self, model_name):
         while self.dynamic_syn_params_layout.count():
             item = self.dynamic_syn_params_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
+            if item.widget(): item.widget().deleteLater()
         self.syn_param_widgets.clear()
-        
-        if model_name not in synapse_models:
-            return
-
-        params = synapse_models[model_name]
-        if not params:
-            return
-
-        header = QLabel(f"Parameters for {model_name}:")
-        header.setStyleSheet("font-weight: bold; color: #555; margin-top: 5px;")
-        self.dynamic_syn_params_layout.addWidget(header)
-
+        if model_name not in SYNAPSE_MODELS: return
+        params = SYNAPSE_MODELS[model_name]
         for param_name, info in params.items():
             p_type = info.get('type', 'float')
             p_default = info.get('default', 0.0)
-            p_min = info.get('min')
-            p_max = info.get('max')
-            
             widget = None
-            
-            if p_type == 'float':
-                safe_min = p_min if p_min is not None else 0.0
-                safe_max = p_max if p_max is not None else 10000.0
-                
-                widget = DoubleInputField(
-                    param_name, 
-                    default_value=float(p_default),
-                    min_val=float(safe_min),
-                    max_val=float(safe_max)
-                )
-            elif p_type == 'integer':
-                safe_min = p_min if p_min is not None else 0
-                safe_max = p_max if p_max is not None else 10000
-                
-                widget = IntegerInputField(
-                    param_name,
-                    default_value=int(p_default),
-                    min_val=int(safe_min),
-                    max_val=int(safe_max)
-                )
-            
+            if p_type == 'float': widget = DoubleInputField(param_name, default_value=float(p_default))
+            elif p_type == 'integer': widget = IntegerInputField(param_name, default_value=int(p_default))
             if widget:
                 self.dynamic_syn_params_layout.addWidget(widget)
                 self.syn_param_widgets[param_name] = widget
 
-    def hide_layout(self, layout):
-        for i in range(layout.count()):
-            widget = layout.itemAt(i).widget()
-            if widget:
-                widget.setVisible(False)
-    
-    def show_layout(self, layout):
-        for i in range(layout.count()):
-            widget = layout.itemAt(i).widget()
-            if widget:
-                widget.setVisible(True)
-    
     def refresh_graph_list(self):
         self.source_graph_combo.clear()
         self.target_graph_combo.clear()
-        
         for graph in self.graph_list:
-            graph_name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
-            self.source_graph_combo.addItem(f"{graph_name} (ID: {graph.graph_id})", graph.graph_id)
-            self.target_graph_combo.addItem(f"{graph_name} (ID: {graph.graph_id})", graph.graph_id)
-        
+            name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
+            self.source_graph_combo.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
+            self.target_graph_combo.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
         if len(self.graph_list) > 0:
             self.on_source_graph_changed(0)
             self.on_target_graph_changed(0)
-    
+
     def on_source_graph_changed(self, index):
         self.source_node_combo.clear()
         self.source_pop_combo.clear()
-        
         if index < 0: return
         graph_id = self.source_graph_combo.currentData()
-        if graph_id is None: return
-        
         graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
         if not graph: return
-        
         for node in graph.node_list:
-            node_name = getattr(node, 'name', f'Node {node.id}')
-            self.source_node_combo.addItem(f"{node_name} (ID: {node.id})", node.id)
-        
-        if len(graph.node_list) > 0:
-            self.on_source_node_changed(0)
-    
+            self.source_node_combo.addItem(f"{node.name} (ID: {node.id})", node.id)
+        if len(graph.node_list) > 0: self.on_source_node_changed(0)
+
+    def on_source_node_changed(self, index):
+        self.source_pop_combo.clear()
+        if index < 0: return
+        graph_id = self.source_graph_combo.currentData()
+        node_id = self.source_node_combo.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if not graph: return
+        node = next((n for n in graph.node_list if n.id == node_id), None)
+        if not node: return
+        for i, pop in enumerate(node.population):
+            self.source_pop_combo.addItem(f"Pop {i}", i)
+
     def on_target_graph_changed(self, index):
         self.target_node_combo.clear()
         self.target_pop_combo.clear()
-        
         if index < 0: return
         graph_id = self.target_graph_combo.currentData()
-        if graph_id is None: return
-        
         graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
         if not graph: return
-        
         for node in graph.node_list:
-            node_name = getattr(node, 'name', f'Node {node.id}')
-            self.target_node_combo.addItem(f"{node_name} (ID: {node.id})", node.id)
-        
-        if len(graph.node_list) > 0:
-            self.on_target_node_changed(0)
-    
-    def on_source_node_changed(self, index):
-        self.source_pop_combo.clear()
-        graph_id = self.source_graph_combo.currentData()
-        node_id = self.source_node_combo.currentData()
-        
-        if graph_id is None or node_id is None: return
-        
-        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
-        if not graph: return
-        
-        node = next((n for n in graph.node_list if n.id == node_id), None)
-        if not node: return
-        
-        for i, pop in enumerate(node.population):
-            model = node.parameters['neuron_models'][i] if i < len(node.parameters['neuron_models']) else 'unknown'
-            self.source_pop_combo.addItem(f"Pop {i}: {model} ({len(pop)} neurons)", i)
-    
+            self.target_node_combo.addItem(f"{node.name} (ID: {node.id})", node.id)
+        if len(graph.node_list) > 0: self.on_target_node_changed(0)
+
     def on_target_node_changed(self, index):
         self.target_pop_combo.clear()
+        if index < 0: return
         graph_id = self.target_graph_combo.currentData()
         node_id = self.target_node_combo.currentData()
-        
-        if graph_id is None or node_id is None: return
-        
         graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
         if not graph: return
-        
         node = next((n for n in graph.node_list if n.id == node_id), None)
         if not node: return
-        
         for i, pop in enumerate(node.population):
-            model = node.parameters['neuron_models'][i] if i < len(node.parameters['neuron_models']) else 'unknown'
-            self.target_pop_combo.addItem(f"Pop {i}: {model} ({len(pop)} neurons)", i)
-    def _execute_nest_connections(self):
-        
-        if not self.connections:
-            return 0
-                
-        successful = 0
-        failed = 0
-        
-        for conn in self.connections:
-            try:
-                #  SOURCE POPULATION 
-                source_graph = next(
-                    (g for g in self.graph_list if g.graph_id == conn['source']['graph_id']), 
-                    None
-                )
-                if not source_graph:
-                    raise ValueError(f"Source graph {conn['source']['graph_id']} not found")
-                
-                source_node = next(
-                    (n for n in source_graph.node_list if n.id == conn['source']['node_id']), 
-                    None
-                )
-                if not source_node:
-                    raise ValueError(f"Source node {conn['source']['node_id']} not found")
-                
-                if conn['source']['pop_id'] >= len(source_node.population):
-                    raise ValueError(f"Source population {conn['source']['pop_id']} out of range")
-                
-                source_pop = source_node.population[conn['source']['pop_id']]
-                
-                #  TARGET POPULATION 
-                target_graph = next(
-                    (g for g in self.graph_list if g.graph_id == conn['target']['graph_id']), 
-                    None
-                )
-                if not target_graph:
-                    raise ValueError(f"Target graph {conn['target']['graph_id']} not found")
-                
-                target_node = next(
-                    (n for n in target_graph.node_list if n.id == conn['target']['node_id']), 
-                    None
-                )
-                if not target_node:
-                    raise ValueError(f"Target node {conn['target']['node_id']} not found")
-                
-                if conn['target']['pop_id'] >= len(target_node.population):
-                    raise ValueError(f"Target population {conn['target']['pop_id']} out of range")
-                
-                target_pop = target_node.population[conn['target']['pop_id']]
-                
-                #  CONNECTION SPEC 
-                params = conn['params']
-                conn_spec = {'rule': params['rule']}
-                
-                if 'indegree' in params:
-                    conn_spec['indegree'] = params['indegree']
-                if 'outdegree' in params:
-                    conn_spec['outdegree'] = params['outdegree']
-                if 'N' in params:
-                    conn_spec['N'] = params['N']
-                if 'p' in params:
-                    conn_spec['p'] = params['p']
-                
-                conn_spec['allow_autapses'] = params.get('allow_autapses', True)
-                conn_spec['allow_multapses'] = params.get('allow_multapses', True)
-                
-                #  SYNAPSE SPEC 
-                syn_spec = {
-                    'synapse_model': params.get('synapse_model', 'static_synapse'),
-                    'weight': params.get('weight', 1.0),
-                    'delay': params.get('delay', 1.0)
-                }
-                
-                excluded_keys = {
-                    'rule', 'indegree', 'outdegree', 'N', 'p',
-                    'weight', 'delay', 'synapse_model',
-                    'allow_autapses', 'allow_multapses'
-                }
-                
-                for key, value in params.items():
-                    if key not in excluded_keys:
-                        syn_spec[key] = value
-                
-                #  NEST CONNECT 
-                nest.Connect(
-                    source_pop,
-                    target_pop,
-                    conn_spec=conn_spec,
-                    syn_spec=syn_spec
-                )
-                
-                successful += 1
-                print(f" {conn['name']}:    {len(source_pop)} → {len(target_pop)} neurons")
-                
-            except Exception as e:
-                failed += 1
-                print(f"Error: {e}")
-        
-        print(f"NEST: {successful} successful, {failed} failed")
-        
-        return successful
+            self.target_pop_combo.addItem(f"Pop {i}", i)
+
     def add_connection(self):
+        s_gid = self.source_graph_combo.currentData()
+        s_nid = self.source_node_combo.currentData()
+        s_pid = self.source_pop_combo.currentData()
+        t_gid = self.target_graph_combo.currentData()
+        t_nid = self.target_node_combo.currentData()
+        t_pid = self.target_pop_combo.currentData()
         
-        source_graph_id = self.source_graph_combo.currentData()
-        source_node_id = self.source_node_combo.currentData()
-        source_pop_id = self.source_pop_combo.currentData()
-        
-        target_graph_id = self.target_graph_combo.currentData()
-        target_node_id = self.target_node_combo.currentData()
-        target_pop_id = self.target_pop_combo.currentData()
-        
-        if source_graph_id is None or target_graph_id is None:
-            print("Please select source and target!")
+        if None in [s_gid, s_nid, s_pid, t_gid, t_nid, t_pid]:
+            print("Select Source and Target!")
             return
+
+        params = self._get_current_params()
+        name = self.conn_name_input.text() or f"Conn_{self.next_conn_id}"
         
-        conn_name = self.conn_name_input.text().strip()
-        if not conn_name:
-            conn_name = f"Conn_{self.next_conn_id}: G{source_graph_id}N{source_node_id}P{source_pop_id} → G{target_graph_id}N{target_node_id}P{target_pop_id}"
-        
-        rule = self.rule_combo.currentText()
-        rule_params = {}
-        
-        if rule == "fixed_indegree":
-            rule_params['indegree'] = self.indegree_spin.value()
-        elif rule == "fixed_outdegree":
-            rule_params['outdegree'] = self.outdegree_spin.value()
-        elif rule == "fixed_total_number":
-            rule_params['N'] = self.total_num_spin.value()
-        elif rule in ["pairwise_bernoulli", "pairwise_bernoulli_on_source", 
-                    "pairwise_bernoulli_on_target", "symmetric_pairwise_bernoulli"]:
-            rule_params['p'] = self.prob_spin.value()
-        
-        weight = self.weight_spin.value()
-        delay = self.delay_spin.value()
-        
-        try:
-            import nest
-            min_delay = nest.resolution 
-            if delay < min_delay:
-                print(f"Delay {delay} ms < NEST resolution {min_delay} ms!")
-                print(f"→ Adjusting to {min_delay} ms")
-                delay = min_delay
-                self.delay_spin.setValue(delay)  
-        except Exception as e:
-            print(f"Could not validate delay against NEST: {e}")
-            if delay < 0.1:
-                print(f"→ Using minimum 0.1 ms")
-                delay = 0.1
-        
-        if abs(weight) < 1e-6:
-            print(f"Warning: Weight {weight} is very small (near zero)")
-        
-        syn_model = self.syn_model_combo.currentText()
-        
-        raw_syn_params = {}
-        for param_name, widget in self.syn_param_widgets.items():
-            raw_syn_params[param_name] = widget.get_value()
-        
-        validated_syn_params = {}
-        
-        if syn_model in synapse_models:
-            model_spec = synapse_models[syn_model]
-            
-            for param_name, value in raw_syn_params.items():
-                if param_name not in model_spec:
-                    print(f"Parameter '{param_name}' not valid for {syn_model}, skipping")
-                    continue
-                
-                param_info = model_spec[param_name]
-                original_value = value
-                
-                if 'min' in param_info and param_info['min'] is not None:
-                    if value < param_info['min']:
-                        print(f"{param_name}={value} < min={param_info['min']}, clamping")
-                        value = param_info['min']
-                
-                if 'max' in param_info and param_info['max'] is not None:
-                    if value > param_info['max']:
-                        print(f"{param_name}={value} > max={param_info['max']}, clamping")
-                        value = param_info['max']
-                
-                constraint = param_info.get('constraint')
-                if constraint == 'positive' and value <= 0:
-                    print(f"{param_name}={value} must be positive, using default")
-                    value = param_info.get('default', 0.1)
-                elif constraint == 'non-negative' and value < 0:
-                    print(f"{param_name}={value} must be non-negative, clamping to 0")
-                    value = 0.0
-                elif constraint == 'range':
-                    pass
-                
-                validated_syn_params[param_name] = value
-                
-                if abs(value - original_value) > 1e-9:
-                    if param_name in self.syn_param_widgets:
-                        widget = self.syn_param_widgets[param_name]
-                        if hasattr(widget, 'spinbox'):
-                            widget.spinbox.blockSignals(True)
-                            widget.spinbox.setValue(value)
-                            widget.spinbox.blockSignals(False)
-            
-            if validated_syn_params:
-                print(f"✓ Validated {len(validated_syn_params)} synapse parameters for {syn_model}")
-            else:
-                print(f"!!!No additional synapse parameters for {syn_model}")
-        
-        else:
-            print(f"Unknown synapse model '{syn_model}', parameters not validated")
-            validated_syn_params = raw_syn_params
-        
-        connection = {
+        # --- ÄNDERUNG START ---
+        # Wir erstellen jetzt eine VERSCHACHTELTE Struktur, die der Executor erwartet
+        conn_dict = {
             'id': self.next_conn_id,
-            'name': conn_name,
+            'name': name,
             'source': {
-                'graph_id': source_graph_id,
-                'node_id': source_node_id,
-                'pop_id': source_pop_id
+                'graph_id': s_gid,
+                'node_id': s_nid,
+                'pop_id': s_pid
             },
             'target': {
-                'graph_id': target_graph_id,
-                'node_id': target_node_id,
-                'pop_id': target_pop_id
+                'graph_id': t_gid,
+                'node_id': t_nid,
+                'pop_id': t_pid
             },
-            'params': {
-                'rule': rule,
-                **rule_params,
-                'weight': weight,  
-                'delay': delay,   
-                'synapse_model': syn_model,
-                'allow_autapses': self.allow_autapses_check.isChecked(),
-                'allow_multapses': self.allow_multapses_check.isChecked(),
-                **validated_syn_params  
-            }
+            'params': params
         }
         
-        if rule == "fixed_indegree" and 'indegree' in rule_params:
-            target_graph = next((g for g in self.graph_list if g.graph_id == target_graph_id), None)
-            if target_graph:
-                target_node = next((n for n in target_graph.node_list if n.id == target_node_id), None)
-                if target_node and hasattr(target_node, 'population'):
-                    if target_pop_id < len(target_node.population):
-                        target_pop = target_node.population[target_pop_id]
-                        if len(target_pop) > 0:  
-                            if rule_params['indegree'] > len(target_pop):
-                                print(f"Warning: Indegree {rule_params['indegree']} > target pop size {len(target_pop)}")
-                                print(f"Connection may fail when executed!")
-        
-        elif rule == "fixed_outdegree" and 'outdegree' in rule_params:
-            source_graph = next((g for g in self.graph_list if g.graph_id == source_graph_id), None)
-            if source_graph:
-                source_node = next((n for n in source_graph.node_list if n.id == source_node_id), None)
-                if source_node and hasattr(source_node, 'population'):
-                    if source_pop_id < len(source_node.population):
-                        source_pop = source_node.population[source_pop_id]
-                        if len(source_pop) > 0:
-                            if rule_params['outdegree'] > len(source_pop):
-                                print(f"Warning: Outdegree {rule_params['outdegree']} > source pop size {len(source_pop)}")
-                                print(f"Connection may fail when executed!")
-        
-        self.connections.append(connection)
+        self.connections.append(conn_dict)
         self.next_conn_id += 1
-        
-        print(f"\nConnection added: {conn_name}")
-        print(f"Rule: {rule}, Weight: {weight}, Delay: {delay} ms")
-        if validated_syn_params:
-            print(f"Synapse params: {list(validated_syn_params.keys())}")
-        
         self.update_connection_list()
-        self.reset_interface()
-    
+        print(f"Added to Queue: {name}")
+
+    def update_connection_list(self):
+        while self.conn_list_layout.count():
+            item = self.conn_list_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        for i, conn in enumerate(self.connections):
+            mode = "🌍" if conn['params'].get('use_spatial', False) else "🕸️"
+            btn = QPushButton(f"{mode} {conn['name']}")
+            btn.setMinimumHeight(30)
+            btn.clicked.connect(lambda checked, idx=i: self.select_connection(idx))
+            self.conn_list_layout.addWidget(btn)
+        self.conn_list_layout.addStretch()
+
+    def select_connection(self, idx):
+        self.current_conn_idx = idx
+        self.delete_conn_btn.setEnabled(True)
+        print(f"Selected connection index {idx}")
+
+    def delete_connection(self):
+        if self.current_conn_idx is not None:
+            self.connections.pop(self.current_conn_idx)
+            self.current_conn_idx = None
+            self.delete_conn_btn.setEnabled(False)
+            self.update_connection_list()
+
     def create_all_connections(self):
         if not self.connections:
             print("No connections to create!")
             return
         
-        print("CREATING ALL CONNECTIONS")
+        print("Creating connections...")
         
-        print("\nStoring to source nodes...")
-        successful_storage = []
-        failed_storage = []
+        # ✅ FIX: Executor JEDES MAL neu erstellen mit aktuellem Graph-Dictionary
+        # Das ist wichtig, da sich die Graph-Objekte nach einem Rebuild ändern können!
+        graphs_dict = {g.graph_id: g for g in self.graph_list}
+        self.connection_executor = ConnectionExecutor(graphs_dict)
+
+        # Ausführen
+        success_count, fail_count, failed_items = self.connection_executor.execute_pending_connections(self.connections)
         
-        for conn in self.connections:
-            try:
-                source_graph_id = conn['source']['graph_id']
-                source_node_id = conn['source']['node_id']
-                
-                graph = next((g for g in self.graph_list if g.graph_id == source_graph_id), None)
-                if not graph:
-                    raise ValueError(f"Graph {source_graph_id} not found!")
-                
-                node = next((n for n in graph.node_list if n.id == source_node_id), None)
-                if not node:
-                    raise ValueError(f"Node {source_node_id} not found!")
-                
-                if not hasattr(node, 'connections'):
-                    node.connections = []
-                
-                node.connections.append(conn)
-                successful_storage.append(conn)
-                
-                print(f"{conn['name']} → Node {source_node_id}")
-                
-            except Exception as e:
-                print(f"FAILED: {conn['name']}: {e}")
-                failed_storage.append(conn)
+        print(f"Created: {success_count}, Failed: {fail_count}")
         
-        if successful_storage:
-            original_connections = self.connections
-            self.connections = successful_storage
-            
-            num_created = self._execute_nest_connections()
-            
-            self.connections = original_connections
-        
-        
-        if failed_storage:
-            print(f"{len(failed_storage)} connections FAILED to store")
-            print("Keeping failed connections in list for retry")
-            
-            self.connections = failed_storage
-            self.update_connection_list()
-        else:
-            print(f"All {len(successful_storage)} connections stored & executed!")
-            self.connections.clear()
-            self.next_conn_id = 0
-            self.current_conn_idx = None
-            self.update_connection_list()
-            self.reset_interface()
-                
-    def delete_connection(self):
-        if self.current_conn_idx is None: return
-        
-        conn = self.connections[self.current_conn_idx]
-        
-        del self.connections[self.current_conn_idx]
-        self.current_conn_idx = None
-        self.delete_conn_btn.setEnabled(False)
-        
+        # Update List Logic
+        self.connections = failed_items
         self.update_connection_list()
-    
+        
+        if fail_count == 0:
+            self.status_label.setText(f"✅ All {success_count} connections created successfully.")
+            self.reset_interface()
+        else:
+            self.status_label.setText(f"⚠️ {success_count} created, {fail_count} failed. Check red items.")
+
     def update_connection_list(self):
+        """Aktualisiert die Liste. Färbt fehlerhafte Einträge rot."""
+        
+        # Alte Widgets entfernen
         while self.conn_list_layout.count():
             item = self.conn_list_layout.takeAt(0)
-            if item.widget():
+            if item.widget(): 
                 item.widget().deleteLater()
-        
+            
         for i, conn in enumerate(self.connections):
-            btn = QPushButton(conn['name'])
-            btn.setMinimumHeight(40)
+            # Standard-Text
+            mode_icon = "🌍" if conn['params'].get('use_spatial', False) else "🕸️"
+            btn_text = f"{mode_icon} {conn['name']}"
+            
+            btn = QPushButton(btn_text)
+            btn.setMinimumHeight(30)
             btn.clicked.connect(lambda checked, idx=i: self.select_connection(idx))
-            self.conn_list_layout.addWidget(btn)
-        
-        self.conn_list_layout.addStretch()
-    
-    def select_connection(self, idx):
-        self.current_conn_idx = idx
-        self.delete_conn_btn.setEnabled(True)
-        
-        for i in range(self.conn_list_layout.count() - 1):
-            widget = self.conn_list_layout.itemAt(i).widget()
-            if widget:
-                if i == idx:
-                    widget.setStyleSheet("background-color: #2196F3; color: white;")
-                else:
-                    widget.setStyleSheet("")
-        
-        conn = self.connections[idx]
-        print(f"\nSelected: {conn['name']}")
-    
-    def refresh(self):
-        self.refresh_graph_list()
-    
-    def reset_interface(self):
-        self.conn_name_input.clear()
-        self.rule_combo.setCurrentIndex(0)
-        self.indegree_spin.setValue(100)
-        self.outdegree_spin.setValue(100)
-        self.total_num_spin.setValue(1000)
-        self.prob_spin.setValue(0.1)
-        self.weight_spin.setValue(1.0)
-        self.delay_spin.setValue(1.0)
-        
-        idx = self.syn_model_combo.findText("static_synapse")
-        if idx >= 0:
-            self.syn_model_combo.setCurrentIndex(idx)
-        elif self.syn_model_combo.count() > 0:
-            self.syn_model_combo.setCurrentIndex(0)
             
-        self.allow_autapses_check.setChecked(True)
-        self.allow_multapses_check.setChecked(True)
-        
-        if self.source_graph_combo.count() > 0:
-            self.source_graph_combo.setCurrentIndex(0)
-        if self.target_graph_combo.count() > 0:
-            self.target_graph_combo.setCurrentIndex(0)
-
-    def set_source(self, graph_id, node_id, pop_id=None):
-        """Setzt die Source-Comboboxen programmatisch."""
-        print(f"🤖 Auto-setting source: G{graph_id} N{node_id} P{pop_id}")
-        
-        # 1. Graph setzen
-        idx_g = self.source_graph_combo.findData(graph_id)
-        if idx_g >= 0:
-            self.source_graph_combo.setCurrentIndex(idx_g)
-            
-            # 2. Node setzen 
-            # (Die Node-Liste aktualisiert sich automatisch durch das Signal von Graph-Combo)
-            idx_n = self.source_node_combo.findData(node_id)
-            if idx_n >= 0:
-                self.source_node_combo.setCurrentIndex(idx_n)
+            # === FEHLER BEHANDLUNG ===
+            if 'error' in conn:
+                # Fehlerhafte Connection: Rötlicher Style
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #4a1818; /* Dunkelrot */
+                        color: #ff9999;            /* Helles Rot für Text */
+                        border: 1px solid #ff5555; /* Roter Rand */
+                        font-weight: bold;
+                        text-align: left;
+                        padding-left: 10px;
+                    }
+                    QPushButton:hover { background-color: #662222; }
+                    QPushButton:pressed { background-color: #331111; }
+                """)
                 
-                # 3. Population setzen
-                # (Die Pop-Liste aktualisiert sich automatisch durch das Signal von Node-Combo)
-                if pop_id is not None:
-                    idx_p = self.source_pop_combo.findData(pop_id)
-                    if idx_p >= 0:
-                        self.source_pop_combo.setCurrentIndex(idx_p)
-                    else:
-                        # Fallback auf 0, falls Pop nicht gefunden
-                        if self.source_pop_combo.count() > 0:
-                            self.source_pop_combo.setCurrentIndex(0)
+                # Tooltip mit Fehlergrund (Rein informierend)
+                error_msg = conn['error']
+                # Bereinige evtl. vorhandene "NEST error:" Präfixe für saubere Anzeige
+                clean_msg = error_msg.replace("NEST error:", "").strip()
+                btn.setToolTip(f"Failed: {clean_msg}")
+                
             else:
-                print(f"⚠ Node {node_id} nicht in Combo gefunden.")
+                # Normale (wartende) Connection
+                btn.setStyleSheet("") # Standard Style
+                btn.setToolTip("Pending creation")
+
+            # Selektions-Highlight (überschreibt Style temporär, wenn ausgewählt)
+            if i == self.current_conn_idx:
+                btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+            
+            self.conn_list_layout.addWidget(btn)
+            
+        self.conn_list_layout.addStretch()
+    def set_source(self, graph_id, node_id, pop_id):
+        """
+        Setzt die Source-Comboboxen programmatisch auf die angegebenen IDs.
+        Wird vom Kontextmenü im GraphOverview aufgerufen.
+        """
+        # 1. Graph auswählen
+        idx_graph = self.source_graph_combo.findData(graph_id)
+        if idx_graph >= 0:
+            self.source_graph_combo.setCurrentIndex(idx_graph)
+            # Durch das Signal 'currentIndexChanged' werden die Nodes neu geladen.
+            # Wir erzwingen hier aber ein sofortiges Update der Node-Box, falls nötig, 
+            # aber meistens reicht das Signal. Da Qt Signale synchron sein können, 
+            # probieren wir den direkten Zugriff danach.
+            
+            # 2. Node auswählen
+            idx_node = self.source_node_combo.findData(node_id)
+            if idx_node >= 0:
+                self.source_node_combo.setCurrentIndex(idx_node)
+                
+                # 3. Population auswählen
+                idx_pop = self.source_pop_combo.findData(pop_id)
+                if idx_pop >= 0:
+                    self.source_pop_combo.setCurrentIndex(idx_pop)
+                else:
+                    print(f"⚠ Pop ID {pop_id} not found in source combo")
+            else:
+                print(f"⚠ Node ID {node_id} not found in source combo")
         else:
-            print(f"⚠ Graph {graph_id} nicht in Combo gefunden.")
+            print(f"⚠ Graph ID {graph_id} not found in source combo")
 
 """
 for graph in self.graph_list:
@@ -4436,215 +4790,463 @@ def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List
     return conn_spec, syn_spec, warnings
 
 
-
 class ConnectionExecutor:
+    """
+    Führt NEST-Verbindungen aus.
     
+    Korrigierte Version mit NEST 3.x Mask-Support.
+    """
     
     def __init__(self, graphs: Dict[int, Any]):
-       
+        """
+        Args:
+            graphs: Dictionary {graph_id: Graph object}
+        """
         self.graphs = graphs
         self._connection_counter = 0
+        self._created_models: List[str] = []  # Track für Cleanup
     
     def _get_next_connection_id(self) -> int:
         self._connection_counter += 1
         return self._connection_counter
     
     def _get_population(self, graph_id: int, node_id: int, pop_id: int):
-        
+        """Holt eine Population aus Graph/Node/Pop-IDs."""
         if graph_id not in self.graphs:
-            print(f"✗ Graph {graph_id} not found")
-            return None
+            return None, f"Graph {graph_id} not found"
         
         graph = self.graphs[graph_id]
         node = graph.get_node(node_id)
         
         if node is None:
-            print(f"✗ Node {node_id} not found in Graph {graph_id}")
-            return None
+            return None, f"Node {node_id} not in Graph {graph_id}"
         
         if not node.population:
-            print(f"✗ Node {node_id} has no populations (not populated yet?)")
-            return None
+            return None, f"Node {node_id} has no populations"
         
         if pop_id >= len(node.population):
-            print(f"✗ Population {pop_id} not found in Node {node_id} (has {len(node.population)} pops)")
-            return None
+            return None, f"Pop {pop_id} not in Node {node_id}"
         
         pop = node.population[pop_id]
-        if pop is None or (hasattr(pop, '__len__') and len(pop) == 0):
-            print(f"✗ Population {pop_id} in Node {node_id} is empty")
-            return None
+        if pop is None or len(pop) == 0:
+            return None, f"Pop {pop_id} is empty"
         
-        return pop
+        return pop, None
     
-    def _execute_single_connection(self, connection: Dict[str, Any]) -> Tuple[bool, str]:
+    def execute_connection(self, connection: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Führt eine einzelne Verbindung aus.
         
-        source_info = connection['source']
-        target_info = connection['target']
-        params = connection['params']
-        conn_spec = {'rule': params['rule']}
+        Args:
+            connection: Dict mit 'source', 'target', 'params', 'name', 'id'
+            
+        Returns:
+            (success: bool, message: str)
+        """
+        try:
+            source_info = connection['source']
+            target_info = connection['target']
+            params = connection.get('params', {})
+            conn_name = connection.get('name', f"Conn_{connection.get('id', '?')}")
+            
+            # === 1. Get Populations ===
+            src_pop, err = self._get_population(
+                source_info['graph_id'],
+                source_info['node_id'],
+                source_info['pop_id']
+            )
+            if err:
+                return False, f"Source: {err}"
+            
+            tgt_pop, err = self._get_population(
+                target_info['graph_id'],
+                target_info['node_id'],
+                target_info['pop_id']
+            )
+            if err:
+                return False, f"Target: {err}"
+            # === SPECIAL TOPOLOGY CHECK (CCW Ring, etc.) ===
+            topo_type = params.get('topology_type')
+            
+            if topo_type == 'ring_ccw':
+                # IDs holen
+                src_ids = nest.GetStatus(src_pop, 'global_id')
+                tgt_ids = nest.GetStatus(tgt_pop, 'global_id')
                 
-        # Standard Rule Params (indegree, etc.)
-        if 'indegree' in params: conn_spec['indegree'] = params['indegree']
-        if 'outdegree' in params: conn_spec['outdegree'] = params['outdegree']
-        if 'N' in params: conn_spec['N'] = params['N']
-        if 'p' in params: conn_spec['p'] = params['p']
+                n = len(src_ids)
+                if len(tgt_ids) != n:
+                    return False, f"CCW Ring requires equal size (Src: {n}, Tgt: {len(tgt_ids)})"
                 
-        conn_spec['allow_autapses'] = params.get('allow_autapses', True)
-        conn_spec['allow_multapses'] = params.get('allow_multapses', True)
+                w = float(params.get('weight', 10.0))
+                d = float(params.get('delay', 1.0))
                 
-        if params.get('use_spatial', False):
-                    
-            radius = params.get('mask_radius', 1.0)
-            inner = params.get('mask_inner_radius', 0.0)
-            m_type = params.get('mask_type', 'sphere')
-                    
-            mask = None
-            if m_type == 'sphere':
-                mask = nest.spatial.sphere(radius)
-            elif m_type == 'box':
-                mask = nest.spatial.box([radius*2, radius*2, radius*2])
-            elif m_type == 'doughnut':
-                mask = nest.spatial.doughnut(inner, radius)
-                    
-            if mask:
-                conn_spec['mask'] = mask
-                print(f"     Applying Spatial Mask: {m_type} (r={radius})")
+                # Listen für one_to_one mapping erstellen: i -> (i+1)%n
+                pre_neurons = []
+                post_neurons = []
+                
+                for i in range(n):
+                    pre = src_ids[i]
+                    post = tgt_ids[(i + 1) % n] # Wrap around
+                    pre_neurons.append(pre)
+                    post_neurons.append(post)
+                
+                # Verbindung erstellen
+                nest.Connect(pre_neurons, post_neurons, 
+                             {'rule': 'one_to_one'}, 
+                             {'weight': w, 'delay': d, 'synapse_model': 'static_synapse'})
 
-            syn_spec = {
-                    'synapse_model': params.get('synapse_model', 'static_synapse'),
-                    'delay': params.get('delay', 1.0)
+                # --- WICHTIG: AUCH HIER SPEICHERN DAMIT DIE GUI ES SIEHT ---
+                try:
+                    src_graph = self.graphs.get(source_info['graph_id'])
+                    if src_graph:
+                        src_node_obj = src_graph.get_node(source_info['node_id'])
+                        if src_node_obj:
+                            if not hasattr(src_node_obj, 'connections'):
+                                src_node_obj.connections = []
+                            
+                            # Check auf Duplikate
+                            exists = False
+                            for existing in src_node_obj.connections:
+                                if existing.get('id') == connection.get('id'):
+                                    exists = True; break
+                            
+                            if not exists:
+                                import copy
+                                src_node_obj.connections.append(copy.deepcopy(connection))
+                except Exception as e:
+                    print(f"Warning: Could not save ring connection to model: {e}")
+                # -----------------------------------------------------------
+                
+                return True, f"✓ CCW Ring created ({n} connections)"
+            # === 2. Target Model Check (für HT-Neuron Fix) ===
+            try:
+                target_model = nest.GetStatus(tgt_pop, 'model')[0]
+            except:
+                target_model = 'unknown'
+            
+            # HT-Neuron Receptor Fix
+            if 'ht_neuron' in str(target_model):
+                rec_map = {1: 'AMPA', 2: 'NMDA', 3: 'GABA_A', 4: 'GABA_B'}
+                current_rec = params.get('receptor_type', 0)
+                if isinstance(current_rec, int) and current_rec in rec_map:
+                    params['receptor_type'] = rec_map[current_rec]
+                elif current_rec == 0:
+                    params.pop('receptor_type', None)
+            
+            # === 3. Build conn_spec ===
+            rule = params.get('rule', 'all_to_all')
+            conn_spec = {'rule': rule}
+            
+            # Rule-specific params
+            if rule == 'fixed_indegree':
+                conn_spec['indegree'] = int(params.get('indegree', 1))
+            elif rule == 'fixed_outdegree':
+                conn_spec['outdegree'] = int(params.get('outdegree', 1))
+            elif rule == 'fixed_total_number':
+                conn_spec['N'] = int(params.get('N', 1))
+            elif 'bernoulli' in rule:
+                conn_spec['p'] = float(params.get('p', 0.1))
+            
+            conn_spec['allow_autapses'] = params.get('allow_autapses', True)
+            conn_spec['allow_multapses'] = params.get('allow_multapses', True)
+            
+            # === 4. Spatial Mask (NEST 3.x kompatibel!) ===
+            if params.get('use_spatial', False):
+                mask_type = params.get('mask_type', 'spherical')
+                mask_params = {
+                    'radius': params.get('mask_radius', 1.0),
+                    'r': params.get('mask_radius', 1.0),
+                    'inner_radius': params.get('mask_inner_radius', 0.0),
+                    'outer_radius': params.get('mask_radius', 1.0),
+                    'size': params.get('mask_radius', 1.0)
                 }
                 
-            base_weight = params.get('weight', 1.0)
+                # Korrekter Mask-Typ Mapping
+                mask_type_map = {
+                    'sphere': 'spherical',
+                    'spherical': 'spherical',
+                    'box': 'rectangular',
+                    'rectangular': 'rectangular',
+                    'doughnut': 'doughnut'
+                }
+                actual_type = mask_type_map.get(mask_type, 'spherical')
                 
-            if params.get('distance_dependent_weight', False):
-                syn_spec['weight'] = base_weight * nest.spatial.distance
-                print("     Using distance-dependent weights")
+                mask = create_nest_mask(actual_type, mask_params)
+                if mask is not None:
+                    conn_spec['mask'] = mask
+            
+            # === 5. Build Synapse Model ===
+            base_model = params.get('synapse_model', 'static_synapse')
+            
+            # Check if delay should be excluded
+            no_delay = base_model in ['gap_junction', 'rate_connection_instantaneous']
+            
+            # Keys that shouldn't go into CopyModel
+            control_keys = {
+                'rule', 'indegree', 'outdegree', 'N', 'p',
+                'synapse_model', 'weight', 'delay',
+                'allow_autapses', 'allow_multapses', 'receptor_type',
+                'use_spatial', 'mask_type', 'mask_radius', 'mask_inner_radius',
+                'distance_dependent_weight', 'dist_factor', 'dist_offset',
+                'custom_name', 'no_delay', 'base_model'
+            }
+            
+            # Extract model-specific params
+            model_params = {
+                k: v for k, v in params.items() 
+                if k not in control_keys and v is not None
+            }
+            
+            # Create custom model if needed
+            final_model = base_model
+            if model_params:
+                ts = int(time.time() * 1e6)
+                custom_name = params.get('custom_name') or f"{base_model}_{self._connection_counter}_{ts}"
+                try:
+                    nest.CopyModel(base_model, custom_name, model_params)
+                    final_model = custom_name
+                    self._created_models.append(custom_name)
+                except Exception as e:
+                    print(f"  ⚠ CopyModel failed: {e}, using {base_model}")
+            
+            # === 6. Build syn_spec ===
+            syn_spec = {'synapse_model': final_model}
+            
+            # Weight (possibly distance-dependent)
+            weight = float(params.get('weight', 1.0))
+            if params.get('use_spatial') and params.get('distance_dependent_weight'):
+                factor = float(params.get('dist_factor', 1.0))
+                offset = float(params.get('dist_offset', 0.0))
+                syn_spec['weight'] = create_distance_dependent_weight(
+                    weight, factor, offset
+                )
             else:
-                syn_spec['weight'] = base_weight    
-        # Get populations
-        source_pop = self._get_population(
-            source_info['graph_id'],
-            source_info['node_id'],
-            source_info['pop_id']
-        )
-        target_pop = self._get_population(
-            target_info['graph_id'],
-            target_info['node_id'],
-            target_info['pop_id']
-        )
-        
-        if source_pop is None or target_pop is None:
-            return False, "Source or target population not found"
-        
-        # Validate and split parameters
-        conn_spec, syn_spec, warnings = validate_connection_params(params)
-        
-        for w in warnings:
-            print(f"  ⚠ {w}")
-        
-        # Special handling for one_to_one rule
-        if conn_spec['rule'] == 'one_to_one':
-            if len(source_pop) != len(target_pop):
-                return False, f"one_to_one requires equal sizes ({len(source_pop)} vs {len(target_pop)})"
-        
-        # Execute NEST connection
-        try:
-            nest.Connect(source_pop, target_pop, conn_spec, syn_spec)
+                syn_spec['weight'] = weight
             
-            # Count created connections
-            conns = nest.GetConnections(source_pop, target_pop)
-            n_created = len(conns) if conns else 0
+            # Delay (nur wenn erlaubt)
+            if not no_delay:
+                delay = float(params.get('delay', 1.0))
+                syn_spec['delay'] = max(delay, nest.resolution)
             
-            return True, f"Created {n_created} synapses"
-        
+            # Receptor Type
+            receptor = params.get('receptor_type')
+            if receptor is not None and receptor != 0:
+                syn_spec['receptor_type'] = receptor
+            
+            # === 7. Size Check für one_to_one ===
+            if rule == 'one_to_one' and len(src_pop) != len(tgt_pop):
+                return False, f"one_to_one size mismatch: {len(src_pop)} vs {len(tgt_pop)}"
+            
+            # === 8. Execute Connection! ===
+            nest.Connect(src_pop, tgt_pop, conn_spec, syn_spec)
+            
+            # --- SAVE TO GRAPH MODEL (FIX FOR GUI OVERVIEW) ---
+            # Wir müssen die Verbindung auch im Node-Objekt speichern, damit der TreeView sie sieht.
+            try:
+                src_graph = self.graphs.get(source_info['graph_id'])
+                if src_graph:
+                    src_node_obj = src_graph.get_node(source_info['node_id'])
+                    if src_node_obj:
+                        if not hasattr(src_node_obj, 'connections'):
+                            src_node_obj.connections = []
+                        
+                        # Prüfen ob Verbindung schon existiert (um Duplikate zu vermeiden)
+                        exists = False
+                        for existing in src_node_obj.connections:
+                            if existing.get('id') == connection.get('id'):
+                                exists = True
+                                break
+                        
+                        if not exists:
+                            # Wichtig: Kopie speichern, damit Queue-Referenzen keine Rolle spielen
+                            import copy
+                            src_node_obj.connections.append(copy.deepcopy(connection))
+            except Exception as save_err:
+                print(f"Warning: Connection created in NEST but failed to save to Model: {save_err}")
+            # --------------------------------------------------
+
+            return True, f"✓ {conn_name}: {len(src_pop)}→{len(tgt_pop)} neurons"
+            
         except Exception as e:
-            return False, f"NEST error: {str(e)}"
-    
-    def add_and_execute_connection(
-        self,
-        source_graph_id: int,
-        source_node_id: int,
-        source_pop_id: int,
-        target_graph_id: int,
-        target_node_id: int,
-        target_pop_id: int,
-        params: Dict[str, Any],
-        connection_name: str = None
-    ) -> Tuple[bool, str, Optional[Dict]]:
-        # Generate connection ID and name
-        conn_id = self._get_next_connection_id()
-        if connection_name is None:
-            connection_name = f"Connection_{conn_id}"
-        # Create connection dictionary
-        connection = create_connection_dict(
-            connection_id=conn_id,
-            name=connection_name,
-            source_graph_id=source_graph_id,
-            source_node_id=source_node_id,
-            source_pop_id=source_pop_id,
-            target_graph_id=target_graph_id,
-            target_node_id=target_node_id,
-            target_pop_id=target_pop_id,
-            **params
-        )
+            import traceback
+            traceback.print_exc()
+            return False, str(e)
         
-        # Get source node to store connection
-        if source_graph_id not in self.graphs:
-            return False, f"Graph {source_graph_id} not found", None
-        
-        source_node = self.graphs[source_graph_id].get_node(source_node_id)
-        if source_node is None:
-            return False, f"Node {source_node_id} not found", None
-        
-        # Check for duplicate connection (same source->target with same params)
-        for existing in source_node.connections:
-            if (existing['source'] == connection['source'] and 
-                existing['target'] == connection['target'] and
-                existing['params'] == connection['params']):
-                return False, "Duplicate connection already exists", None
-        
-        # Execute the connection in NEST
-        success, message = self._execute_single_connection(connection)
-        
-        if success:
-            # Store in node.connections
-            source_node.connections.append(connection)
-            print(f"✓ {connection_name}: {message}")
-            return True, message, connection
-        else:
-            print(f"✗ {connection_name}: {message}")
-            return False, message, None
-    
-    def execute_pending_connections(
-        self,
-        pending_connections: List[Dict[str, Any]]
-    ) -> Tuple[int, int, List[Dict]]:
-        
-        successful = 0
-        failed = 0
-        failed_list = []
-        
-        for conn_params in pending_connections:
-            success, msg, conn = self.add_and_execute_connection(
-                source_graph_id=conn_params['source_graph_id'],
-                source_node_id=conn_params['source_node_id'],
-                source_pop_id=conn_params['source_pop_id'],
-                target_graph_id=conn_params['target_graph_id'],
-                target_node_id=conn_params['target_node_id'],
-                target_pop_id=conn_params['target_pop_id'],
-                params=conn_params.get('params', {}),
-                connection_name=conn_params.get('name')
-            )
+
+
+    def execute_pending_connections(self, connections: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[str, Any]]]:
+        """
+        Führt eine Liste von Verbindungen aus und gibt die fehlgeschlagenen Objekte zurück.
+        Dies wird vom ConnectionTool benötigt, um die Queue zu aktualisieren.
+        """
+        success_count = 0
+        fail_count = 0
+        failed_items = []
+
+        print(f"Processing {len(connections)} pending connections...")
+
+        for conn in connections:
+            success, msg = self.execute_connection(conn)
             
             if success:
-                successful += 1
+                success_count += 1
+                print(f"  {msg}")
+            else:
+                fail_count += 1
+                # Speichere den Fehlergrund direkt im Objekt für die GUI (rotes Highlight/Tooltip)
+                conn['error'] = msg
+                failed_items.append(conn)
+                print(f"  ✗ {conn.get('name', '?')}: {msg}")
+
+        return success_count, fail_count, failed_items
+    
+    def execute_all(self, connections: List[Dict[str, Any]], 
+                   progress_callback=None) -> Tuple[int, int, List[str]]:
+        """
+        Führt alle Verbindungen aus.
+        
+        Args:
+            connections: Liste von Connection-Dicts
+            progress_callback: Optional callback(current, total, message)
+            
+        Returns:
+            (created, failed, error_messages)
+        """
+        created = 0
+        failed = 0
+        errors = []
+        total = len(connections)
+        
+        print(f"\nCreating {total} connections...")
+        
+        for i, conn in enumerate(connections):
+            success, msg = self.execute_connection(conn)
+            
+            if success:
+                created += 1
+                print(f"  {msg}")
             else:
                 failed += 1
-                failed_list.append({**conn_params, 'error': msg})
+                err_msg = f"✗ {conn.get('name', '?')}: {msg}"
+                errors.append(err_msg)
+                print(f"  {err_msg}")
+            
+            if progress_callback:
+                progress_callback(i + 1, total, msg)
         
-        return successful, failed, failed_list
+        print(f"\nConnections: {created} created, {failed} failed")
+        
+        return created, failed, errors
+    
+    def cleanup_custom_models(self):
+        """Entfernt alle erstellten Custom-Models (optional)."""
+        # NEST unterstützt kein direktes Löschen von Modellen,
+        # aber wir können die Liste für Debugging nutzen
+        self._created_models.clear()
+
+
+class ConnectionQueueWidget(QWidget):
+    """Widget zur Anzeige und Verwaltung der Connection-Queue."""
+    
+    connectionSelected = pyqtSignal(int)  # index
+    connectionRemoved = pyqtSignal(int)   # index
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.connections: List[Dict] = []
+        self._init_ui()
+        
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Header
+        header = QLabel("📋 Connection Queue")
+        header.setStyleSheet("font-weight: bold;")
+        layout.addWidget(header)
+        
+        # List
+        self.list_widget = QListWidget()
+        self.list_widget.setAlternatingRowColors(True)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self.list_widget)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        self.remove_btn = QPushButton("🗑 Remove")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        self.remove_btn.setEnabled(False)
+        btn_layout.addWidget(self.remove_btn)
+        
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self.clear_all)
+        btn_layout.addWidget(clear_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Status
+        self.status_label = QLabel("0 connections")
+        self.status_label.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(self.status_label)
+    
+    def add_connection(self, conn: Dict):
+        """Fügt eine Verbindung hinzu."""
+        self.connections.append(conn)
+        
+        # Create list item
+        name = conn.get('name', f"Connection {len(self.connections)}")
+        src = conn.get('source', {})
+        tgt = conn.get('target', {})
+        
+        label = f"{name}: G{src.get('graph_id',0)}N{src.get('node_id',0)}P{src.get('pop_id',0)} → " \
+                f"G{tgt.get('graph_id',0)}N{tgt.get('node_id',0)}P{tgt.get('pop_id',0)}"
+        
+        item = QListWidgetItem(label)
+        
+        # Color based on synapse type
+        syn = conn.get('params', {}).get('synapse_model', 'static')
+        if 'stdp' in syn:
+            item.setBackground(QColor(100, 50, 150, 50))
+        elif 'gap' in syn:
+            item.setBackground(QColor(50, 150, 100, 50))
+        elif 'tsodyks' in syn or 'stp' in syn:
+            item.setBackground(QColor(150, 100, 50, 50))
+        
+        self.list_widget.addItem(item)
+        self._update_status()
+    
+    def _on_item_clicked(self, item):
+        idx = self.list_widget.row(item)
+        self.remove_btn.setEnabled(True)
+        self.connectionSelected.emit(idx)
+    
+    def _remove_selected(self):
+        idx = self.list_widget.currentRow()
+        if idx >= 0:
+            self.list_widget.takeItem(idx)
+            del self.connections[idx]
+            self.connectionRemoved.emit(idx)
+            self._update_status()
+        self.remove_btn.setEnabled(False)
+    
+    def clear_all(self):
+        self.list_widget.clear()
+        self.connections.clear()
+        self._update_status()
+    
+    def get_all_connections(self) -> List[Dict]:
+        return self.connections.copy()
+    
+    def _update_status(self):
+        n = len(self.connections)
+        self.status_label.setText(f"{n} connection{'s' if n != 1 else ''}")
+
+
+
+
+
+
 
 
 
@@ -4983,516 +5585,21 @@ def create_connection_from_gui_params(
 
 
 
-class ConnectionToolExtended(QWidget):
-
-    
-    connection_created = pyqtSignal(dict) 
-    connection_failed = pyqtSignal(str)
-    
-    def __init__(self, parent=None, graphs=None):
-        super().__init__(parent)
-        self.graphs = graphs if graphs is not None else {}
-        self.pending_connections = [] 
-        self.connection_executor = None  
-        
-        self._init_ui()
-    
-    def set_graphs(self, graphs):
-        """Set the graphs dictionary and initialize executor."""
-        self.graphs = graphs
-        self.connection_executor = ConnectionExecutor(graphs)
-        self._update_graph_combos()
-    
-    def _init_ui(self):
-        """Initialize the UI components."""
-        layout = QVBoxLayout(self)
-        
-        #  SOURCE SELECTION 
-        source_group = QGroupBox("Source")
-        source_layout = QFormLayout(source_group)
-        
-        self.source_graph_combo = QComboBox()
-        self.source_graph_combo.currentIndexChanged.connect(self._on_source_graph_changed)
-        source_layout.addRow("Graph:", self.source_graph_combo)
-        
-        self.source_node_combo = QComboBox()
-        self.source_node_combo.currentIndexChanged.connect(self._on_source_node_changed)
-        source_layout.addRow("Node:", self.source_node_combo)
-        
-        self.source_pop_combo = QComboBox()
-        source_layout.addRow("Population:", self.source_pop_combo)
-        
-        layout.addWidget(source_group)
-        
-        #  TARGET SELECTION 
-        target_group = QGroupBox("Target")
-        target_layout = QFormLayout(target_group)
-        
-        self.target_graph_combo = QComboBox()
-        self.target_graph_combo.currentIndexChanged.connect(self._on_target_graph_changed)
-        target_layout.addRow("Graph:", self.target_graph_combo)
-        
-        self.target_node_combo = QComboBox()
-        self.target_node_combo.currentIndexChanged.connect(self._on_target_node_changed)
-        target_layout.addRow("Node:", self.target_node_combo)
-        
-        self.target_pop_combo = QComboBox()
-        target_layout.addRow("Population:", self.target_pop_combo)
-        
-        layout.addWidget(target_group)
-        
-        #  CONNECTION PARAMETERS 
-        params_group = QGroupBox("Connection Parameters")
-        params_layout = QFormLayout(params_group)
-        
-        # Connection Rule
-        self.rule_combo = QComboBox()
-        self.rule_combo.addItems([
-            'all_to_all', 'one_to_one', 'fixed_indegree', 
-            'fixed_outdegree', 'fixed_total_number', 'pairwise_bernoulli'
-        ])
-        self.rule_combo.currentTextChanged.connect(self._on_rule_changed)
-        params_layout.addRow("Rule:", self.rule_combo)
-        
-        # Rule-specific parameters (dynamic)
-        self.rule_params_frame = QFrame()
-        self.rule_params_layout = QFormLayout(self.rule_params_frame)
-        params_layout.addRow(self.rule_params_frame)
-        
-        # Initialize rule-specific widgets
-        self._init_rule_specific_widgets()
-        
-        layout.addWidget(params_group)
-        
-        #  SYNAPSE PARAMETERS 
-        synapse_group = QGroupBox("Synapse Parameters")
-        # === SPATIAL CONSTRAINTS (NEU) ===
-        spatial_group = QGroupBox("Spatial Constraints (Masks)")
-        spatial_group.setCheckable(True)
-        spatial_group.setChecked(False)
-        self.spatial_group = spatial_group # Referenz für Logik
-        
-        spatial_layout = QFormLayout(spatial_group)
-        
-        # Mask Type
-        self.mask_type_combo = QComboBox()
-        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
-        spatial_layout.addRow("Mask Type:", self.mask_type_combo)
-        
-        # Radius / Size
-        self.radius_spin = QDoubleSpinBox()
-        self.radius_spin.setRange(0.01, 1000.0)
-        self.radius_spin.setValue(1.0)
-        self.radius_spin.setSuffix(" mm")
-        spatial_layout.addRow("Radius (Outer):", self.radius_spin)
-        
-        # Inner Radius (für Doughnut)
-        self.inner_radius_spin = QDoubleSpinBox()
-        self.inner_radius_spin.setRange(0.0, 1000.0)
-        self.inner_radius_spin.setValue(0.0)
-        self.inner_radius_spin.setSuffix(" mm")
-        spatial_layout.addRow("Radius (Inner):", self.inner_radius_spin)
-        
-        # Distance Dependency Checkbox
-        self.dist_dep_check = QCheckBox("Weight depends on Distance")
-        self.dist_dep_check.setToolTip("If checked, weight = weight * distance")
-        spatial_layout.addRow(self.dist_dep_check)
-        
-        layout.addWidget(spatial_group)
 
 
 
 
-        synapse_layout = QFormLayout(synapse_group)
-        self.receptor_spin = QSpinBox()
-        self.receptor_spin.setRange(0, 100)
-        self.receptor_spin.setValue(0)
-        self.receptor_spin.setToolTip("0 for standard PSC models.\n1 (Ex), 2 (Inh) for conductance models.")
-        synapse_layout.addRow("Receptor ID:", self.receptor_spin)
-        # Synapse Model
-        self.synapse_combo = QComboBox()
-        self.synapse_combo.addItems([
-            'static_synapse', 'stdp_synapse', 'stdp_synapse_hom',
-            'tsodyks_synapse', 'tsodyks2_synapse', 'stdp_dopamine_synapse',
-            'bernoulli_synapse', 'clopath_synapse', 'vogels_sprekeler_synapse'
-        ])
-        self.synapse_combo.currentTextChanged.connect(self._on_synapse_changed)
-        synapse_layout.addRow("Model:", self.synapse_combo)
-        
-        # Weight
-        self.weight_spin = QDoubleSpinBox()
-        self.weight_spin.setRange(-10000.0, 10000.0)
-        self.weight_spin.setValue(1.0)
-        self.weight_spin.setDecimals(3)
-        synapse_layout.addRow("Weight:", self.weight_spin)
-        
-        # Delay
-        self.delay_spin = QDoubleSpinBox()
-        self.delay_spin.setRange(0.1, 1000.0)
-        self.delay_spin.setValue(1.0)
-        self.delay_spin.setDecimals(2)
-        self.delay_spin.setSuffix(" ms")
-        synapse_layout.addRow("Delay:", self.delay_spin)
-        
-        # Allow autapses
-        self.autapses_check = QCheckBox()
-        self.autapses_check.setChecked(False)
-        synapse_layout.addRow("Allow Autapses:", self.autapses_check)
-        
-        # Allow multapses
-        self.multapses_check = QCheckBox()
-        self.multapses_check.setChecked(True)
-        synapse_layout.addRow("Allow Multapses:", self.multapses_check)
-        
-        # Synapse-specific params frame
-        self.synapse_params_frame = QFrame()
-        self.synapse_params_layout = QFormLayout(self.synapse_params_frame)
-        synapse_layout.addRow(self.synapse_params_frame)
-        
-        layout.addWidget(synapse_group)
-        
-        # === PENDING CONNECTIONS LIST ===
-        pending_group = QGroupBox("Pending Connections")
-        pending_layout = QVBoxLayout(pending_group)
-        
-        self.pending_list = QListWidget()
-        pending_layout.addWidget(self.pending_list)
-        
-        # Add/Remove buttons
-        btn_layout = QHBoxLayout()
-        
-        self.add_btn = QPushButton("Add to Queue")
-        self.add_btn.clicked.connect(self._add_to_pending)
-        btn_layout.addWidget(self.add_btn)
-        
-        self.remove_btn = QPushButton("Remove Selected")
-        self.remove_btn.clicked.connect(self._remove_from_pending)
-        btn_layout.addWidget(self.remove_btn)
-        
-        pending_layout.addLayout(btn_layout)
-        layout.addWidget(pending_group)
-        
-        #  CREATE CONNECTIONS BUTTON 
-        self.create_btn = QPushButton("Create Connections")
-        self.create_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-                padding: 10px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        self.create_btn.clicked.connect(self._create_all_connections)
-        layout.addWidget(self.create_btn)
-        
-        #  STATUS 
-        self.status_label = QLabel("")
-        layout.addWidget(self.status_label)
-        
-        layout.addStretch()
-    
-    def _init_rule_specific_widgets(self):
-        """Initialize widgets for rule-specific parameters."""
-        # Indegree (for fixed_indegree)
-        self.indegree_spin = QSpinBox()
-        self.indegree_spin.setRange(1, 10000)
-        self.indegree_spin.setValue(10)
-        
-        # Outdegree (for fixed_outdegree)
-        self.outdegree_spin = QSpinBox()
-        self.outdegree_spin.setRange(1, 10000)
-        self.outdegree_spin.setValue(10)
-        
-        # N (for fixed_total_number)
-        self.n_spin = QSpinBox()
-        self.n_spin.setRange(1, 1000000)
-        self.n_spin.setValue(100)
-        
-        # p (for pairwise_bernoulli)
-        self.p_spin = QDoubleSpinBox()
-        self.p_spin.setRange(0.0, 1.0)
-        self.p_spin.setValue(0.1)
-        self.p_spin.setDecimals(4)
-        
-        self._on_rule_changed(self.rule_combo.currentText())
-    
-    def _on_rule_changed(self, rule):
-        """Update UI when connection rule changes."""
-        # Clear existing widgets
-        while self.rule_params_layout.count():
-            item = self.rule_params_layout.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-        
-        # Add relevant widgets
-        if rule == 'fixed_indegree':
-            self.rule_params_layout.addRow("Indegree:", self.indegree_spin)
-        elif rule == 'fixed_outdegree':
-            self.rule_params_layout.addRow("Outdegree:", self.outdegree_spin)
-        elif rule == 'fixed_total_number':
-            self.rule_params_layout.addRow("N (total):", self.n_spin)
-        elif rule in ['pairwise_bernoulli', 'symmetric_pairwise_bernoulli']:
-            self.rule_params_layout.addRow("Probability:", self.p_spin)
-    
-    def _on_synapse_changed(self, synapse_model):
-        """Update UI when synapse model changes."""
-        # Clear existing widgets
-        while self.synapse_params_layout.count():
-            item = self.synapse_params_layout.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-        
-        if synapse_model == 'stdp_synapse':
-            tau_plus = QDoubleSpinBox()
-            tau_plus.setRange(0.1, 1000.0)
-            tau_plus.setValue(20.0)
-            tau_plus.setObjectName('tau_plus')
-            self.synapse_params_layout.addRow("tau_plus (ms):", tau_plus)
-            
-            Wmax = QDoubleSpinBox()
-            Wmax.setRange(0.0, 10000.0)
-            Wmax.setValue(100.0)
-            Wmax.setObjectName('Wmax')
-            self.synapse_params_layout.addRow("Wmax:", Wmax)
-        
-        elif synapse_model in ['tsodyks_synapse', 'tsodyks2_synapse']:
-            U = QDoubleSpinBox()
-            U.setRange(0.0, 1.0)
-            U.setValue(0.5)
-            U.setObjectName('U')
-            self.synapse_params_layout.addRow("U:", U)
-            
-            tau_rec = QDoubleSpinBox()
-            tau_rec.setRange(0.0, 10000.0)
-            tau_rec.setValue(800.0)
-            tau_rec.setObjectName('tau_rec')
-            self.synapse_params_layout.addRow("tau_rec (ms):", tau_rec)
-    
-    def _update_graph_combos(self):
-        """Update graph selection combos."""
-        self.source_graph_combo.clear()
-        self.target_graph_combo.clear()
-        
-        for graph_id, graph in self.graphs.items():
-            name = f"Graph {graph_id}: {graph.graph_name}"
-            self.source_graph_combo.addItem(name, graph_id)
-            self.target_graph_combo.addItem(name, graph_id)
-    
-    def _on_source_graph_changed(self, index):
-        """Update node combo when source graph changes."""
-        self.source_node_combo.clear()
-        
-        if index < 0:
-            return
-        
-        graph_id = self.source_graph_combo.currentData()
-        if graph_id in self.graphs:
-            graph = self.graphs[graph_id]
-            for node in graph.node_list:
-                self.source_node_combo.addItem(
-                    f"Node {node.id}: {node.name}", 
-                    node.id
-                )
-    
-    def _on_source_node_changed(self, index):
-        """Update population combo when source node changes."""
-        self.source_pop_combo.clear()
-        
-        if index < 0:
-            return
-        
-        graph_id = self.source_graph_combo.currentData()
-        node_id = self.source_node_combo.currentData()
-        
-        if graph_id in self.graphs:
-            node = self.graphs[graph_id].get_node(node_id)
-            if node and node.population:
-                for i, pop in enumerate(node.population):
-                    n_neurons = len(pop) if pop else 0
-                    self.source_pop_combo.addItem(
-                        f"Pop {i} ({n_neurons} neurons)",
-                        i
-                    )
-    
-    def _on_target_graph_changed(self, index):
-        """Update node combo when target graph changes."""
-        self.target_node_combo.clear()
-        
-        if index < 0:
-            return
-        
-        graph_id = self.target_graph_combo.currentData()
-        if graph_id in self.graphs:
-            graph = self.graphs[graph_id]
-            for node in graph.node_list:
-                self.target_node_combo.addItem(
-                    f"Node {node.id}: {node.name}",
-                    node.id
-                )
-    
-    def _on_target_node_changed(self, index):
-        """Update population combo when target node changes."""
-        self.target_pop_combo.clear()
-        
-        if index < 0:
-            return
-        
-        graph_id = self.target_graph_combo.currentData()
-        node_id = self.target_node_combo.currentData()
-        
-        if graph_id in self.graphs:
-            node = self.graphs[graph_id].get_node(node_id)
-            if node and node.population:
-                for i, pop in enumerate(node.population):
-                    n_neurons = len(pop) if pop else 0
-                    self.target_pop_combo.addItem(
-                        f"Pop {i} ({n_neurons} neurons)",
-                        i
-                    )
-    
-    def _get_current_params(self):
-        """Get all current parameters from UI."""
-        params = {
-            'rule': self.rule_combo.currentText(),
-            'synapse_model': self.synapse_combo.currentText(),
-            'weight': self.weight_spin.value(),
-            'delay': self.delay_spin.value(),
-            'allow_autapses': self.autapses_check.isChecked(),
-            'allow_multapses': self.multapses_check.isChecked(),
-            'receptor_type': self.receptor_spin.value(),
-            'use_spatial': self.spatial_group.isChecked(),
-            'mask_type': self.mask_type_combo.currentText(),
-            'mask_radius': self.radius_spin.value(),
-            'mask_inner_radius': self.inner_radius_spin.value(),
-            'distance_dependent_weight': self.dist_dep_check.isChecked()
-        }
-        
-        # Rule-specific params
-        rule = params['rule']
-        if rule == 'fixed_indegree':
-            params['indegree'] = self.indegree_spin.value()
-        elif rule == 'fixed_outdegree':
-            params['outdegree'] = self.outdegree_spin.value()
-        elif rule == 'fixed_total_number':
-            params['N'] = self.n_spin.value()
-        elif rule in ['pairwise_bernoulli', 'symmetric_pairwise_bernoulli']:
-            params['p'] = self.p_spin.value()
-        
-        # Synapse-specific params
-        for i in range(self.synapse_params_layout.count()):
-            item = self.synapse_params_layout.itemAt(i)
-            if item and item.widget():
-                widget = item.widget()
-                name = widget.objectName()
-                if name and isinstance(widget, (QSpinBox, QDoubleSpinBox)):
-                    params[name] = widget.value()
-        
-        return params
-    
-    def _add_to_pending(self):
-        """Add current configuration to pending connections queue."""
-        source_graph = self.source_graph_combo.currentData()
-        source_node = self.source_node_combo.currentData()
-        source_pop = self.source_pop_combo.currentData()
-        
-        target_graph = self.target_graph_combo.currentData()
-        target_node = self.target_node_combo.currentData()
-        target_pop = self.target_pop_combo.currentData()
-        
-        if any(x is None for x in [source_graph, source_node, source_pop,
-                                    target_graph, target_node, target_pop]):
-            QMessageBox.warning(self, "Incomplete", 
-                "Please select source and target populations.")
-            return
-        
-        params = self._get_current_params()
-        
-        conn_dict = {
-            'source_graph_id': source_graph,
-            'source_node_id': source_node,
-            'source_pop_id': source_pop,
-            'target_graph_id': target_graph,
-            'target_node_id': target_node,
-            'target_pop_id': target_pop,
-            'params': params,
-            'name': f"G{source_graph}N{source_node}P{source_pop}→G{target_graph}N{target_node}P{target_pop}"
-        }
-        
-        self.pending_connections.append(conn_dict)
-        
-        # Add to list widget
-        item = QListWidgetItem(
-            f"{conn_dict['name']} ({params['rule']}, {params['synapse_model']})"
-        )
-        self.pending_list.addItem(item)
-        
-        self.status_label.setText(f"Added to queue ({len(self.pending_connections)} pending)")
-    
-    def _remove_from_pending(self):
-        """Remove selected connection from pending queue."""
-        row = self.pending_list.currentRow()
-        if row >= 0:
-            self.pending_list.takeItem(row)
-            self.pending_connections.pop(row)
-            self.status_label.setText(f"Removed ({len(self.pending_connections)} pending)")
-    
-    def _create_all_connections(self):
-
-        if not self.pending_connections:
-            QMessageBox.information(self, "No Connections", 
-                "No pending connections to create.")
-            return
-        
-        if self.connection_executor is None:
-            self.connection_executor = ConnectionExecutor(self.graphs)
-        
-        # Execute all pending connections
-        successful, failed, failed_list = self.connection_executor.execute_pending_connections(
-            self.pending_connections
-        )
-        
-        # Clear pending queue
-        self.pending_connections.clear()
-        self.pending_list.clear()
-        
-        # Show result
-        msg = f"Created {successful} connections"
-        if failed > 0:
-            msg += f", {failed} failed"
-            for f in failed_list:
-                print(f"Failed: {f['name']} - {f.get('error', 'Unknown error')}")
-        
-        self.status_label.setText(msg)
-        
-        if successful > 0:
-            self.connection_created.emit({'created': successful, 'failed': failed})
-        
-        if failed > 0:
-            QMessageBox.warning(self, "Some Connections Failed",
-                f"{failed} connection(s) failed. Check console for details.")
-
-
-
-
-
-
-
-
-def validate_synapse_models():
-    """Prüft ob synapse_models nur echte NEST Synapse-Modelle enthält."""
+def validate_SYNAPSE_MODELS():
+    """Prüft ob SYNAPSE_MODELS nur echte NEST Synapse-Modelle enthält."""
     import nest
     
-    nest_synapses = set(nest.synapse_models)
+    nest_synapses = set(nest.SYNAPSE_MODELS)
     
     
     invalid = []
     valid = []
     
-    for model in synapse_models.keys():
+    for model in SYNAPSE_MODELS.keys():
         if model in nest_synapses:
             valid.append(model)
             print(f"  ✅ {model}")
@@ -5503,7 +5610,7 @@ def validate_synapse_models():
     print(f"\nValid: {len(valid)} | Invalid: {len(invalid)}")
     
     if invalid:
-        print("\nREMOVE THESE FROM synapse_models:")
+        print("\nREMOVE THESE FROM SYNAPSE_MODELS:")
         for m in invalid:
             print(f'    "{m}": {{}},')
     
@@ -6193,6 +6300,8 @@ class FlowFieldWidget(QWidget):
         # PyVista Setup
         self.plotter = QtInteractor(self)
         self.plotter.set_background("black")
+        self.plotter.add_axes() # Orientation widget
+        
         self.layout.addWidget(self.plotter)
         
         self.build_scene()
@@ -6205,6 +6314,7 @@ class FlowFieldWidget(QWidget):
 
         for graph in self.graph_list:
             for node in graph.node_list:
+                # Skip empty nodes
                 if not hasattr(node, 'positions') or not node.positions:
                     continue
 
@@ -6212,18 +6322,17 @@ class FlowFieldWidget(QWidget):
                 params = node.parameters
                 encoded_per_type = params.get("encoded_polynoms_per_type", [])
                 
-                # Polynom Generator initialisieren (wichtig für decode)
+                # Default power 5 if not specified
                 poly_gen = PolynomGenerator(n=params.get('polynom_max_power', 5))
 
                 for pop_idx, positions in enumerate(node.positions):
                     if positions is None or len(positions) == 0:
                         continue
                     
-                    # 2. Flow-Funktionen für diesen Typ dekodieren
+                    # 2. Decode flow functions
                     f1, f2, f3 = None, None, None
                     
                     if pop_idx < len(encoded_per_type):
-                        # encoded_per_type[pop_idx] ist eine Liste aus 3 Dicts (x, y, z)
                         try:
                             funcs = poly_gen.decode_multiple(encoded_per_type[pop_idx])
                             if len(funcs) == 3:
@@ -6232,39 +6341,67 @@ class FlowFieldWidget(QWidget):
                             print(f"Error decoding polynomials for Node {node.id} Pop {pop_idx}: {e}")
                     
                     if f1 is None: 
-                        continue # Kein Flow definiert
+                        continue 
 
                     # 3. Vektoren berechnen
-                    # positions ist (N, 3)
                     x = positions[:, 0]
                     y = positions[:, 1]
                     z = positions[:, 2]
                     
-                    # Vektorfeld auswerten
                     u = f1(x, y, z)
                     v = f2(x, y, z)
                     w = f3(x, y, z)
                     
                     vectors = np.column_stack((u, v, w))
                     
-                    # 4. Visualisierung mit PyVista Glyphs (Pfeilen)
+                    # --- NEUE LOGIK: Clamping & Normalisierung ---
+                    
+                    # A. Magnitude (Länge) berechnen
+                    magnitudes = np.linalg.norm(vectors, axis=1)
+                    
+                    # B. Division durch Null verhindern
+                    safe_mags = np.where(magnitudes == 0, 1, magnitudes)
+                    
+                    # C. Einheitsvektoren (Nur Richtung, Länge immer 1.0)
+                    # Wir skalieren die Vektoren manuell auf Länge 1
+                    unit_vectors = vectors / safe_mags[:, None]
+                    
+                    # D. Visuelle Skalierung (Geometry)
+                    # Begrenze die Länge der Pfeile auf maximal 1.5
+                    # Kleine Kräfte bleiben klein, riesige Kräfte werden bei 1.5 abgeschnitten
+                    geom_scale = np.clip(magnitudes, 0, 1.5)
+                    
+                    # 4. PyVista PolyData erstellen
                     pdata = pv.PolyData(positions)
-                    pdata['vectors'] = vectors
+                    pdata['vectors'] = unit_vectors  # Richtung
+                    pdata['mag'] = magnitudes        # Farbe (Echte Stärke)
+                    pdata['scale'] = geom_scale      # Größe (Visuell begrenzt)
                     
-                    # Skalierung:
-                    # scale=True: Pfeilgröße hängt von Vektorlänge ab (zeigt Stärke des Sogs)
-                    # factor: Globaler Skalierungsfaktor
-                    arrows = pdata.glyph(orient='vectors', scale=True, factor=0.8)
+                    # 5. Glyphs (Pfeile) erzeugen
+                    # orient='vectors': Nutzt die Einheitsvektoren für die Ausrichtung
+                    # scale='scale': Nutzt unser geclamptes Array für die Länge
+                    # factor=1.0: Basis-Multiplikator
+                    arrows = pdata.glyph(orient='vectors', scale='scale', factor=1.0)
                     
-                    # Farbe basierend auf Neuron-Typ
-                    neuron_type = node.neuron_models[pop_idx] if pop_idx < len(node.neuron_models) else "unknown"
-                    color = neuron_colors.get(neuron_type, "#ffffff")
-
-                    # Pfeile hinzufügen
-                    self.plotter.add_mesh(arrows, color=color, opacity=0.8)
+                    # 6. Plotten
+                    # cmap='jet': Standard Heatmap (Blau=Niedrig -> Rot=Hoch)
+                    # clim: Setzt Farbbereich (optional, hier automatisch)
+                    self.plotter.add_mesh(
+                        arrows, 
+                        scalars='mag', 
+                        cmap='jet', 
+                        opacity=0.9,
+                        scalar_bar_args={'title': 'Flow Magnitude', 'color': 'white'}
+                    )
                     
-                    # Optional: Kleine Punkte für die Ursprungspositionen (damit man sieht wo der Pfeil startet)
-                    self.plotter.add_mesh(pv.PolyData(positions), color=color, point_size=3, opacity=0.4)
+                    # Optional: Kleine Punkte am Ursprung (in Weiß/Grau), zur Orientierung
+                    self.plotter.add_mesh(
+                        pv.PolyData(positions), 
+                        color="#333333", 
+                        point_size=3, 
+                        opacity=0.5,
+                        render_points_as_spheres=True
+                    )
 
         self.plotter.reset_camera()
         self.plotter.update()
