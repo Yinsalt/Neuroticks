@@ -1,7 +1,8 @@
 import sys
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QStackedWidget, QMessageBox, QProgressBar
+    QApplication, QMainWindow, QSlider, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
+    QGridLayout, QFileDialog
 )
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt
@@ -10,9 +11,9 @@ import vtk
 import pyvista as pv
 from pyvistaqt import QtInteractor
 from neuron_toolbox import *
+
 from WidgetLib import *
-from WidgetLib import GraphOverviewWidget
-from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder
+from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder,BlinkingNetworkWidget,FlowFieldWidget
 import re
 import shutil
 from datetime import datetime
@@ -784,10 +785,10 @@ class MainWindow(QMainWindow):
         btn_neurons = QPushButton("Neurons")
         btn_graph = QPushButton("Graph")
         btn_sim = QPushButton("Firing Patterns")
-        btn_flow = QPushButton("Positional Flowfield") # ✅ NEU
+        btn_flow = QPushButton("Positional Flowfield") # ✅ NEW BUTTON
         btn_other = QPushButton("Other")
         
-        # === SLIDER SETUP ===
+        # Slider setup (same as before)
         slider_container = QWidget()
         slider_layout = QVBoxLayout(slider_container)
         slider_layout.setContentsMargins(5, 10, 5, 5)
@@ -818,7 +819,7 @@ class MainWindow(QMainWindow):
         slider_layout.addWidget(lbl_slider)
         slider_layout.addWidget(self.opacity_slider)
 
-        # Buttons hinzufügen (inkl. dem neuen)
+        # Add all buttons to layout
         for btn in [btn_neurons, btn_graph, btn_sim, btn_flow, btn_other]:
             btn.setStyleSheet(nav_style)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -834,7 +835,7 @@ class MainWindow(QMainWindow):
         self.neuron_plotter = self.create_neuron_visualization()
         self.graph_plotter = self.create_graph_visualization()
         self.blink_widget = BlinkingNetworkWidget(graph_list)
-        self.flow_widget = FlowFieldWidget(graph_list) # ✅ NEU: Widget instanziieren
+        self.flow_widget = FlowFieldWidget(graph_list) # ✅ NEW WIDGET INSTANCE
 
         self.vis_stack.addWidget(self.neuron_plotter)  # 0
         self.vis_stack.addWidget(self.graph_plotter)   # 1
@@ -846,15 +847,16 @@ class MainWindow(QMainWindow):
         btn_neurons.clicked.connect(lambda: self._switch_view(0))
         btn_graph.clicked.connect(lambda: self._switch_view(1))
         btn_sim.clicked.connect(lambda: self._switch_view(2, sim_mode=True))
-        btn_flow.clicked.connect(lambda: self._switch_view(3)) # ✅ NEU
+        btn_flow.clicked.connect(lambda: self._switch_view(3)) # ✅ NEW SIGNAL
         btn_other.clicked.connect(lambda: self._switch_view(4))
         
         layout.addWidget(scene_menu, 1)
         layout.addWidget(self.vis_stack, 9)
         
         return layout
+    
     def _switch_view(self, index, sim_mode=False):
-        """Wechselt den View und steuert die Simulation."""
+        """Switches view and controls simulation state."""
         self.vis_stack.setCurrentIndex(index)
         
         # 1. Simulation Logic (Index 2)
@@ -867,7 +869,7 @@ class MainWindow(QMainWindow):
         else:
             self.blink_widget.stop_simulation()
             
-        # 2. FlowField Logic (Index 3) - ✅ NEU
+        # 2. FlowField Logic (Index 3) - ✅ NEW
         if index == 3:
             if hasattr(self, 'flow_widget'):
                 self.flow_widget.build_scene()
@@ -875,6 +877,7 @@ class MainWindow(QMainWindow):
     def create_neuron_visualization(self):
         plotter = QtInteractor(self)
         plotter.set_background('black')
+        plotter.add_axes()
         return plotter
     
     def _on_opacity_changed(self, value):
@@ -886,6 +889,7 @@ class MainWindow(QMainWindow):
         """Creates graph skeleton plotter."""
         plotter = QtInteractor(self)
         plotter.set_background('black')
+        plotter.add_axes()
         return plotter
     def on_graph_updated(self, graph_id):
         if graph_id == -1:  # Delete wurde ausgeführt
@@ -1113,10 +1117,11 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
+            # ✅ FIX: Dictionary frisch aus der globalen Liste bauen
             graphs_dict = {g.graph_id: g for g in graph_list}
 
             stats = safe_nest_reset_and_repopulate(
-                graphs_dict,
+                graphs_dict, # Hier übergeben
                 enable_structural_plasticity=self.structural_plasticity_enabled,
                 verbose=True
             )
@@ -1221,7 +1226,6 @@ class MainWindow(QMainWindow):
         self.neuron_plotter.update()
         
     
-
     def plot_graph_skeleton(self):
         self.graph_plotter.clear()
         
@@ -1233,6 +1237,7 @@ class MainWindow(QMainWindow):
         
         cmap = plt.get_cmap("tab20")
         
+        # Tooltip Actor setup
         self.tooltip_actor = vtk.vtkTextActor()
         self.tooltip_actor.GetTextProperty().SetFontSize(14)
         self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 1.0)
@@ -1242,18 +1247,23 @@ class MainWindow(QMainWindow):
         self.tooltip_actor.SetVisibility(False)
         self.graph_plotter.renderer.AddViewProp(self.tooltip_actor)
         
+        # Node Map erstellen für schnellen Zugriff
         node_map = {}
         for graph in graph_list:
             for node in graph.node_list:
                 node_map[(graph.graph_id, node.id)] = node
 
         for graph in graph_list:
+            # Farbe basierend auf Graph-ID
             rgba = cmap(graph.graph_id % 20)
             graph_color = rgba[:3]
             graph_name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
             
+            # 1. Nodes zeichnen (Kugeln)
             for node in graph.node_list:
-                sphere = pv.Sphere(radius=0.4, center=node.center_of_mass)
+                # Sicherstellen, dass center_of_mass ein numpy array ist
+                center = np.array(node.center_of_mass)
+                sphere = pv.Sphere(radius=0.4, center=center)
                 
                 actor = self.graph_plotter.add_mesh(
                     sphere,
@@ -1267,19 +1277,25 @@ class MainWindow(QMainWindow):
                 info_text = f"📍 NODE: {node_name}\nID: {node.id}\nGraph: {graph_name}"
                 self.skeleton_info_map[actor] = info_text
             
+            # 2. Kanten zeichnen (Interne Graph-Struktur next/prev)
             for node in graph.node_list:
+                start_pos = np.array(node.center_of_mass)
                 for next_node in node.next:
-                    line = pv.Line(node.center_of_mass, next_node.center_of_mass)
+                    end_pos = np.array(next_node.center_of_mass)
+                    line = pv.Line(start_pos, end_pos)
                     self.graph_plotter.add_mesh(
                         line, color=graph_color, line_width=2, opacity=0.3, pickable=False
                     )
                 
+                # 3. Connections zeichnen (NEST Verbindungen)
                 if hasattr(node, 'connections'):
                     for conn in node.connections:
                         try:
                             target = conn.get('target', {})
                             tgt_gid = target.get('graph_id')
                             tgt_nid = target.get('node_id')
+                            
+                            # Ziel-Node finden
                             target_node = node_map.get((tgt_gid, tgt_nid))
                             
                             if target_node:
@@ -1290,12 +1306,14 @@ class MainWindow(QMainWindow):
                                              f"➡ Rule: {rule}\n"
                                              f"⚖ Weight: {weight}")
 
+                                start = np.array(node.center_of_mass)
+                                end = np.array(target_node.center_of_mass)
+
+                                # Self-Connection (Torus)
                                 if node == target_node:
                                     torus = pv.ParametricTorus(ringradius=0.5, crosssectionradius=0.08)
-                                    
                                     torus.translate([0, 0, 0.6]) 
-                                    
-                                    torus.translate(node.center_of_mass)
+                                    torus.translate(start)
                                     
                                     conn_actor = self.graph_plotter.add_mesh(
                                         torus,
@@ -1305,28 +1323,47 @@ class MainWindow(QMainWindow):
                                     )
                                     self.skeleton_info_map[conn_actor] = info_text + "\n(Self-Connection)"
 
+                                # Normale Verbindung (Pfeil)
                                 else:
-                                    start = node.center_of_mass
-                                    end = target_node.center_of_mass
-                                    direction = end - start
-                                    length = np.linalg.norm(direction)
+                                    direction_vec = end - start
+                                    dist = np.linalg.norm(direction_vec)
                                     
-                                    if length > 0.01:
-
+                                    if dist > 0.01:
+                                        # Normalisieren für korrekte Orientierung
+                                        direction_norm = direction_vec / dist
                                         
+                                        # Offset: Startet und endet am Rand der Kugel (Radius ~0.4)
+                                        # Wir machen den Pfeil etwas kürzer als die volle Distanz
+                                        offset_start = 0.4
+                                        offset_end = 0.4
+                                        
+                                        # Tatsächliche Länge des Pfeils
+                                        arrow_length = max(0.1, dist - (offset_start + offset_end))
+                                        
+                                        # Startpunkt verschieben
+                                        arrow_start = start + (direction_norm * offset_start)
+                                        
+                                        # Dynamische Spitzengröße: 
+                                        # Soll nicht riesig werden bei langen Verbindungen
+                                        # Tip fraction ist relativ zur Länge. 
+                                        # Wir wollen fixe Tip-Größe (z.B. 0.3 units), also fraction = 0.3 / arrow_length
+                                        tip_len_fraction = min(0.5, 0.4 / arrow_length)
+                                        tip_radius_fraction = min(0.2, 0.15 / arrow_length)
+                                        shaft_radius_fraction = min(0.05, 0.05 / arrow_length)
+
                                         arrow = pv.Arrow(
-                                            start=start, 
-                                            direction=direction, 
-                                            scale=length,
-                                            tip_length=min(0.25, 0.5/length) if length > 2 else 0.25, 
-                                            tip_radius=0.08/length if length > 1 else 0.08,
-                                            shaft_radius=0.03/length if length > 1 else 0.03
+                                            start=arrow_start, 
+                                            direction=direction_norm, 
+                                            scale=arrow_length,
+                                            tip_length=tip_len_fraction,
+                                            tip_radius=tip_radius_fraction,
+                                            shaft_radius=shaft_radius_fraction
                                         )
                                         
                                         conn_actor = self.graph_plotter.add_mesh(
                                             arrow, 
-                                            color="#00FFFF",
-                                            opacity=0.6,
+                                            color="#00FFFF", # Cyan für Verbindungen
+                                            opacity=0.8,
                                             pickable=True
                                         )
                                         self.skeleton_info_map[conn_actor] = info_text
@@ -1335,6 +1372,7 @@ class MainWindow(QMainWindow):
                             print(f"Error plotting connection: {e}")
                             pass
 
+        # Observer neu binden (Hover-Effekt)
         try:
             self.graph_plotter.iren.remove_observer(self._observer_tag)
         except:
@@ -1344,8 +1382,12 @@ class MainWindow(QMainWindow):
             "MouseMoveEvent", self._on_skeleton_hover
         )
         
-        self.graph_plotter.reset_camera()
+        # Kamera-Reset nur beim allerersten Mal sinnvoll, sonst springt die Ansicht dauernd
+        # self.graph_plotter.reset_camera() 
         self.graph_plotter.update()
+    
+    
+    
     def _on_skeleton_hover(self, interactor, event):
         x, y = interactor.GetEventPosition()
         
@@ -1641,6 +1683,8 @@ class MainWindow(QMainWindow):
             self.status_bar.set_progress(80)
             QApplication.processEvents()
 
+            # ✅ FIX: Dictionary muss {graph_id: graph_objekt} sein
+            # global graph_list ist hier schon gefüllt
             graphs_dict = {g.graph_id: g for g in graph_list}
             
             created, failed, _ = create_nest_connections_from_stored(graphs_dict, verbose=True)
