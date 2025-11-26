@@ -385,11 +385,34 @@ class PolynomGenerator:
     
     @coefficients.setter
     def coefficients(self, value):
-        if not isinstance(value, np.ndarray):
-            raise TypeError("")
-        if value.shape != (self.n + 1, 3):
-            raise ValueError("")
-        self._coefficients = value
+        if value is None:
+            self._coefficients = self.random_coefficients()
+            return
+
+        val_arr = np.array(value)
+        expected_rows = self.n + 1
+        expected_shape = (expected_rows, 3)
+        
+        # ROBUSTHEITS-CHECK
+        if val_arr.shape != expected_shape:
+            print(f"⚠️  Auto-fixing polynomial coefficients: Expected {expected_shape}, got {val_arr.shape}")
+            
+            new_coeffs = np.zeros(expected_shape)
+            
+            # Kopiere so viel wie möglich vom alten Array
+            rows_to_copy = min(val_arr.shape[0], expected_rows)
+            cols_to_copy = min(val_arr.shape[1], 3)
+            
+            if val_arr.ndim == 1:
+                 # Fallback falls 1D Array kommt
+                 limit = min(len(val_arr), expected_rows * 3)
+                 new_coeffs.flat[:limit] = val_arr[:limit]
+            else:
+                 new_coeffs[:rows_to_copy, :cols_to_copy] = val_arr[:rows_to_copy, :cols_to_copy]
+            
+            self._coefficients = new_coeffs
+        else:
+            self._coefficients = val_arr
     
     def term_matrix(self):
         matrix = []
@@ -2999,7 +3022,6 @@ def plot_graph_3d(graph,
     ax.legend()
     plt.show()
 
-
 class Node:
     def __init__(self,
              function_generator=None,
@@ -3021,11 +3043,12 @@ class Node:
             "conn_prob": [],
             "distribution": [1.0],
             "center_of_mass": np.array([0.0, 0.0, 0.0]),
+            "old_center_of_mass": None, 
             "displacement": np.array([0.0, 0.0, 0.0]),
             "displacement_factor": 1.0,
             "field": None,
             "coefficients": None,
-            "population_nest_params": []  # ✅ NEU! Default
+            "population_nest_params": []
         }
         
         self.connections = parameters.get('connections', [])
@@ -3043,30 +3066,29 @@ class Node:
             param_name = parameters.get("name")
             self.name = param_name if param_name is not None else f"Node:{self.id}"
             self.center_of_mass = np.array(parameters["m"])
+            if parameters.get("old_center_of_mass") is not None:
+                self.old_center_of_mass = np.array(parameters["old_center_of_mass"])
+            else:
+                self.old_center_of_mass = np.array(parameters["m"])
             self.types = parameters.get("types", [])
             self.conn_probability = parameters.get("conn_prob", [])
             self.distribution = parameters.get("distribution", [])
             self.field = parameters.get("field", None)
             self.graph_id = parameters.get("graph_id", 0)
-            
-            # ✅ NEU: Population NEST Parameter extrahieren
             self.population_nest_params = parameters.get("population_nest_params", [])
         else:
-            # Defaults...
             self.polynom_max_power = default_params["polynom_max_power"]
-            self.polynom_parameters = default_params["encoded_polynoms"]
             self.parameters = default_params.copy()
-            self.coefficients = default_params["coefficients"]
+            self.center_of_mass = default_params["center_of_mass"]
+            self.old_center_of_mass = default_params["center_of_mass"]
             self.id = -1
             self.name = f"Node:{self.id}"
-            self.center_of_mass = default_params["center_of_mass"]
             self.types = default_params["types"]
-            self.conn_probability = default_params["conn_prob"]
-            self.distribution = default_params["distribution"]
-            self.field = default_params["field"]
-            self.graph_id = default_params["graph_id"]
             self.population_nest_params = []
-        
+
+        self.old_positions = []
+        self.difference_then_now = np.array([0.0, 0.0, 0.0])
+
         if other is not None:
             self.prev.append(other)
             other.next.append(self)
@@ -3076,8 +3098,6 @@ class Node:
         self.check_function_generator(function_generator, n=self.polynom_max_power)
         self.visited = 0
         self.field_offset = None
-        self.class_idx_dict = {t: i for i, t in enumerate(self.types)}
-        self.idx_class_dict = {i: t for i, t in enumerate(self.types)}
         self.positions = []
         self.population = []
         self.nest_connections = []
@@ -3094,7 +3114,6 @@ class Node:
             self.function_generator = func_gen
             self.coefficients = func_gen.coefficients.copy()
         else:
-            # Sicherstellen, dass n immer int ist
             actual_n = self.polynom_max_power if self.polynom_max_power is not None else 5
             if self.parent is not None:
                 self.function_generator = PolynomGenerator(n=actual_n)
@@ -3104,7 +3123,6 @@ class Node:
                 self.function_generator = PolynomGenerator(n=actual_n)
                 self.coefficients = self.function_generator.coefficients.copy()
             
-            # Jetzt sicher setzen
             self.function_generator.coefficients = self.coefficients
     
     def update_coefficients(self, coefficients, learning_rate=0.01, update_matrix=None):
@@ -3118,30 +3136,42 @@ class Node:
 
 
     def build(self):
+
         params = self.parameters
+        
+        target_pos = np.array(params.get('m', [0.0, 0.0, 0.0]))
+        
+        if 'old_center_of_mass' in params and params['old_center_of_mass'] is not None:
+            origin_pos = np.array(params['old_center_of_mass'])
+        else:
+            origin_pos = target_pos.copy()
+            params['old_center_of_mass'] = origin_pos.tolist()
+            self.old_center_of_mass = origin_pos
+
+        shift_vector = target_pos - origin_pos
+        
+        print(f"   Building Node {self.id}:")
+        print(f"   Origin (Generation): {origin_pos}")
+        print(f"   Target (Current):    {target_pos}")
+        print(f"   Shift Vector:        {shift_vector}")
+
         types = params.get('types', [0])
         num_types = len(types)
-        neuron_models = params.get('neuron_models', ["iaf_psc_alpha"])
         grid_size = tuple(params.get('grid_size', [1, 1, 1]))
-        m = np.array(params.get('m', [0.0, 0.0, 0.0]))
+        
         rot_theta = params.get('rot_theta', 0.0)
         rot_phi = params.get('rot_phi', 0.0)
-        transform_matrix = np.array(params.get('transform_matrix', [[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
-        dt = params.get('dt', 0.01)
-        old = params.get('old', True)
-        num_steps = params.get('num_steps', 8)
-        plot_clusters = params.get('plot_clusters', False)
-        title = params.get('title', "plot node")
-        sparse_holes = params.get('sparse_holes', 0)
-        sparsity_factor = params.get('sparsity_factor', 0.9)
-        probability_vector = params.get('probability_vector', [0.3, 0.2, 0.4])
-    
-        encoded_per_type = params.get("encoded_polynoms_per_type", None)
         
+        sx = float(params.get('stretch_x', 1.0))
+        sy = float(params.get('stretch_y', 1.0))
+        sz = float(params.get('stretch_z', 1.0))
+        transform_matrix = np.diag([sx, sy, sz])
+        self.parameters['transform_matrix'] = transform_matrix.tolist()
+
+        encoded_per_type = params.get("encoded_polynoms_per_type", None)
         if encoded_per_type:
             if len(encoded_per_type) != num_types:
-                raise ValueError(f"encoded_polynoms ({len(encoded_per_type)}) != types ({num_types})")
-            
+                encoded_per_type = encoded_per_type[:num_types]
             flow_functions = []
             for type_polynoms in encoded_per_type:
                 decoded = self.function_generator.decode_multiple(type_polynoms)
@@ -3151,57 +3181,51 @@ class Node:
                              for _ in range(num_types)]
         
         wave_params = params.get('wave_params', {
-            'sparse_holes': sparse_holes,
-            'sparsity_factor': sparsity_factor,
-            'probability_vector': probability_vector
+            'sparse_holes': params.get('sparse_holes', 0),
+            'sparsity_factor': params.get('sparsity_factor', 0.9),
+            'probability_vector': params.get('probability_vector', [1.0]*num_types)
         })
-        ############################################
-        ############################################
-        # HIER BIO EINBAUEN
-        ############################################
-        ############################################
+
         self.positions = cluster_and_flow(
             grid_size=grid_size,
-            m=m,    # ← Translation wird in transform_points() angewendet
+            m=origin_pos, 
             rot_theta=rot_theta,
             rot_phi=rot_phi,
             transform_matrix=transform_matrix,
             wave_params=wave_params,
             types=types,
             flow_functions=flow_functions,
-            dt=dt,
-            old=old,
-            num_steps=num_steps,
-            plot_clusters=plot_clusters,
-            title=title
+            dt=params.get('dt', 0.01),
+            old=params.get('old', True),
+            num_steps=params.get('num_steps', 8),
+            plot_clusters=params.get('plot_clusters', False),
+            title=params.get('title', "node")
         )
         
+        if not np.allclose(shift_vector, 0):
+            print(f"   -> Applying shift {shift_vector} to generated points")
+            self.positions = [cluster + shift_vector for cluster in self.positions]
 
+        self.center_of_mass = target_pos
+        self.parameters['m'] = target_pos.tolist()
         
-        # ✅ JETZT center_of_mass berechnen (mit verschobenen Positionen)
-        if self.positions and any(len(cluster) > 0 for cluster in self.positions):
-            all_points = np.vstack([cluster for cluster in self.positions if len(cluster) > 0])
-            self.center_of_mass = all_points.mean(axis=0)
-        else:
-            # Fallback: user input
-            self.center_of_mass = m
-            pass
+        self.old_positions = [c.copy() for c in self.positions]
         
-        temp_graph_id = self.parameters["graph_id"]
-        print(f"Metadata for graph_id {temp_graph_id} node_id {self.id} successfully constructed.")
+        self.parameters['old_center_of_mass'] = self.old_center_of_mass.tolist()
+        self.parameters['m'] = self.center_of_mass.tolist()
+
+        print(f"Node {self.id} built successfully at {self.center_of_mass}")
+
     def populate_node(self):
-        """Erstellt NEST Neuronen mit gespeicherten Parametern"""
         
-        # ✅ FALLBACK: Wenn keine Populationen → Placeholder
         if not self.positions or all(len(cluster) == 0 for cluster in self.positions):
             print(f"⚠ Node {self.id} has no populations! Creating placeholder neuron...")
             
-            # Erstelle ein einzelnes Neuron am center_of_mass
             placeholder_pos = [self.center_of_mass]
             
             try:
                 placeholder_pop = nest.Create(
-                    "iaf_psc_alpha",  # Simples Standard-Modell
+                    "iaf_psc_alpha", 
                     1,
                     positions=nest.spatial.free(placeholder_pos)
                 )
@@ -3213,7 +3237,6 @@ class Node:
             
             return
         
-        # ✅ NORMAL: Reguläre Population mit Parametern
         self.population = clusters_to_neurons(
             self.positions, 
             self.parameters["neuron_models"],
@@ -3222,7 +3245,6 @@ class Node:
         print(f"Node {self.id} successfully populated with custom parameters.")
 
     def add_connection(self, target_node, conn_params):
-        # conn_params from Connection-Tool (like {'mask_type': 'circular', 'mask_params': {...}})
         self.connections.append({'target': target_node, 'params': conn_params})
 
     def connect(self):
@@ -3231,7 +3253,6 @@ class Node:
             params = conn['params']
             for from_pop_idx, from_pop in enumerate(self.population):
                 for to_pop_idx, to_pop in enumerate(target.population):
-                    # here nest.Connect(from_pop, to_pop, conn_spec=params['conn_spec'], syn_spec=params['syn_spec'])
                     print(f"Connecting Pop {from_pop_idx} to Target Pop {to_pop_idx} with {params['syn_model']}")
 
 
@@ -3277,7 +3298,6 @@ class Node:
     def __repr__(self):
         return f"Node(id={self.id}, name={self.name}, pos={self.center_of_mass})"
 
-
 def generate_node_parameters_list(n_nodes=5, 
                                    n_types=5, 
                                    vary_polynoms=True,
@@ -3286,18 +3306,7 @@ def generate_node_parameters_list(n_nodes=5,
                                    max_power=2,
                                    max_coeff=0.8,
                                  graph_id=0):      
-    """
-    Generiert Parameter-Liste für Nodes mit optionalem Safe Mode
     
-    Args:
-        n_nodes: Anzahl Nodes
-        n_types: Anzahl Types pro Node
-        vary_polynoms: Ob Polynome variiert werden
-        vary_types_per_node: Ob Type-Anzahl variiert
-        safe_mode: Verhindert Overflow in Polynomen
-        max_power: Maximale Potenz (0-2 empfohlen)
-        max_coeff: Maximaler Koeffizient
-    """
     params_list = []
     
     for i in range(n_nodes):
@@ -3358,7 +3367,7 @@ def generate_node_parameters_list(n_nodes=5,
                 type_polynoms = []
                 
                 for coord in range(3):  # x, y, z
-                    num_terms = np.random.randint(2, 5)  # Weniger Terms
+                    num_terms = np.random.randint(2, 5)
                     
                     indices = []
                     coeffs = []
@@ -3367,11 +3376,9 @@ def generate_node_parameters_list(n_nodes=5,
                         idx = np.random.choice([0, 1, 2])
                         
                         if safe_mode:
-                            # Safe: kleinere Powers und Koeffizienten
                             power = np.random.choice(range(min(max_power + 1, 4)))
                             coeff = np.random.uniform(-max_coeff, max_coeff)
                         else:
-                            # Original: kann overflow verursachen
                             power = np.random.choice([0, 1, 2, 3])
                             coeff = np.random.randn() * 0.5
                         
@@ -3463,7 +3470,6 @@ class Graph:
             params['name'] = f"Node_{node_id}"
         
         if other is not None:
-            # ✅ Nur auto-position wenn m nicht explizit gesetzt wurde
             has_explicit_position = (
                 parameters and 'm' in parameters and 
                 not np.allclose(parameters['m'], [0.0, 0.0, 0.0])
@@ -3502,7 +3508,7 @@ class Graph:
         
         if auto_build:
             try:
-                new_node.build()  # ✅ Only build once when requested
+                new_node.build()  
             except Exception as e:
                 print(f"⚠ Build failed for Node {node_id}: {e}")
         
@@ -3647,7 +3653,7 @@ class Graph:
 def createGraph(parameter_list=None, max_nodes=10, graph_id=0):
     parameter_list = parameter_list if parameter_list is not None else generate_node_parameters_list(n_nodes=max_nodes, n_types=3, graph_id=graph_id)
     max_nodes = len(parameter_list)
-    graph = Graph(parameter_list=parameter_list, graph_id=graph_id)  # <-- graph_id hinzugefügt!
+    graph = Graph(parameter_list=parameter_list, graph_id=graph_id) 
     graph.populate()
     return graph
 
@@ -3656,7 +3662,6 @@ def graphInfo(graph, figsize_per_plot=(5, 4), marker_size=10, alpha=0.6, linewid
     if n_nodes == 0:
         return
     plot_graph_3d(graph)
-    # Grid-Layout berechnen
     n_cols = int(np.ceil(np.sqrt(n_nodes)))
     n_rows = int(np.ceil(n_nodes / n_cols))
     
@@ -3678,7 +3683,6 @@ def graphInfo(graph, figsize_per_plot=(5, 4), marker_size=10, alpha=0.6, linewid
                           c=[col], s=marker_size, 
                           edgecolor='k', alpha=alpha, linewidths=linewidths)
         
-        # Titel mit Node-Info
         type_info = f"Types: {node.types}" if len(node.types) <= 5 else f"Types: {len(node.types)}"
         ax.set_title(f"{node.name}\n{type_info}", fontsize=10)
         
@@ -3687,7 +3691,6 @@ def graphInfo(graph, figsize_per_plot=(5, 4), marker_size=10, alpha=0.6, linewid
         ax.set_zlabel('Z', fontsize=8)
         ax.tick_params(labelsize=7)
     
-    # Leere subplots ausblenden
     for idx in range(n_nodes, n_rows * n_cols):
         fig.add_subplot(n_rows, n_cols, idx + 1).axis('off')
     
