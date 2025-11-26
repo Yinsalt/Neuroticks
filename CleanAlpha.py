@@ -784,33 +784,33 @@ class MainWindow(QMainWindow):
         btn_neurons = QPushButton("Neurons")
         btn_graph = QPushButton("Graph")
         btn_sim = QPushButton("Firing Patterns")
+        btn_flow = QPushButton("Positional Flowfield") # ✅ NEU
         btn_other = QPushButton("Other")
         
-        #  COMPACT SLIDER SETUP 
+        # === SLIDER SETUP ===
         slider_container = QWidget()
-        slider_layout = QHBoxLayout(slider_container) 
-        slider_layout.setContentsMargins(5, 5, 5, 5)
-        slider_layout.setSpacing(5)
+        slider_layout = QVBoxLayout(slider_container)
+        slider_layout.setContentsMargins(5, 10, 5, 5)
         
-        lbl_slider = QLabel("Opacity:") 
+        lbl_slider = QLabel("Edge Opacity")
         lbl_slider.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold;")
+        lbl_slider.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(0, 100)
-        self.opacity_slider.setValue(30)
-        self.opacity_slider.setFixedHeight(15)
+        self.opacity_slider.setValue(30) 
         self.opacity_slider.setStyleSheet("""
             QSlider::groove:horizontal {
-                height: 3px;
+                height: 4px;
                 background: #444;
-                border-radius: 1px;
+                border-radius: 2px;
             }
             QSlider::handle:horizontal {
                 background: #FFD700;
-                width: 10px;
-                height: 10px;
+                width: 12px;
+                height: 12px;
                 margin: -4px 0;
-                border-radius: 5px;
+                border-radius: 6px;
             }
         """)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
@@ -818,7 +818,8 @@ class MainWindow(QMainWindow):
         slider_layout.addWidget(lbl_slider)
         slider_layout.addWidget(self.opacity_slider)
 
-        for btn in [btn_neurons, btn_graph, btn_sim, btn_other]:
+        # Buttons hinzufügen (inkl. dem neuen)
+        for btn in [btn_neurons, btn_graph, btn_sim, btn_flow, btn_other]:
             btn.setStyleSheet(nav_style)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             scene_layout.addWidget(btn)
@@ -827,39 +828,49 @@ class MainWindow(QMainWindow):
         scene_layout.addWidget(slider_container)
         scene_menu.setLayout(scene_layout)
         
-        # Visualization stack setup
+        # === STACK SETUP ===
         self.vis_stack = QStackedWidget()
+        
         self.neuron_plotter = self.create_neuron_visualization()
         self.graph_plotter = self.create_graph_visualization()
         self.blink_widget = BlinkingNetworkWidget(graph_list)
+        self.flow_widget = FlowFieldWidget(graph_list) # ✅ NEU: Widget instanziieren
 
         self.vis_stack.addWidget(self.neuron_plotter)  # 0
         self.vis_stack.addWidget(self.graph_plotter)   # 1
         self.vis_stack.addWidget(self.blink_widget)    # 2
-        self.vis_stack.addWidget(Color("darkorange"))  # 3
+        self.vis_stack.addWidget(self.flow_widget)     # 3 (Positional Flowfield)
+        self.vis_stack.addWidget(Color("darkorange"))  # 4 (Other)
         
-        # Signals
+        # === SIGNALS ===
         btn_neurons.clicked.connect(lambda: self._switch_view(0))
         btn_graph.clicked.connect(lambda: self._switch_view(1))
         btn_sim.clicked.connect(lambda: self._switch_view(2, sim_mode=True))
-        btn_other.clicked.connect(lambda: self._switch_view(3))
+        btn_flow.clicked.connect(lambda: self._switch_view(3)) # ✅ NEU
+        btn_other.clicked.connect(lambda: self._switch_view(4))
         
         layout.addWidget(scene_menu, 1)
         layout.addWidget(self.vis_stack, 9)
         
         return layout
     def _switch_view(self, index, sim_mode=False):
+        """Wechselt den View und steuert die Simulation."""
         self.vis_stack.setCurrentIndex(index)
         
-        if index == 2:
+        # 1. Simulation Logic (Index 2)
+        if index == 2: 
             self.blink_widget.build_scene()
-            
             if sim_mode:
                 self.blink_widget.start_simulation()
             else:
                 self.blink_widget.stop_simulation()
         else:
             self.blink_widget.stop_simulation()
+            
+        # 2. FlowField Logic (Index 3) - ✅ NEU
+        if index == 3:
+            if hasattr(self, 'flow_widget'):
+                self.flow_widget.build_scene()
 
     def create_neuron_visualization(self):
         plotter = QtInteractor(self)
@@ -927,14 +938,32 @@ class MainWindow(QMainWindow):
         self.graph_overview.node_selected.connect(self._on_overview_node_selected)
         self.graph_overview.population_selected.connect(self._on_overview_pop_selected)
         self.graph_overview.connection_selected.connect(self._on_overview_conn_selected)
-            
+        self.graph_overview.requestConnectionCreation.connect(self.open_connection_tool_for_node)
+
         return layout
 
 
     def _on_overview_node_selected(self, graph_id, node_id):
         self.tool_stack.setCurrentIndex(1) 
         self.graph_editor.select_node_by_id(graph_id, node_id)
-
+    def open_connection_tool_for_node(self, graph_id, node_id, pop_id=0):
+        """
+        Callback für Rechtsklick im GraphOverview.
+        Öffnet das Connection Tool und setzt Graph, Node und Population als Source.
+        """
+        print(f"🔗 Context Menu Action: Setting Source to Graph {graph_id}, Node {node_id}, Pop {pop_id}")
+        
+        # 1. Zum Connection Tool wechseln (Index 2 im Tool Stack)
+        self.tool_stack.setCurrentIndex(2)
+        
+        # 2. Liste refreshen (sicherstellen, dass Comboboxen aktuell sind)
+        self.connection_tool.refresh()
+        
+        # 3. Source setzen (jetzt existiert die Methode!)
+        self.connection_tool.set_source(graph_id, node_id, pop_id)
+        
+        # 4. Status Feedback
+        self.status_bar.set_status(f"Source preset: G{graph_id} N{node_id} P{pop_id}", color="#2196F3")
     def _on_overview_pop_selected(self, graph_id, node_id, pop_id):
         self.tool_stack.setCurrentIndex(1)
         self.graph_editor.select_population_by_ids(graph_id, node_id, pop_id)
