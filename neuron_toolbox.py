@@ -15,7 +15,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 from mpl_toolkits.mplot3d import Axes3D
-from neuron_toolbox import *
 from dataclasses import dataclass, asdict
 import json
 import copy
@@ -3021,6 +3020,37 @@ def plot_graph_3d(graph,
     
     ax.legend()
     plt.show()
+def get_raw_shape_points(tool_type, params):
+    """Erzeugt un-transformierte Punkte am Ursprung basierend auf dem Tool-Typ."""
+    n = params.get('n_neurons', 100)
+    
+    if tool_type == 'CCW':
+        r = params.get('radius', 5.0)
+        # circle3d am Ursprung (m=0), Rotation machen wir später global via transform_points
+        return circle3d(n=n, r=r, m=np.zeros(3), plot=False)
+        
+    elif tool_type == 'Blob':
+        r = params.get('radius', 5.0)
+        return blob_positions(n=n, m=np.zeros(3), r=r, plot=False)
+        
+    elif tool_type == 'Cone':
+        return create_cone(
+            m=np.zeros(3),
+            n=n,
+            inner_radius=params.get('radius_top', 1.0),
+            outer_radius=params.get('radius_bottom', 5.0),
+            height=params.get('height', 10.0),
+            plot=False
+        )
+        
+    elif tool_type == 'Grid':
+        gsl = params.get('grid_side_length', 10)
+        # create_Grid gibt eine Liste von Layern zurück, wir nehmen hier den ersten (flach)
+        layers = create_Grid(m=np.zeros(3), grid_size_list=[gsl], plot=False)
+        return layers[0]
+    
+    return np.array([])
+
 
 class Node:
     def __init__(self,
@@ -3048,10 +3078,12 @@ class Node:
             "displacement_factor": 1.0,
             "field": None,
             "coefficients": None,
-            "population_nest_params": []
+            "population_nest_params": [],
+            "tool_type": "custom"  # Default gesetzt
         }
         
-        self.connections = parameters.get('connections', [])
+        # Falls connections nicht übergeben wurden, leere Liste
+        self.connections = parameters.get('connections', []) if parameters else []
         
         if parameters:
             for k, v in default_params.items():
@@ -3088,11 +3120,11 @@ class Node:
 
         self.old_positions = []
         self.difference_then_now = np.array([0.0, 0.0, 0.0])
-
+        
         if other is not None:
             self.prev.append(other)
             other.next.append(self)
-        self.neuron_models=parameters["neuron_models"]
+        self.neuron_models = self.parameters.get("neuron_models", ["iaf_psc_alpha"])
         self.next = []
         self.function_generator = None
         self.check_function_generator(function_generator, n=self.polynom_max_power)
@@ -3104,11 +3136,12 @@ class Node:
         self.nest_references = {}
         self.spike_detectors = []
         self.spike_generators = []
+        self.recorder_list = []  # Neu: Liste für Tool-spezifische Recorder
 
+    def set_graph_id(self, graph_id=0):
+        self.parameters["graph_id"] = graph_id
+        self.graph_id = graph_id
 
-    def set_graph_id(self,graph_id=0):
-        self.parameters["graph_id"]=graph_id
-        self.graph_id=graph_id
     def check_function_generator(self, func_gen=None, n=5):
         if func_gen is not None:
             self.function_generator = func_gen
@@ -3134,115 +3167,202 @@ class Node:
             new_coeffs = coefficients + learning_rate * mutation
         return new_coeffs
 
-
     def build(self):
-
+        """
+        Berechnet die räumlichen Positionen (self.positions).
+        Trennt Geometrie-Erstellung von NEST-Instanziierung.
+        """
         params = self.parameters
+        tool_type = params.get('tool_type', 'custom')
         
+        # Ziel-Position (Center of Mass)
         target_pos = np.array(params.get('m', [0.0, 0.0, 0.0]))
         
-        if 'old_center_of_mass' in params and params['old_center_of_mass'] is not None:
-            origin_pos = np.array(params['old_center_of_mass'])
-        else:
-            origin_pos = target_pos.copy()
-            params['old_center_of_mass'] = origin_pos.tolist()
-            self.old_center_of_mass = origin_pos
-
-        shift_vector = target_pos - origin_pos
-        
-        print(f"   Building Node {self.id}:")
-        print(f"   Origin (Generation): {origin_pos}")
-        print(f"   Target (Current):    {target_pos}")
-        print(f"   Shift Vector:        {shift_vector}")
-
-        types = params.get('types', [0])
-        num_types = len(types)
-        grid_size = tuple(params.get('grid_size', [1, 1, 1]))
-        
+        # Transformations-Parameter auslesen
         rot_theta = params.get('rot_theta', 0.0)
         rot_phi = params.get('rot_phi', 0.0)
         
+        # Scaling Matrix bauen
         sx = float(params.get('stretch_x', 1.0))
         sy = float(params.get('stretch_y', 1.0))
         sz = float(params.get('stretch_z', 1.0))
         transform_matrix = np.diag([sx, sy, sz])
         self.parameters['transform_matrix'] = transform_matrix.tolist()
 
-        encoded_per_type = params.get("encoded_polynoms_per_type", None)
-        if encoded_per_type:
-            if len(encoded_per_type) != num_types:
-                encoded_per_type = encoded_per_type[:num_types]
-            flow_functions = []
-            for type_polynoms in encoded_per_type:
-                decoded = self.function_generator.decode_multiple(type_polynoms)
-                flow_functions.append(tuple(decoded))
+        # ==========================================
+        # CASE 1: CUSTOM (WFC + Flow Field)
+        # ==========================================
+        if tool_type == 'custom':
+            if 'old_center_of_mass' in params and params['old_center_of_mass'] is not None:
+                origin_pos = np.array(params['old_center_of_mass'])
+            else:
+                origin_pos = target_pos.copy()
+                params['old_center_of_mass'] = origin_pos.tolist()
+            
+            shift_vector = target_pos - origin_pos
+            
+            print(f"   [Custom Build] Node {self.id}: WFC & Flow")
+            
+            # Parameter vorbereiten
+            types = params.get('types', [0])
+            num_types = len(types)
+            grid_size = tuple(params.get('grid_size', [10, 10, 10]))
+            
+            # Polynome dekodieren
+            encoded_per_type = params.get("encoded_polynoms_per_type", None)
+            if encoded_per_type:
+                if len(encoded_per_type) != num_types:
+                    encoded_per_type = encoded_per_type[:num_types]
+                flow_functions = []
+                for type_polynoms in encoded_per_type:
+                    decoded = self.function_generator.decode_multiple(type_polynoms)
+                    flow_functions.append(tuple(decoded))
+            else:
+                flow_functions = [(lambda x,y,z: x, lambda x,y,z: y, lambda x,y,z: z) for _ in range(num_types)]
+            
+            wave_params = params.get('wave_params', {
+                'sparse_holes': params.get('sparse_holes', 0),
+                'sparsity_factor': params.get('sparsity_factor', 0.9),
+                'probability_vector': params.get('probability_vector', [1.0]*num_types)
+            })
+
+            # Berechnung ausführen (cluster_and_flow aus neuron_toolbox)
+            self.positions = cluster_and_flow(
+                grid_size=grid_size,
+                m=origin_pos, 
+                rot_theta=rot_theta,
+                rot_phi=rot_phi,
+                transform_matrix=transform_matrix,
+                wave_params=wave_params,
+                types=types,
+                flow_functions=flow_functions,
+                dt=params.get('dt', 0.01),
+                old=params.get('old', True),
+                num_steps=params.get('num_steps', 8),
+                plot_clusters=False,
+                title=params.get('title', "node")
+            )
+            
+            # Shift anwenden
+            if not np.allclose(shift_vector, 0):
+                self.positions = [cluster + shift_vector for cluster in self.positions]
+
+        # ==========================================
+        # CASE 2: GEOMETRIC SHAPES / TOOLS (CCW, Cone, etc.)
+        # ==========================================
         else:
-            flow_functions = [(lambda x,y,z: x, lambda x,y,z: y, lambda x,y,z: z) 
-                             for _ in range(num_types)]
-        
-        wave_params = params.get('wave_params', {
-            'sparse_holes': params.get('sparse_holes', 0),
-            'sparsity_factor': params.get('sparsity_factor', 0.9),
-            'probability_vector': params.get('probability_vector', [1.0]*num_types)
-        })
+            print(f"   [Shape Build] Node {self.id}: Tool '{tool_type}'")
+            
+            types = params.get('types', [0])
+            num_types = len(types)
+            self.positions = []
+            
+            for i in range(num_types):
+                # 1. Rohdaten am Ursprung holen (get_raw_shape_points muss in neuron_toolbox existieren)
+                raw_points = get_raw_shape_points(tool_type, params)
+                
+                if len(raw_points) == 0:
+                    print("Warning: Shape generation returned 0 points.")
+                    self.positions.append(np.array([]))
+                    continue
 
-        self.positions = cluster_and_flow(
-            grid_size=grid_size,
-            m=origin_pos, 
-            rot_theta=rot_theta,
-            rot_phi=rot_phi,
-            transform_matrix=transform_matrix,
-            wave_params=wave_params,
-            types=types,
-            flow_functions=flow_functions,
-            dt=params.get('dt', 0.01),
-            old=params.get('old', True),
-            num_steps=params.get('num_steps', 8),
-            plot_clusters=params.get('plot_clusters', False),
-            title=params.get('title', "node")
-        )
-        
-        if not np.allclose(shift_vector, 0):
-            print(f"   -> Applying shift {shift_vector} to generated points")
-            self.positions = [cluster + shift_vector for cluster in self.positions]
+                # 2. Transformation anwenden (Rotation, Scaling, Translation zum Target)
+                final_points = transform_points(
+                    raw_points,
+                    m=target_pos,
+                    rot_theta=rot_theta,
+                    rot_phi=rot_phi,
+                    transform_matrix=transform_matrix,
+                    plot=False
+                )
+                self.positions.append(final_points)
 
+        # Cleanup
         self.center_of_mass = target_pos
         self.parameters['m'] = target_pos.tolist()
-        
-        self.old_positions = [c.copy() for c in self.positions]
-        
-        self.parameters['old_center_of_mass'] = self.old_center_of_mass.tolist()
-        self.parameters['m'] = self.center_of_mass.tolist()
-
-        print(f"Node {self.id} built successfully at {self.center_of_mass}")
+        print(f"   ✓ Build complete. Pos: {self.center_of_mass}")
 
     def populate_node(self):
+        """
+        Erstellt die NEST-Neuronen.
+        Holt Parameter dynamisch aus self.parameters basierend auf dem Tool-Typ.
+        """
+        params = self.parameters
+        tool_type = params.get('tool_type', 'custom')
         
-        if not self.positions or all(len(cluster) == 0 for cluster in self.positions):
-            print(f"⚠ Node {self.id} has no populations! Creating placeholder neuron...")
-            
-            placeholder_pos = [self.center_of_mass]
-            
+        # 1. Validierung
+        if not self.positions or all(len(p) == 0 for p in self.positions):
+            # ... (Placeholder Code wie gehabt) ...
+            print(f"⚠ Node {self.id}: No positions. Creating placeholder.")
+            # (gekürzt der Übersicht halber, hier den alten Placeholder code lassen)
             try:
-                placeholder_pop = nest.Create(
-                    "iaf_psc_alpha", 
-                    1,
-                    positions=nest.spatial.free(placeholder_pos)
-                )
-                self.population = [placeholder_pop]
-                print(f"  ✓ Placeholder neuron created at {self.center_of_mass}")
-            except Exception as e:
-                print(f"  ✗ Failed to create placeholder: {e}")
+                placeholder_pos = [self.center_of_mass] if hasattr(self, 'center_of_mass') else [[0.,0.,0.]]
+                self.population = [nest.Create("iaf_psc_alpha", 1, positions=nest.spatial.free(placeholder_pos))]
+                return
+            except:
                 self.population = []
+                return
+
+        # 2. TOOL-LOGIK: CCW Ring
+        if tool_type == 'CCW':
+            print(f"   [Tool] Populating CCW Ring(s) for Node {self.id}")
+            self.population = []
+            self.recorder_list = []
             
-            return
-        
+            current_models = params.get("neuron_models", ["iaf_psc_alpha"])
+            
+            # --- HIER HOLEN WIR DIE NEUEN PARAMETER AUS DEM DICT ---
+            # Standardwerte (Defaults), falls im GUI nichts gesetzt wurde
+            k_val = float(params.get('k', 10.0))
+            bidir = bool(params.get('bidirectional', False))
+            
+            for i, pos_cluster in enumerate(self.positions):
+                if len(pos_cluster) == 0: 
+                    self.population.append(None)
+                    continue
+                
+                model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                
+                try:
+                    # Übergabe an create_CCW mit den Parametern aus dem GUI
+                    ccw_pop = create_CCW(
+                        positions=pos_cluster,
+                        model=model,
+                        plot=False,
+                        k=k_val,                # <--- Dynamisch
+                        bidirectional=bidir     # <--- Dynamisch
+                    )
+                    self.population.append(ccw_pop)
+                    
+                    # Recorder anhängen
+                    rec_data = CCW_spike_recorder(ccw_pop)
+                    self.recorder_list.append(rec_data)
+                    
+                    print(f"     + Created CCW Ring {i}: {len(ccw_pop)} neurons (k={k_val}, bi={bidir})")
+                    
+                except Exception as e:
+                    print(f"     ✗ Failed to create CCW Ring {i}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.population.append(None)
+            
+            return # Stop hier für CCW
+
+        # 3. STANDARD-LOGIK (Custom / Andere Shapes ohne spezielle Verschaltung)
+        current_models = params.get("neuron_models", ["iaf_psc_alpha"])
+        current_nest_params = params.get("population_nest_params", [])
+
+        if len(current_models) < len(self.positions):
+            last_model = current_models[-1] if current_models else "iaf_psc_alpha"
+            current_models.extend([last_model] * (len(self.positions) - len(current_models)))
+
         self.population = clusters_to_neurons(
             self.positions, 
-            self.parameters["neuron_models"],
-            self.population_nest_params
+            current_models,
+            current_nest_params,
+            set_positions=True 
         )
-        print(f"Node {self.id} successfully populated with custom parameters.")
+        print(f"   ✓ Node {self.id} populated in NEST (Standard Mode).")
 
     def add_connection(self, target_node, conn_params):
         self.connections.append({'target': target_node, 'params': conn_params})
@@ -3252,9 +3372,12 @@ class Node:
             target = conn['target']
             params = conn['params']
             for from_pop_idx, from_pop in enumerate(self.population):
+                if not from_pop: continue
                 for to_pop_idx, to_pop in enumerate(target.population):
-                    print(f"Connecting Pop {from_pop_idx} to Target Pop {to_pop_idx} with {params['syn_model']}")
-
+                    if not to_pop: continue
+                    print(f"Connecting Pop {from_pop_idx} to Target Pop {to_pop_idx}")
+                    # Hinweis: Die eigentliche NEST-Verbindung geschieht meist extern via ConnectionExecutor,
+                    # aber diese Methode bleibt für legacy purposes erhalten.
 
     def add_edge_to(self, other):
         if other not in self.next:
@@ -3286,7 +3409,6 @@ class Node:
     def out_degree(self) -> int:
         return len(self.next)
 
-        
     def set_population(self, population):
         self.population = population
     
@@ -3298,6 +3420,7 @@ class Node:
     def __repr__(self):
         return f"Node(id={self.id}, name={self.name}, pos={self.center_of_mass})"
 
+
 def generate_node_parameters_list(n_nodes=5, 
                                    n_types=5, 
                                    vary_polynoms=True,
@@ -3305,7 +3428,10 @@ def generate_node_parameters_list(n_nodes=5,
                                    safe_mode=True,      
                                    max_power=2,
                                    max_coeff=0.8,
-                                 graph_id=0):      
+                                   graph_id=0,
+                                   # Neue Parameter hier hinzufügen:
+                                   add_self_connections=False, 
+                                   self_conn_probability=0.3):      
     
     params_list = []
     
@@ -3349,7 +3475,7 @@ def generate_node_parameters_list(n_nodes=5,
             "probability_vector": probability_vector,
             "name": f"Node_{i}",
             "id": i,
-            "graph_id":graph_id,
+            "graph_id": graph_id,
             "distribution": [],
             "conn_prob": [],
             "polynom_max_power": 5,
@@ -3358,30 +3484,54 @@ def generate_node_parameters_list(n_nodes=5,
             "displacement": np.array([0.0, 0.0, 0.0]),
             "displacement_factor": 1.0,
             "field": None,
+            "connections": [] # Wichtig: Leere Liste initialisieren
         }
+
+        # --- NEUE LOGIK START ---
+        if add_self_connections and np.random.random() < self_conn_probability:
+            for pop_id in range(node_n_types):
+                self_conn = {
+                    'id': len(params['connections']) + 1,
+                    'name': f'SelfConn_N{i}_P{pop_id}',
+                    'source': {
+                        'graph_id': graph_id,
+                        'node_id': i,
+                        'pop_id': pop_id
+                    },
+                    'target': {
+                        'graph_id': graph_id,
+                        'node_id': i, 
+                        'pop_id': pop_id
+                    },
+                    'params': {
+                        'rule': 'fixed_indegree',
+                        'indegree': np.random.randint(1, 5),
+                        'synapse_model': 'static_synapse',
+                        'weight': np.random.uniform(0.5, 2.0),
+                        'delay': 1.0,
+                        'allow_autapses': False,  
+                        'allow_multapses': True
+                    }
+                }
+                params['connections'].append(self_conn)
+        # --- NEUE LOGIK ENDE ---
         
         if vary_polynoms:
             encoded_polynoms = []
-            
             for type_idx in range(node_n_types): 
                 type_polynoms = []
-                
-                for coord in range(3):  # x, y, z
+                for coord in range(3):
                     num_terms = np.random.randint(2, 5)
-                    
                     indices = []
                     coeffs = []
-                    
                     for _ in range(num_terms):
                         idx = np.random.choice([0, 1, 2])
-                        
                         if safe_mode:
                             power = np.random.choice(range(min(max_power + 1, 4)))
                             coeff = np.random.uniform(-max_coeff, max_coeff)
                         else:
                             power = np.random.choice([0, 1, 2, 3])
                             coeff = np.random.randn() * 0.5
-                        
                         indices.append([idx, power])
                         coeffs.append(float(coeff))
                     
@@ -3392,12 +3542,9 @@ def generate_node_parameters_list(n_nodes=5,
                         'decay': 0.5
                     }
                     type_polynoms.append(poly_encoded)
-                
                 encoded_polynoms.append(type_polynoms)
-            
             params["encoded_polynoms_per_type"] = encoded_polynoms
         else:
-            # Identity polynoms
             identity_polynoms = []
             for type_idx in range(node_n_types):
                 type_polynoms = [
@@ -3406,7 +3553,6 @@ def generate_node_parameters_list(n_nodes=5,
                     {'indices': [[2, 1]], 'coefficients': [1.0], 'n': 5, 'decay': 0.5}
                 ]
                 identity_polynoms.append(type_polynoms)
-            
             params["encoded_polynoms_per_type"] = identity_polynoms
         
         params_list.append(params)
@@ -3706,3 +3852,71 @@ def graphInfo(graph, figsize_per_plot=(5, 4), marker_size=10, alpha=0.6, linewid
 
 
 
+# --- neuron_toolbox.py Erweiterung ---
+
+def get_ccw_topology(node_id, pop_id, num_neurons, weight=10.0, delay=1.0):
+    """
+    Generiert eine Liste von Verbindungs-Dicts für eine Ring-Topologie.
+    Verbindet Neuron i mit (i+1).
+    """
+    connections = []
+    
+    # Wir nutzen hier einen Trick: Wir erstellen explizite one_to_one Verbindungen
+    # Da NEST keine native "Ring-Regel" hat, müssen wir das im Executor 
+    # oder hier handhaben. 
+    # Um die GUI nicht mit N Verbindungen zu fluten, definieren wir eine
+    # "Special Rule", die der Executor verstehen muss, ODER wir nutzen 
+    # 'pairwise_bernoulli' mit Distanzabhängigkeit (teuer).
+    
+    # BESSER: Wir geben eine Connection zurück, die der Executor als "Custom Topology" erkennt.
+    # Aber für jetzt simulieren wir es als eine Connection mit speziellen Parametern.
+    
+    conn = {
+        'id': 0, # Wird vom System vergeben
+        'name': f'CCW_Ring_{node_id}',
+        'source': {'graph_id': 0, 'node_id': node_id, 'pop_id': pop_id}, # graph_id wird dynamisch gesetzt
+        'target': {'graph_id': 0, 'node_id': node_id, 'pop_id': pop_id},
+        'params': {
+            'rule': 'fixed_outdegree', # Fallback, eigentlich brauchen wir hier Logik
+            'outdegree': 1,
+            'synapse_model': 'static_synapse',
+            'weight': weight,
+            'delay': delay,
+            'topology_type': 'ring_ccw' # <--- NEU: Marker für spezielle Topologie
+        }
+    }
+    return [conn]
+
+def get_shape_positions(tool_type, params):
+    """
+    Zentrale Funktion zur Berechnung der Koordinaten basierend auf dem Tool-Typ.
+    """
+    center = np.array(params.get('m', [0,0,0]))
+    
+    if tool_type == 'CCW':
+        # Parameter: n (Anzahl), r (Radius)
+        n = params.get('n_neurons', 100)
+        r = params.get('radius', 5.0)
+        return circle3d(n=n, r=r, m=center, plot=False)
+        
+    elif tool_type == 'Blob':
+        n = params.get('n_neurons', 100)
+        return blob_positions(n=n, m=center, r=params.get('radius', 5.0), plot=False)
+        
+    elif tool_type == 'Cone':
+        return create_cone(
+            m=center,
+            n=params.get('n_neurons', 100),
+            inner_radius=params.get('radius_top', 1.0),
+            outer_radius=params.get('radius_bottom', 5.0),
+            height=params.get('height', 10.0),
+            plot=False
+        )
+        
+    elif tool_type == 'Grid':
+        # Beispiel: Flaches Grid
+        gsl = params.get('grid_side_length', 10)
+        layers = create_Grid(m=center, grid_size_list=[gsl], plot=False)
+        return layers[0] # Erste Ebene
+        
+    return np.array([]) # Fallback
