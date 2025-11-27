@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QFileDialog
 )
 import WidgetLib
-
+import pyqtgraph.dockarea as dock
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt
 import numpy as np
@@ -249,7 +249,6 @@ def create_graph_from_widget(graph_id):
     return graph
 
 
-#  PLACEHOLDER WIDGET 
 class Color(QWidget):
     """Simple colored placeholder widget."""
     def __init__(self, color):
@@ -262,9 +261,7 @@ def get_neuron_color(model_name):
         return neuron_colors.get(model_name, neuron_colors['default'])
 
 
-#  STATUS BAR WIDGET 
 class StatusBarWidget(QWidget):
-    """Professional status bar with text + progress bar"""
     def __init__(self):
         super().__init__()
         self.setup_ui()
@@ -283,7 +280,6 @@ class StatusBarWidget(QWidget):
             }
         """)
         
-        # Progress Bar (right)
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximumWidth(200)
         self.progress_bar.setMaximumHeight(20)
@@ -355,10 +351,10 @@ class MainWindow(QMainWindow):
         self.resize(1920, 1080)
         self.active_graphs = {}
         self.structural_plasticity_enabled = True 
+        
         self.create_menubar()
         self.setup_ui()
         self.graph_builder.polynom_manager.polynomialsChanged.connect(self.rebuild_node_with_new_polynomials)
-
 
 
 
@@ -451,11 +447,11 @@ class MainWindow(QMainWindow):
                 nest.EnableStructuralPlasticity()
             
             self.active_graphs.clear()
-            
+            if hasattr(self, 'simulation_view') and self.simulation_view:
+                self.simulation_view._initialized = False
             if hasattr(self, 'graph_builder'):
                 self.graph_builder.reset()
             
-            # Graph Editor
             if hasattr(self, 'graph_editor'):
                 self.graph_editor.current_graph = None
                 self.graph_editor.current_graph_id = None
@@ -464,7 +460,6 @@ class MainWindow(QMainWindow):
                 self.graph_editor.graph_name_input.clear()
                 self.graph_editor.refresh_graph_list()
                 
-                # Leere Layouts
                 while self.graph_editor.node_list_layout.count():
                     item = self.graph_editor.node_list_layout.takeAt(0)
                     if item.widget(): item.widget().deleteLater()
@@ -472,7 +467,6 @@ class MainWindow(QMainWindow):
                     item = self.graph_editor.pop_list_layout.takeAt(0)
                     if item.widget(): item.widget().deleteLater()
             
-            # Connection Tool
             if hasattr(self, 'connection_tool'):
                 self.connection_tool.connections.clear()
                 self.connection_tool.next_conn_id = 0
@@ -484,7 +478,6 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'graph_overview'):
                 self.graph_overview.update_tree()
                 
-            # Simulation Widget reset
             if hasattr(self, 'blink_widget'):
                 self.blink_widget.build_scene() 
             
@@ -564,10 +557,8 @@ class MainWindow(QMainWindow):
     
     def on_graph_created(self, graph):
 
-        # Add to graphs dict
         self.graphs[graph.graph_id] = graph
         
-        # Update connection tool
         if hasattr(self, 'connection_tool'):
             self.connection_tool.set_graphs(self.graphs)
     
@@ -579,7 +570,6 @@ class MainWindow(QMainWindow):
         if graph_id in self.graphs:
             del self.graphs[graph_id]
         
-        # Update connection tool
         if hasattr(self, 'connection_tool'):
             self.connection_tool.set_graphs(self.graphs)
     
@@ -617,7 +607,7 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            self.status_bar.set_status("🔄 Resetting NEST...", color="#1976D2")
+            self.status_bar.set_status("Resetting NEST...", color="#1976D2")
             self.status_bar.set_progress(0)
             QApplication.processEvents()
             
@@ -626,13 +616,11 @@ class MainWindow(QMainWindow):
             self.status_bar.set_progress(30)
             QApplication.processEvents()
             
-            # Re-apply plasticity setting
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
             else:
                 nest.DisableStructuralPlasticity()
             
-            # Repopulate all
             if graph_list:
                 total_graphs = len(graph_list)
                 for i, graph in enumerate(graph_list):
@@ -720,7 +708,118 @@ class MainWindow(QMainWindow):
 
 
     def setup_ui(self):
-        main_layout = QVBoxLayout()
+        central_widget = QWidget()
+        central_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setCentralWidget(central_widget)
+
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        switch_bar = QWidget()
+        switch_bar.setStyleSheet("background-color: #1a1a1a; border-bottom: 2px solid #333;")
+        switch_bar.setFixedHeight(50) 
+        switch_layout = QHBoxLayout(switch_bar)
+        switch_layout.setContentsMargins(10, 5, 10, 5)
+        switch_layout.setSpacing(10)
+        
+        self.view_switch_style_active = """
+            QPushButton {
+                background-color: #2196F3; color: white; font-weight: bold;
+                border: none; border-radius: 4px; padding: 10px 40px; font-size: 14px;
+            }
+            QPushButton:hover { background-color: #42A5F5; }
+        """
+        self.view_switch_style_inactive = """
+            QPushButton {
+                background-color: #333; color: #aaa; font-weight: bold;
+                border: 1px solid #555; border-radius: 4px; padding: 10px 40px; font-size: 14px;
+            }
+            QPushButton:hover { background-color: #444; color: white; }
+        """
+        
+        self.btn_view_editor = QPushButton(" EDITOR")
+        self.btn_view_simulation = QPushButton(" SIMULATION")
+        self.btn_view_data = QPushButton(" DATA")
+        
+        self.btn_view_editor.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_view_simulation.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_view_data.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.btn_view_editor.setStyleSheet(self.view_switch_style_active)
+        self.btn_view_simulation.setStyleSheet(self.view_switch_style_inactive)
+        self.btn_view_data.setStyleSheet(self.view_switch_style_inactive)
+
+        self.btn_view_editor.clicked.connect(lambda: self._switch_main_view(0))
+        self.btn_view_simulation.clicked.connect(lambda: self._switch_main_view(1))
+        self.btn_view_data.clicked.connect(lambda: self._switch_main_view(2))
+        
+        self.view_buttons = [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data]
+        
+        switch_layout.addWidget(self.btn_view_editor)
+        switch_layout.addWidget(self.btn_view_simulation)
+        switch_layout.addWidget(self.btn_view_data)
+        switch_layout.addStretch()
+        
+        lbl_title = QLabel("NEUROTICKS")
+        lbl_title.setStyleSheet("color: #666; font-weight: bold; font-size: 12px; letter-spacing: 3px;")
+        switch_layout.addWidget(lbl_title)
+        
+        main_layout.addWidget(switch_bar)
+        
+        self.main_stack = QStackedWidget()
+        self.main_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) 
+        
+        self.editor_widget = self._create_editor_widget()
+        self.main_stack.addWidget(self.editor_widget)
+        
+        self.simulation_view = SimulationViewWidget(graph_list, self)
+        self.main_stack.addWidget(self.simulation_view)
+        
+        self.data_view = self._create_data_view()
+        self.main_stack.addWidget(self.data_view)
+        
+        main_layout.addWidget(self.main_stack)
+        
+        self.update_visualizations()
+    
+    def _create_data_view(self):
+        self.data_dashboard = AnalysisDashboard(graph_list) 
+        return self.data_dashboard
+    
+    def _switch_main_view(self, index):
+        old_index = self.main_stack.currentIndex()
+        
+        if old_index == 1:
+            print("Switched away from Simulation: Forcing GL Cleanup...")
+            self.simulation_view.sim_running = False
+            self.simulation_view.timer.stop()
+            
+            if hasattr(self.simulation_view, 'cleanup_gl_context'):
+                self.simulation_view.cleanup_gl_context()
+            
+            QApplication.processEvents()
+        
+        self.main_stack.setCurrentIndex(index)
+        
+        for i, btn in enumerate(self.view_buttons):
+            if i == index:
+                btn.setStyleSheet(self.view_switch_style_active)
+            else:
+                btn.setStyleSheet(self.view_switch_style_inactive)
+        
+        if index == 1:
+            self.simulation_view.on_activated()
+    
+    
+
+
+
+    def _create_editor_widget(self):
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
         
         # Top section (60%)
         top_layout = QHBoxLayout()
@@ -738,15 +837,10 @@ class MainWindow(QMainWindow):
         bottom_layout.addLayout(bottom_right, 3)
         
         # Assemble
-        main_layout.addLayout(top_layout, 3)
-        main_layout.addLayout(bottom_layout, 2)
+        editor_layout.addLayout(top_layout, 3)
+        editor_layout.addLayout(bottom_layout, 2)
         
-        widget = QWidget()
-        widget.setLayout(main_layout)
-        self.setCentralWidget(widget)
-        
-        # Initial plot
-        self.update_visualizations()
+        return editor
     
     def create_top_left(self):
         """Visualization area with scene selector."""
@@ -856,7 +950,6 @@ class MainWindow(QMainWindow):
         self.vis_stack.addWidget(self.flow_widget)  
         self.sim_dashboard = SimulationDashboardWidget(graph_list)
         self.sim_dashboard.requestStartSimulation.connect(self.run_nest_simulation)
-        self.sim_dashboard.requestOpenSpectator.connect(self.open_live_spectator)
         
         self.vis_stack.addWidget(self.sim_dashboard)       
         self.vis_stack.addWidget(Color("darkorange"))      
@@ -976,7 +1069,7 @@ class MainWindow(QMainWindow):
         
         # Index 4: Tools
         self.tools_widget = ToolsWidget()
-        self.tools_widget.update_graphs(graph_list) # <--- HINZUFÜGEN/SICHERSTELLEN
+        self.tools_widget.update_graphs(graph_list)
         self.tool_stack.addWidget(self.tools_widget)        
         self.status_bar = StatusBarWidget()
         
@@ -1065,28 +1158,70 @@ class MainWindow(QMainWindow):
         try:
             vtk.vtkObject.GlobalWarningDisplayOff()
             
-            if hasattr(self, 'blink_widget'):
-                self.blink_widget.timer.stop()
+            if hasattr(self, 'simulation_view') and self.simulation_view:
+                self.simulation_view.sim_running = False
+                if hasattr(self.simulation_view, 'timer'):
+                    self.simulation_view.timer.stop()
+            
+            if hasattr(self, 'blink_widget') and self.blink_widget:
                 self.blink_widget.is_active = False
                 self.blink_widget.simulation_running = False
+                if hasattr(self.blink_widget, 'timer'):
+                    self.blink_widget.timer.stop()
             
             if hasattr(self, 'vis_stack'):
                 for i in range(self.vis_stack.count()):
                     widget = self.vis_stack.widget(i)
-                    if hasattr(widget, 'close'):
-                        widget.close()
-                    elif hasattr(widget, 'plotter') and hasattr(widget.plotter, 'close'):
-                        widget.plotter.close()
+                    if widget:
+                        if hasattr(widget, 'timer'):
+                            widget.timer.stop()
+                        if hasattr(widget, 'plotter'):
+                            try:
+                                widget.plotter.close()
+                            except:
+                                pass
 
-            if hasattr(self, 'neuron_plotter'):
-                self.neuron_plotter.close()
-            if hasattr(self, 'graph_plotter'):
-                self.graph_plotter.close()
-                
+            for plotter_name in ['neuron_plotter', 'graph_plotter']:
+                if hasattr(self, plotter_name):
+                    plotter = getattr(self, plotter_name)
+                    if plotter:
+                        try:
+                            plotter.close()
+                        except:
+                            pass
+            
+            if hasattr(self, 'blink_widget') and self.blink_widget:
+                if hasattr(self.blink_widget, 'plotter'):
+                    try:
+                        self.blink_widget.plotter.close()
+                    except:
+                        pass
+                        
         except Exception as e:
             print(f"Cleanup error (harmless on exit): {e}")
         
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(50, self._update_plotters_after_resize)
+    
+    def _update_plotters_after_resize(self):
+        try:
+            for plotter_name in ['neuron_plotter', 'graph_plotter']:
+                if hasattr(self, plotter_name):
+                    plotter = getattr(self, plotter_name)
+                    if plotter and hasattr(plotter, 'render_window') and plotter.render_window:
+                        plotter.update()
+            
+            if hasattr(self, 'blink_widget') and self.blink_widget:
+                if hasattr(self.blink_widget, 'plotter'):
+                    if self.blink_widget.plotter and self.blink_widget.plotter.render_window:
+                        self.blink_widget.plotter.update()
+        except:
+            pass
 
 
 
@@ -1559,16 +1694,15 @@ class MainWindow(QMainWindow):
             self.tooltip_actor.SetVisibility(False)
         
         interactor.Render()
+
+
+
     def open_live_spectator(self):
-        """Öffnet das Spectator Fenster mit Live-Simulation."""
-        # Übergebe die globale graph_list als erstes Argument, self als Parent
-        self.spectator_window = LiveSpectatorWindow(graph_list, self)
-        self.spectator_window.show()
+
+        self._switch_main_view(1)
 
     def run_nest_simulation(self, duration):
-        """
-        Führt die tatsächliche Simulation aus.
-        """
+
         print(f"\n>>> STARTING SIMULATION (Duration: {duration} ms) <<<")
         self.status_bar.set_status("Running Simulation...", color="#FF9800")
         self.status_bar.set_progress(0) # Indeterminate
@@ -1585,12 +1719,10 @@ class MainWindow(QMainWindow):
             
             self.status_bar.show_success(f"Simulation completed in {elapsed:.2f}s!")
             
-            # 2. Results Button aktivieren
+
             self.sim_dashboard.btn_results.setEnabled(True)
-            self.sim_dashboard.btn_results.setText("📊 Show Results")
-            
-            # Optional: Auto-Open Results
-            # self.open_results_view() 
+            self.sim_dashboard.btn_results.setText("Show Results")
+
             
         except Exception as e:
             self.status_bar.show_error(f"Simulation failed: {e}")
@@ -1744,15 +1876,31 @@ class MainWindow(QMainWindow):
                 for graph in graph_list:
                     nodes_data = []
                     for node in graph.node_list:
+                        
+                        cleaned_devices = []
+                        if hasattr(node, 'devices'):
+                            for dev in node.devices:
+                                dev_copy = dev.copy()
+                                if 'runtime_gid' in dev_copy:
+                                    del dev_copy['runtime_gid']
+                                if 'params' in dev_copy:
+                                    dev_copy['params'] = _clean_params(dev_copy['params'])
+                                cleaned_devices.append(dev_copy)
+
+                        safe_params = node.parameters.copy() if hasattr(node, 'parameters') else {}
+                        if 'devices' in safe_params:
+                            del safe_params['devices']
+
                         node_data = {
                             'id': node.id,
                             'name': node.name,
                             'graph_id': graph.graph_id,
-                            'parameters': _clean_params(node.parameters),
+                            'parameters': _clean_params(safe_params),
                             'positions': [pos.tolist() if isinstance(pos, np.ndarray) else list(pos) 
                                           for pos in node.positions] if node.positions else [],
                             'center_of_mass': list(node.center_of_mass),
-                            'connections': _serialize_connections(node.connections)
+                            'connections': _serialize_connections(node.connections),
+                            'devices': cleaned_devices
                         }
                         nodes_data.append(node_data)
 
@@ -1830,6 +1978,10 @@ class MainWindow(QMainWindow):
                     params['graph_id'] = nd['graph_id']
                     params['connections'] = nd.get('connections', [])
                     
+
+                    if 'devices' in nd:
+                        params['devices'] = nd['devices']
+                    
                     if 'center_of_mass' in nd:
                         params['center_of_mass'] = np.array(nd['center_of_mass'])
                     
@@ -1850,6 +2002,7 @@ class MainWindow(QMainWindow):
 
             if hasattr(self, 'tools_widget'):
                 self.tools_widget.update_graphs(graph_list)
+                
             self.status_bar.set_status("Recreating Connections...")
             self.status_bar.set_progress(80)
             QApplication.processEvents()
@@ -1878,6 +2031,10 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Load Error", str(e))
+
+
+
+
     def merge_graphs_dialog(self):
         
         filepath, _ = QFileDialog.getOpenFileName(
@@ -1945,7 +2102,7 @@ class MainWindow(QMainWindow):
             total_connections = 0
 
             for i, g_data in enumerate(graphs_to_load):
-                self.status_bar.set_status(f"📥 Building Graph {i+1}/{total_graphs}...")
+                self.status_bar.set_status(f"Building Graph {i+1}/{total_graphs}...")
                 self.status_bar.set_progress(20 + int(50 * (i / total_graphs)))
                 QApplication.processEvents()
 
@@ -2177,19 +2334,8 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
-
     app = QApplication(sys.argv)
     apply_dark_mode(app)
     window = MainWindow()
-    window.show()
-    app.exec()
-    
-    params = generate_node_parameters_list(
-        n_nodes=3,
-        n_types=2,
-        graph_id=0,
-        add_self_connections=True,
-        self_conn_probability=1.0
-    )
-    
-  
+    window.showMaximized()
+    sys.exit(app.exec())
