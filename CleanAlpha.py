@@ -4,6 +4,8 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
     QGridLayout, QFileDialog
 )
+import WidgetLib
+
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt
 import numpy as np
@@ -13,7 +15,7 @@ from pyvistaqt import QtInteractor
 from neuron_toolbox import *
 
 from WidgetLib import *
-from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder,BlinkingNetworkWidget,FlowFieldWidget
+from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder,BlinkingNetworkWidget,FlowFieldWidget,StructuresWidget
 import re
 import shutil
 from datetime import datetime
@@ -21,7 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import vtk
 nest.EnableStructuralPlasticity()
-
+nest.set_verbosity("M_ERROR")
 
 
 def apply_dark_mode(app):
@@ -149,10 +151,8 @@ def apply_dark_mode(app):
 
 
 
-#  GLOBAL STATE 
 graph_list = []
 
-#  NEURON COLORS 
 
 neuron_colors = {
     'iaf_psc_alpha':            '#00FF88', 
@@ -190,7 +190,6 @@ neuron_colors = {
     'pp_psc_delta':             '#FF0066',
     'siegert_neuron':           '#00FFCC',
 
-    #  Fallback 
     'parrot_neuron':            '#888888',  
     'parrot_neuron_ps':         '#666666',
     'mcculloch_pitts_neuron':   '#444444',
@@ -199,7 +198,6 @@ neuron_colors = {
 }
 
 
-#  CONVERTER 
 def convert_widget_to_graph_format(graph_id):
     global graph_parameters
     
@@ -220,7 +218,6 @@ def convert_widget_to_graph_format(graph_id):
 
 
 def create_graph_from_widget(graph_id):
-    """Creates Graph object from graph_parameters."""
     global graph_list
     
     converted = convert_widget_to_graph_format(graph_id)
@@ -437,15 +434,14 @@ class MainWindow(QMainWindow):
         self.reset_application()
 
     def reset_application(self):
-        """Setzt die gesamte Applikation auf den Anfangszustand zurück."""
-        self.status_bar.set_status("🧹 Cleaning up for new project...", color="#FF5722")
+        self.status_bar.set_status("Cleaning up for new project...", color="#FF5722")
         QApplication.processEvents()
         
         try:
             global graph_list
             graph_list.clear()
-            
-            import WidgetLib
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
             WidgetLib.graph_parameters.clear()
             WidgetLib.next_graph_id = 0
             
@@ -464,7 +460,7 @@ class MainWindow(QMainWindow):
                 self.graph_editor.current_graph = None
                 self.graph_editor.current_graph_id = None
                 self.graph_editor.node_list.clear()
-                # UI leeren
+
                 self.graph_editor.graph_name_input.clear()
                 self.graph_editor.refresh_graph_list()
                 
@@ -485,7 +481,6 @@ class MainWindow(QMainWindow):
             
             self.update_visualizations()
             
-            # Overview Tree leeren
             if hasattr(self, 'graph_overview'):
                 self.graph_overview.update_tree()
                 
@@ -777,6 +772,7 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
                 text-align: left;
                 padding-left: 15px;
+                min-height: 40px;
             }
             QPushButton:hover { background-color: #555; border-left: 4px solid #2196F3; }
             QPushButton:checked { background-color: #666; border-left: 4px solid #2196F3; }
@@ -784,18 +780,23 @@ class MainWindow(QMainWindow):
         
         btn_neurons = QPushButton("Neurons")
         btn_graph = QPushButton("Graph")
-        btn_sim = QPushButton("Firing Patterns")
-        btn_flow = QPushButton("Positional Flowfield") # ✅ NEW BUTTON
-        btn_other = QPushButton("Other")
         
-        # Slider setup (same as before)
-        slider_container = QWidget()
-        slider_layout = QVBoxLayout(slider_container)
-        slider_layout.setContentsMargins(5, 10, 5, 5)
+        self.firing_patterns_container = QWidget()
+        fp_layout = QVBoxLayout(self.firing_patterns_container)
+        fp_layout.setContentsMargins(0, 0, 0, 0)
+        fp_layout.setSpacing(0)
+        
+        btn_sim = QPushButton("Firing Patterns")
+        
+        self.slider_wrapper = QWidget()
+        self.slider_wrapper.setStyleSheet("background-color: #3a3a3a; border-left: 4px solid #FFD700;")
+        self.slider_wrapper.setVisible(False)
+        slider_layout = QVBoxLayout(self.slider_wrapper)
+        slider_layout.setContentsMargins(10, 5, 10, 10)
         
         lbl_slider = QLabel("Edge Opacity")
-        lbl_slider.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold;")
-        lbl_slider.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_slider.setStyleSheet("color: #ddd; font-size: 10px; font-weight: normal; border: none;")
+        lbl_slider.setAlignment(Qt.AlignmentFlag.AlignLeft)
         
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(0, 100)
@@ -803,7 +804,7 @@ class MainWindow(QMainWindow):
         self.opacity_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 4px;
-                background: #444;
+                background: #555;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal {
@@ -818,37 +819,61 @@ class MainWindow(QMainWindow):
         
         slider_layout.addWidget(lbl_slider)
         slider_layout.addWidget(self.opacity_slider)
-
-        # Add all buttons to layout
-        for btn in [btn_neurons, btn_graph, btn_sim, btn_flow, btn_other]:
+        
+        fp_layout.addWidget(btn_sim)
+        fp_layout.addWidget(self.slider_wrapper)
+        
+        btn_flow = QPushButton("Positional Flowfield")
+        btn_simulation = QPushButton("Simulation")
+        btn_other = QPushButton("Other")
+        
+        for btn in [btn_neurons, btn_graph, btn_flow, btn_simulation, btn_other]:
             btn.setStyleSheet(nav_style)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            scene_layout.addWidget(btn)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        btn_sim.setStyleSheet(nav_style)
+        
+        scene_layout.addWidget(btn_neurons)
+        scene_layout.addWidget(btn_graph)
+        scene_layout.addWidget(self.firing_patterns_container) 
+        scene_layout.addWidget(btn_flow)
+        scene_layout.addWidget(btn_simulation)
+        scene_layout.addWidget(btn_other)
             
         scene_layout.addStretch()
-        scene_layout.addWidget(slider_container)
         scene_menu.setLayout(scene_layout)
         
-        # === STACK SETUP ===
         self.vis_stack = QStackedWidget()
         
         self.neuron_plotter = self.create_neuron_visualization()
         self.graph_plotter = self.create_graph_visualization()
         self.blink_widget = BlinkingNetworkWidget(graph_list)
-        self.flow_widget = FlowFieldWidget(graph_list) # ✅ NEW WIDGET INSTANCE
-
-        self.vis_stack.addWidget(self.neuron_plotter)  # 0
-        self.vis_stack.addWidget(self.graph_plotter)   # 1
-        self.vis_stack.addWidget(self.blink_widget)    # 2
-        self.vis_stack.addWidget(self.flow_widget)     # 3 (Positional Flowfield)
-        self.vis_stack.addWidget(Color("darkorange"))  # 4 (Other)
+        self.flow_widget = FlowFieldWidget(graph_list)
         
-        # === SIGNALS ===
+        self.vis_stack.addWidget(self.neuron_plotter)      
+        self.vis_stack.addWidget(self.graph_plotter)       
+        self.vis_stack.addWidget(self.blink_widget)        
+        self.vis_stack.addWidget(self.flow_widget)  
+        self.sim_dashboard = SimulationDashboardWidget(graph_list)
+        self.sim_dashboard.requestStartSimulation.connect(self.run_nest_simulation)
+        self.sim_dashboard.requestOpenSpectator.connect(self.open_live_spectator)
+        
+        self.vis_stack.addWidget(self.sim_dashboard)       
+        self.vis_stack.addWidget(Color("darkorange"))      
+        
+        self.nav_buttons = [btn_neurons, btn_graph, btn_sim, btn_flow, btn_simulation, btn_other]
+        
         btn_neurons.clicked.connect(lambda: self._switch_view(0))
         btn_graph.clicked.connect(lambda: self._switch_view(1))
         btn_sim.clicked.connect(lambda: self._switch_view(2, sim_mode=True))
-        btn_flow.clicked.connect(lambda: self._switch_view(3)) # ✅ NEW SIGNAL
-        btn_other.clicked.connect(lambda: self._switch_view(4))
+        btn_flow.clicked.connect(lambda: self._switch_view(3))
+        btn_simulation.clicked.connect(lambda: self._switch_view(4))
+        btn_other.clicked.connect(lambda: self._switch_view(5))
+        
+        for btn in self.nav_buttons:
+            btn.setCheckable(True)
+        
+        btn_neurons.setChecked(True)
         
         layout.addWidget(scene_menu, 1)
         layout.addWidget(self.vis_stack, 9)
@@ -857,9 +882,17 @@ class MainWindow(QMainWindow):
     
     def _switch_view(self, index, sim_mode=False):
         """Switches view and controls simulation state."""
+        
         self.vis_stack.setCurrentIndex(index)
         
-        # 1. Simulation Logic (Index 2)
+        if index == 2:
+            self.slider_wrapper.setVisible(True)
+        else:
+            self.slider_wrapper.setVisible(False)
+            
+        for i, btn in enumerate(self.nav_buttons):
+            btn.setChecked(i == index)
+        
         if index == 2: 
             self.blink_widget.build_scene()
             if sim_mode:
@@ -869,10 +902,17 @@ class MainWindow(QMainWindow):
         else:
             self.blink_widget.stop_simulation()
             
-        # 2. FlowField Logic (Index 3) - ✅ NEW
         if index == 3:
             if hasattr(self, 'flow_widget'):
+                if self.flow_widget.target_node_id is None and graph_list:
+                    first_graph = graph_list[0]
+                    if first_graph.node_list:
+                        first_node = first_graph.node_list[0]
+                        self.flow_widget.set_target_node(first_graph.graph_id, first_node.id)
+                
                 self.flow_widget.build_scene()
+        if index == 4:
+            self.sim_dashboard.refresh_data()
 
     def create_neuron_visualization(self):
         plotter = QtInteractor(self)
@@ -892,8 +932,10 @@ class MainWindow(QMainWindow):
         plotter.add_axes()
         return plotter
     def on_graph_updated(self, graph_id):
-        if graph_id == -1:  # Delete wurde ausgeführt
+        if graph_id == -1: 
             self.status_bar.set_status("Graph deleted, refreshing...", color="#1976D2")
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
         else:
             print(f"Graph {graph_id} updated, refreshing...")
             self.status_bar.set_status(f"Graph {graph_id} updated, refreshing...", color="#1976D2")
@@ -927,13 +969,15 @@ class MainWindow(QMainWindow):
         self.connection_tool = ConnectionTool(graph_list)        
         self.tool_stack.addWidget(self.connection_tool)
         
-        # Index 3: Structures (Platzhalter)
-        self.tool_stack.addWidget(Color("purple"))
+        # Index 3: Structures 
+        self.structures_widget = StructuresWidget()
+        self.structures_widget.structureSelected.connect(self.on_structure_selected)
+        self.tool_stack.addWidget(self.structures_widget)
         
-        # Index 4: TOOLS (Neu)
-        self.tools_widget = ToolsWidget() # Klasse aus WidgetLib
-        self.tool_stack.addWidget(self.tools_widget)
-        
+        # Index 4: Tools
+        self.tools_widget = ToolsWidget()
+        self.tools_widget.update_graphs(graph_list) # <--- HINZUFÜGEN/SICHERSTELLEN
+        self.tool_stack.addWidget(self.tools_widget)        
         self.status_bar = StatusBarWidget()
         
         layout.addWidget(self.tool_stack, 9)
@@ -943,41 +987,80 @@ class MainWindow(QMainWindow):
         self.graph_overview.population_selected.connect(self._on_overview_pop_selected)
         self.graph_overview.connection_selected.connect(self._on_overview_conn_selected)
         self.graph_overview.requestConnectionCreation.connect(self.open_connection_tool_for_node)
-
+        self.graph_overview.requestConnectionDeletion.connect(self.delete_connection_wrapper)
         return layout
+    
 
+
+
+    def delete_connection_wrapper(self, conn_data):
+        from PyQt6.QtWidgets import QMessageBox
+        
+        name = conn_data.get('name', 'Connection')
+        reply = QMessageBox.question(
+            self, 
+            "Delete Connection", 
+            f"Are you sure you want to delete '{name}'?\n\nThis will trigger a graph rebuild.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.tool_stack.setCurrentIndex(1) 
+            self.graph_editor.delete_connection_by_data(conn_data)
+            self.status_bar.show_success(f"Connection '{name}' deleted.")
+            self.update_visualizations()
 
     def _on_overview_node_selected(self, graph_id, node_id):
+        """Handle node selection from tree view."""
+        
         self.tool_stack.setCurrentIndex(1) 
         self.graph_editor.select_node_by_id(graph_id, node_id)
-    def open_connection_tool_for_node(self, graph_id, node_id, pop_id=0):
-        """
-        Callback für Rechtsklick im GraphOverview.
-        Öffnet das Connection Tool und setzt Graph, Node und Population als Source.
-        """
-        print(f"🔗 Context Menu Action: Setting Source to Graph {graph_id}, Node {node_id}, Pop {pop_id}")
         
-        # 1. Zum Connection Tool wechseln (Index 2 im Tool Stack)
+        if hasattr(self, 'flow_widget'):
+            self.flow_widget.set_target_node(graph_id, node_id)
+    def open_connection_tool_for_node(self, graph_id, node_id, pop_id=0):
+
+        print(f"Context Menu Action: Setting Source to Graph {graph_id}, Node {node_id}, Pop {pop_id}")
+        
         self.tool_stack.setCurrentIndex(2)
         
-        # 2. Liste refreshen (sicherstellen, dass Comboboxen aktuell sind)
         self.connection_tool.refresh()
         
-        # 3. Source setzen (jetzt existiert die Methode!)
         self.connection_tool.set_source(graph_id, node_id, pop_id)
         
-        # 4. Status Feedback
         self.status_bar.set_status(f"Source preset: G{graph_id} N{node_id} P{pop_id}", color="#2196F3")
+
+
+
+
+
     def _on_overview_pop_selected(self, graph_id, node_id, pop_id):
         self.tool_stack.setCurrentIndex(1)
         self.graph_editor.select_population_by_ids(graph_id, node_id, pop_id)
 
+
+
+
+
     def _on_overview_conn_selected(self, connection_data):
         self.tool_stack.setCurrentIndex(1)
         self.graph_editor.load_connection_editor(connection_data)
+
+
+
     
+    def on_structure_selected(self, name, models, probs):
+        
+        self.tool_stack.setCurrentIndex(0)
+        
+        self.graph_builder.load_structure_preset(name, models, probs, grid_size=[10, 10, 10])
+        
+        self.status_bar.show_success(f"Preset '{name}' loaded into Graph Creator.")
+        print(f"Loaded Structure: {name} with {len(models)} populations.")
     
-    
+
+
+
     def closeEvent(self, event):
         try:
             vtk.vtkObject.GlobalWarningDisplayOff()
@@ -1009,87 +1092,171 @@ class MainWindow(QMainWindow):
 
         
     def create_bottom_right(self):
-        """Tool selector buttons and Simulation Controls."""
-        layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        main_container = QWidget()
+        main_container.setStyleSheet("background-color: #232323; border-left: 1px solid #444;")
         
-        btn_widget = QWidget()
-        btn_layout = QGridLayout()
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(2)
-        
-        tool_style = """
+        main_layout = QHBoxLayout(main_container)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(25) 
+
+        style_nav = """
             QPushButton {
-                background-color: #37474F;
-                color: white;
-                border: none;
-                font-weight: bold;
-                border-radius: 0px;
+                background-color: #263238; color: #B0BEC5;
+                border: 1px solid #37474F; font-weight: bold;
+                border-radius: 4px; padding: 12px; text-align: left; padding-left: 15px;
             }
-            QPushButton:hover { background-color: #455A64; }
-            QPushButton:pressed { background-color: #263238; }
+            QPushButton:hover { background-color: #37474F; color: white; border-left: 3px solid #26A69A; }
+            QPushButton:pressed { background-color: #102027; }
+        """
+
+        style_maint = """
+            QPushButton {
+                background-color: #3E2723; color: #D7CCC8;
+                border: 1px solid #4E342E; font-weight: bold;
+                border-radius: 4px; padding: 10px;
+            }
+            QPushButton:hover { background-color: #4E342E; color: white; border: 1px solid #8D6E63; }
+            QPushButton:pressed { background-color: #1B0000; }
         """
         
-        btn_create = QPushButton("1. Create Graph")
-        btn_flow = QPushButton("2. Graph Editor")
-        btn_edit = QPushButton("3. Connections")
-        btn_connect = QPushButton("4. Structures")
+        style_settings = """
+            QPushButton {
+                background-color: #455A64; color: white; font-weight: bold; 
+                padding: 10px; border-radius: 4px; border: 1px solid #546E7A;
+            }
+            QPushButton:hover { background-color: #546E7A; }
+        """
+
+        style_gold = """
+            QPushButton {
+                background-color: #FF6F00; color: #212121;
+                border: none; font-weight: bold; border-radius: 4px; padding: 12px;
+            }
+            QPushButton:hover { background-color: #FF8F00; color: black; }
+            QPushButton:pressed { background-color: #E65100; }
+        """
         
-        btn_tools = QPushButton("5. Tools")
-        btn_tools.setStyleSheet(tool_style)
+        style_red = """
+            QPushButton {
+                background-color: #B71C1C; color: white;
+                border: none; font-weight: bold; border-radius: 4px; padding: 12px;
+            }
+            QPushButton:hover { background-color: #C62828; }
+            QPushButton:pressed { background-color: #7F0000; }
+        """
         
-        btn_merge = QPushButton(" Merge Graphs")
-        btn_merge.setStyleSheet("background-color: #607D8B; color: white; font-weight: bold; border: none;")
+        style_io = """
+            QPushButton {
+                background-color: #424242; color: #E0E0E0;
+                border: 1px solid #616161; font-weight: bold;
+                border-radius: 4px; padding: 8px;
+            }
+            QPushButton:hover { background-color: #616161; color: white; border: 1px solid #9E9E9E; }
+        """
+
+        def create_header(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #757575; font-weight: bold; font-size: 10px; letter-spacing: 1px; margin-bottom: 5px;")
+            return lbl
+
+        col1_layout = QVBoxLayout()
+        col1_layout.setSpacing(8)
+        col1_layout.addStretch() 
         
-        btn_reconnect = QPushButton("⚡ Reconnect")
-        btn_reconnect.setStyleSheet("background-color: #009688; color: white; font-weight: bold; border: none;")
-        btn_reconnect.setToolTip("Resets NEST, keeps positions")
+        col1_layout.addWidget(create_header("WORKFLOW TOOLS"))
         
-        btn_rebuild = QPushButton(" Rebuild All")
-        btn_rebuild.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; border: none;")
-        
-        all_tool_btns = [btn_create, btn_flow, btn_edit, btn_connect, btn_tools, btn_merge, btn_reconnect, btn_rebuild]
-        
-        for btn in all_tool_btns:
-            if not btn.styleSheet(): 
-                btn.setStyleSheet(tool_style)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        btn_create = QPushButton("1. Graph Creator")
+        btn_editor = QPushButton("2. Graph Editor")
+        btn_conns = QPushButton("3. Connection Manager")
+        btn_struct = QPushButton("4. Structure Templates")
+        btn_tools = QPushButton("5. Device Toolbox")
         
         btn_create.clicked.connect(lambda: self.tool_stack.setCurrentIndex(0))
-        btn_flow.clicked.connect(lambda: self.tool_stack.setCurrentIndex(1))
-        btn_edit.clicked.connect(lambda: self.tool_stack.setCurrentIndex(2))
-        btn_connect.clicked.connect(lambda: self.tool_stack.setCurrentIndex(3))
-        btn_tools.clicked.connect(lambda: self.tool_stack.setCurrentIndex(4)) # Index 4 ist Tools
+        btn_editor.clicked.connect(lambda: self.tool_stack.setCurrentIndex(1))
+        btn_conns.clicked.connect(lambda: self.tool_stack.setCurrentIndex(2))
+        btn_struct.clicked.connect(lambda: self.tool_stack.setCurrentIndex(3))
+        btn_tools.clicked.connect(lambda: self.tool_stack.setCurrentIndex(4))
+        
+        for b in [btn_create, btn_editor, btn_conns, btn_struct, btn_tools]:
+            b.setStyleSheet(style_nav)
+            col1_layout.addWidget(b)
+            
+        col1_layout.addStretch()
+
+        col2_layout = QVBoxLayout()
+        col2_layout.setSpacing(8)
+        col2_layout.addStretch()
+        
+        col2_layout.addWidget(create_header("KERNEL & NETWORK"))
+        
+        btn_merge = QPushButton("Merge Graph File")
+        btn_reconnect = QPushButton("Quick Reconnect")
+        btn_rebuild = QPushButton("Full Rebuild")
+        
+        for b in [btn_merge, btn_reconnect, btn_rebuild]:
+            b.setStyleSheet(style_maint)
+            col2_layout.addWidget(b)
+            
+        col2_layout.addSpacing(15)
+        
+        btn_settings = QPushButton("Global Settings")
+        btn_settings.setStyleSheet(style_settings)
+        btn_settings.clicked.connect(lambda: self.status_bar.set_status("Global Settings clicked (Coming Soon)", "#FF9800"))
+        col2_layout.addWidget(btn_settings)
         
         btn_merge.clicked.connect(self.merge_graphs_dialog)
         btn_reconnect.clicked.connect(self.reconnect_network)
         btn_rebuild.clicked.connect(self.rebuild_all_graphs)
+
+        col2_layout.addStretch()
+
+        col3_layout = QVBoxLayout()
+        col3_layout.setSpacing(10)
+        col3_layout.addStretch()
         
-        btn_layout.addWidget(btn_create, 0, 0)
-        btn_layout.addWidget(btn_flow, 0, 1)
+        col3_layout.addWidget(create_header("PROJECT DATA"))
+        io_layout = QHBoxLayout()
+        io_layout.setSpacing(10)
         
-        btn_layout.addWidget(btn_edit, 1, 0)
-        btn_layout.addWidget(btn_connect, 1, 1)
+        btn_save = QPushButton("Save")
+        btn_load = QPushButton("Load")
+        btn_save.setStyleSheet(style_io)
+        btn_load.setStyleSheet(style_io)
         
-        btn_layout.addWidget(btn_merge, 2, 0)
-        btn_layout.addWidget(btn_tools, 2, 1)
+        btn_save.clicked.connect(self.save_all_graphs_dialog)
+        btn_load.clicked.connect(self.load_all_graphs_dialog)
         
-        btn_layout.addWidget(btn_reconnect, 3, 0)
-        btn_layout.addWidget(btn_rebuild, 3, 1)
+        io_layout.addWidget(btn_save)
+        io_layout.addWidget(btn_load)
+        col3_layout.addLayout(io_layout)
         
-        btn_widget.setLayout(btn_layout)
+        col3_layout.addSpacing(20)
+        col3_layout.addWidget(create_header("SIMULATION CONTROL"))
         
-        self.control_panel = SimulationControlWidget()
-        self.control_panel.btn_start.clicked.connect(self.start_simulation)
-        self.control_panel.btn_stop.clicked.connect(self.stop_simulation)
-        self.control_panel.btn_save.clicked.connect(self.save_all_graphs_dialog)
-        self.control_panel.btn_load.clicked.connect(self.load_all_graphs_dialog)
+        btn_sim_start = QPushButton("START SIMULATION")
+        btn_sim_start.setStyleSheet(style_gold)
+        btn_sim_start.clicked.connect(self.start_simulation)
         
-        layout.addWidget(btn_widget, 6)
-        layout.addWidget(self.control_panel, 4)
+        btn_sim_stop = QPushButton("STOP")
+        btn_sim_stop.setStyleSheet(style_red)
+        btn_sim_stop.clicked.connect(self.stop_simulation)
         
-        return layout
+        col3_layout.addWidget(btn_sim_start)
+        col3_layout.addWidget(btn_sim_stop)
+        
+        col3_layout.addStretch()
+
+
+        main_layout.addLayout(col1_layout, 4)
+        main_layout.addLayout(col2_layout, 3)
+        main_layout.addLayout(col3_layout, 3)
+        
+
+        wrapper_layout = QHBoxLayout() 
+        wrapper_layout.setContentsMargins(0,0,0,0)
+        wrapper_layout.addWidget(main_container)
+        
+        return wrapper_layout
     
     def reconnect_network(self):
 
@@ -1117,11 +1284,10 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
-            # ✅ FIX: Dictionary frisch aus der globalen Liste bauen
             graphs_dict = {g.graph_id: g for g in graph_list}
 
             stats = safe_nest_reset_and_repopulate(
-                graphs_dict, # Hier übergeben
+                graphs_dict,
                 enable_structural_plasticity=self.structural_plasticity_enabled,
                 verbose=True
             )
@@ -1186,7 +1352,9 @@ class MainWindow(QMainWindow):
             self.connection_tool.refresh()
             
             self.graph_editor.refresh_graph_list()
-            
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
+
             self.status_bar.show_success(f"Graph '{graph.graph_name}' created!")
             QApplication.processEvents()
             
@@ -1225,8 +1393,11 @@ class MainWindow(QMainWindow):
         self.neuron_plotter.reset_camera()
         self.neuron_plotter.update()
         
-    
+   
+
+
     def plot_graph_skeleton(self):
+
         self.graph_plotter.clear()
         
         self.highlighted_actor = None
@@ -1237,164 +1408,124 @@ class MainWindow(QMainWindow):
         
         cmap = plt.get_cmap("tab20")
         
-        # Tooltip Actor setup
         self.tooltip_actor = vtk.vtkTextActor()
-        self.tooltip_actor.GetTextProperty().SetFontSize(14)
-        self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 1.0)
+        self.tooltip_actor.GetTextProperty().SetFontSize(16)
+        self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 0.0) 
         self.tooltip_actor.GetTextProperty().SetFontFamilyToArial()
         self.tooltip_actor.GetTextProperty().BoldOn()
         self.tooltip_actor.GetTextProperty().ShadowOn()
         self.tooltip_actor.SetVisibility(False)
         self.graph_plotter.renderer.AddViewProp(self.tooltip_actor)
         
-        # Node Map erstellen für schnellen Zugriff
         node_map = {}
         for graph in graph_list:
             for node in graph.node_list:
                 node_map[(graph.graph_id, node.id)] = node
 
         for graph in graph_list:
-            # Farbe basierend auf Graph-ID
             rgba = cmap(graph.graph_id % 20)
             graph_color = rgba[:3]
             graph_name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
             
-            # 1. Nodes zeichnen (Kugeln)
             for node in graph.node_list:
-                # Sicherstellen, dass center_of_mass ein numpy array ist
                 center = np.array(node.center_of_mass)
                 sphere = pv.Sphere(radius=0.4, center=center)
                 
                 actor = self.graph_plotter.add_mesh(
                     sphere,
                     color=graph_color,
-                    opacity=0.4,
+                    opacity=0.6,
                     smooth_shading=True,
                     pickable=True
                 )
                 
-                node_name = getattr(node, 'name', 'Unnamed')
-                info_text = f"📍 NODE: {node_name}\nID: {node.id}\nGraph: {graph_name}"
+                info_text = f"NODE: {node.name} (ID: {node.id})"
                 self.skeleton_info_map[actor] = info_text
-            
-            # 2. Kanten zeichnen (Interne Graph-Struktur next/prev)
-            for node in graph.node_list:
-                start_pos = np.array(node.center_of_mass)
-                for next_node in node.next:
-                    end_pos = np.array(next_node.center_of_mass)
-                    line = pv.Line(start_pos, end_pos)
-                    self.graph_plotter.add_mesh(
-                        line, color=graph_color, line_width=2, opacity=0.3, pickable=False
-                    )
                 
-                # 3. Connections zeichnen (NEST Verbindungen)
-                if hasattr(node, 'connections'):
+                if hasattr(node, 'connections') and node.connections:
                     for conn in node.connections:
                         try:
                             target = conn.get('target', {})
-                            tgt_gid = target.get('graph_id')
-                            tgt_nid = target.get('node_id')
+                            tgt_gid = int(target.get('graph_id'))
+                            tgt_nid = int(target.get('node_id'))
                             
-                            # Ziel-Node finden
                             target_node = node_map.get((tgt_gid, tgt_nid))
                             
                             if target_node:
                                 conn_name = conn.get('name', 'Connection')
-                                rule = conn['params'].get('rule', '-')
-                                weight = conn['params'].get('weight', '-')
-                                info_text = (f"🔗 CONNECTION: {conn_name}\n"
-                                             f"➡ Rule: {rule}\n"
-                                             f"⚖ Weight: {weight}")
+                                info_text = f"CONN: {conn_name}\nFrom: {node.name} -> To: {target_node.name}"
 
                                 start = np.array(node.center_of_mass)
                                 end = np.array(target_node.center_of_mass)
 
-                                # Self-Connection (Torus)
                                 if node == target_node:
-                                    torus = pv.ParametricTorus(ringradius=0.5, crosssectionradius=0.08)
-                                    torus.translate([0, 0, 0.6]) 
+                                    torus = pv.ParametricTorus(ringradius=0.6, crosssectionradius=0.05) 
+                                    torus.translate([0, 0, 0.5])
                                     torus.translate(start)
                                     
                                     conn_actor = self.graph_plotter.add_mesh(
                                         torus,
-                                        color="#FF00FF", 
+                                        color=graph_color,
                                         opacity=0.8,
                                         pickable=True
                                     )
-                                    self.skeleton_info_map[conn_actor] = info_text + "\n(Self-Connection)"
+                                    self.skeleton_info_map[conn_actor] = info_text + " (Self)"
 
-                                # Normale Verbindung (Pfeil)
                                 else:
                                     direction_vec = end - start
                                     dist = np.linalg.norm(direction_vec)
                                     
-                                    if dist > 0.01:
-                                        # Normalisieren für korrekte Orientierung
+                                    if dist > 0.1:
                                         direction_norm = direction_vec / dist
                                         
-                                        # Offset: Startet und endet am Rand der Kugel (Radius ~0.4)
-                                        # Wir machen den Pfeil etwas kürzer als die volle Distanz
                                         offset_start = 0.4
                                         offset_end = 0.4
-                                        
-                                        # Tatsächliche Länge des Pfeils
-                                        arrow_length = max(0.1, dist - (offset_start + offset_end))
-                                        
-                                        # Startpunkt verschieben
                                         arrow_start = start + (direction_norm * offset_start)
                                         
-                                        # Dynamische Spitzengröße: 
-                                        # Soll nicht riesig werden bei langen Verbindungen
-                                        # Tip fraction ist relativ zur Länge. 
-                                        # Wir wollen fixe Tip-Größe (z.B. 0.3 units), also fraction = 0.3 / arrow_length
-                                        tip_len_fraction = min(0.5, 0.4 / arrow_length)
-                                        tip_radius_fraction = min(0.2, 0.15 / arrow_length)
-                                        shaft_radius_fraction = min(0.05, 0.05 / arrow_length)
+                                        raw_length = dist - (offset_start + offset_end)
+                                        arrow_length = max(0.1, raw_length)
 
                                         arrow = pv.Arrow(
                                             start=arrow_start, 
                                             direction=direction_norm, 
                                             scale=arrow_length,
-                                            tip_length=tip_len_fraction,
-                                            tip_radius=tip_radius_fraction,
-                                            shaft_radius=shaft_radius_fraction
+                                            tip_length=min(0.25, 0.4 / arrow_length), 
+                                            tip_radius=0.08,  
+                                            shaft_radius=0.02  
                                         )
                                         
                                         conn_actor = self.graph_plotter.add_mesh(
                                             arrow, 
-                                            color="#00FFFF", # Cyan für Verbindungen
+                                            color=graph_color, 
                                             opacity=0.8,
-                                            pickable=True
+                                            pickable=True,
+                                            smooth_shading=True
                                         )
                                         self.skeleton_info_map[conn_actor] = info_text
 
                         except Exception as e:
-                            print(f"Error plotting connection: {e}")
-                            pass
+                            print(f"Error plotting conn: {e}")
 
-        # Observer neu binden (Hover-Effekt)
         try:
             self.graph_plotter.iren.remove_observer(self._observer_tag)
         except:
             pass
-            
         self._observer_tag = self.graph_plotter.iren.add_observer(
             "MouseMoveEvent", self._on_skeleton_hover
         )
         
-        # Kamera-Reset nur beim allerersten Mal sinnvoll, sonst springt die Ansicht dauernd
-        # self.graph_plotter.reset_camera() 
         self.graph_plotter.update()
-    
+
+
     
     
     def _on_skeleton_hover(self, interactor, event):
+
         x, y = interactor.GetEventPosition()
         
         picker = vtk.vtkPropPicker()
         picker.Pick(x, y, 0, self.graph_plotter.renderer)
         actor = picker.GetActor()
-        
         
         if self.highlighted_actor and self.highlighted_actor != actor:
             try:
@@ -1416,6 +1547,7 @@ class MainWindow(QMainWindow):
                 
                 prop.SetColor(1.0, 1.0, 1.0)
                 prop.SetOpacity(1.0)
+                prop.SetLineWidth(3.0) 
                 
                 text_content = self.skeleton_info_map[actor]
                 self.tooltip_actor.SetInput(text_content)
@@ -1427,7 +1559,44 @@ class MainWindow(QMainWindow):
             self.tooltip_actor.SetVisibility(False)
         
         interactor.Render()
+    def open_live_spectator(self):
+        """Öffnet das Spectator Fenster mit Live-Simulation."""
+        # Übergebe die globale graph_list als erstes Argument, self als Parent
+        self.spectator_window = LiveSpectatorWindow(graph_list, self)
+        self.spectator_window.show()
 
+    def run_nest_simulation(self, duration):
+        """
+        Führt die tatsächliche Simulation aus.
+        """
+        print(f"\n>>> STARTING SIMULATION (Duration: {duration} ms) <<<")
+        self.status_bar.set_status("Running Simulation...", color="#FF9800")
+        self.status_bar.set_progress(0) # Indeterminate
+        QApplication.processEvents()
+        
+        start_time = time.time()
+        
+        try:
+            # 1. Simulation
+            nest.Simulate(duration)
+            
+            elapsed = time.time() - start_time
+            print(f">>> SIMULATION FINISHED in {elapsed:.2f}s <<<")
+            
+            self.status_bar.show_success(f"Simulation completed in {elapsed:.2f}s!")
+            
+            # 2. Results Button aktivieren
+            self.sim_dashboard.btn_results.setEnabled(True)
+            self.sim_dashboard.btn_results.setText("📊 Show Results")
+            
+            # Optional: Auto-Open Results
+            # self.open_results_view() 
+            
+        except Exception as e:
+            self.status_bar.show_error(f"Simulation failed: {e}")
+            print(f"Simulation Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     
     def rebuild_all_graphs(
@@ -1528,7 +1697,6 @@ class MainWindow(QMainWindow):
                 
                 stats['graphs_rebuilt'] += 1
             
-            # === Summary ===
             if verbose:
                 print(f"   Rebuild complete!")
                 print(f"   Graphs: {stats['graphs_rebuilt']}")
@@ -1542,7 +1710,7 @@ class MainWindow(QMainWindow):
             
             return stats
     
-    def start_simulation(self):
+    def start_simulation(self):###########################################################
         print("Simulation started (Not implemented yet)")
         self.status_bar.set_status("Simulation running...", color="#4CAF50")
 
@@ -1602,7 +1770,7 @@ class MainWindow(QMainWindow):
                     json.dump(project_data, f, cls=NumpyEncoder, indent=2)
                 
                 self.status_bar.show_success(f"Project saved to {filepath}")
-                print(f"✅ Project saved: {len(graph_list)} graphs.")
+                print(f"Project saved: {len(graph_list)} graphs.")
 
             except Exception as e:
                 self.status_bar.show_error(f"Save failed: {e}")
@@ -1679,12 +1847,13 @@ class MainWindow(QMainWindow):
                 graph_list.append(graph)
                 print(f"Graph '{graph.graph_name}' loaded and populated.")
 
+
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
             self.status_bar.set_status("Recreating Connections...")
             self.status_bar.set_progress(80)
             QApplication.processEvents()
 
-            # ✅ FIX: Dictionary muss {graph_id: graph_objekt} sein
-            # global graph_list ist hier schon gefüllt
             graphs_dict = {g.graph_id: g for g in graph_list}
             
             created, failed, _ = create_nest_connections_from_stored(graphs_dict, verbose=True)
@@ -1884,8 +2053,9 @@ class MainWindow(QMainWindow):
                 graph_list.append(graph)
                 merged_graphs.append(graph)
                 print(f"   Graph '{graph_name}' merged successfully!")
-
-            self.status_bar.set_status("🔗 Creating NEST connections...", color="#9C27B0")
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
+            self.status_bar.set_status("Creating NEST connections...", color="#9C27B0")
             self.status_bar.set_progress(80)
             QApplication.processEvents()
 
@@ -2009,6 +2179,7 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
 
     app = QApplication(sys.argv)
+    apply_dark_mode(app)
     window = MainWindow()
     window.show()
     app.exec()
@@ -2021,16 +2192,4 @@ if __name__ == "__main__":
         self_conn_probability=1.0
     )
     
-    for p in params:
-        print(f"Node {p['id']}: {len(p['connections'])} connections")
-        for conn in p['connections']:
-            src = conn['source']
-            tgt = conn['target']
-            print(f"  - {conn['name']}: G{src['graph_id']}N{src['node_id']}P{src['pop_id']} → "
-                  f"G{tgt['graph_id']}N{tgt['node_id']}P{tgt['pop_id']}")
-            if src['node_id'] == tgt['node_id']:
-                print("Self-Connection!")
-    
-    print("\nTest passed!")
-
-
+  
