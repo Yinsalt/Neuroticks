@@ -4,11 +4,17 @@ from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLab
 from PyQt6.QtGui import QColor, QPalette, QAction,QIcon,QBrush
 from PyQt6.QtCore import QSize, Qt, pyqtSignal,QTimer
 import pyvista as pv
+import scipy.ndimage as ndimage
+
 from pyvistaqt import QtInteractor
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
+import pyqtgraph.dockarea as dock
 import numpy as np
+from pathlib import Path
+from datetime import datetime
+import pyqtgraph.opengl as gl
 import time
 import vtk
 import pyqtgraph.opengl as gl
@@ -43,6 +49,9 @@ next_graph_id = 0
 POLYNOM_NOISE_LEVEL = 0.05
 
 
+_nest_simulation_has_run = False
+
+
 NODE_TOOLS = {
     "custom": {
         "label": "WFC & Flow Field (Custom)",
@@ -68,11 +77,13 @@ NODE_TOOLS = {
 
 __all__ = [
     'SYNAPSE_MODELS',
+    "AnalysisDashboard",
     'create_nest_mask',
-    "LiveSpectatorWindow",
     "SimulationDashboardWidget",
+    "SimulationControlWidget",
     'create_distance_dependent_weight',
     'SynapseParamWidget',
+    "SimulationViewWidget",
     'SynapseCreationWidget',
     'ConnectionExecutor',
     'ConnectionQueueWidget',
@@ -95,7 +106,8 @@ __all__ = [
     'repopulate_all_graphs',
     'get_all_connections_summary',
     'export_connections_to_dict',
-    'import_connections_from_dict'
+    'import_connections_from_dict',
+    '_nest_simulation_has_run'
 ]
 
 SYNAPSE_MODELS = {
@@ -292,17 +304,31 @@ SYNAPSE_MODELS = {
         "params": {}
     }
 }
+"""
+# Synaptic Elements 
+nest.SetDefaults('iaf_psc_alpha', {
+    'synaptic_elements': {
+        'Den_ex': {'growth_curve': 'gaussian', 'z': 1.0, ...},
+        'Axon_ex': {'growth_curve': 'gaussian', 'z': 1.0, ...}
+    }
+})
+
+# Structural Plasticity 
+nest.structural_plasticity_synapses = {
+    'synapse_ex': {
+        'synapse_model': 'static_synapse',
+        'post_synaptic_element': 'Den_ex',
+        'pre_synaptic_element': 'Axon_ex'
+    }
+}
+nest.structural_plasticity_update_interval = 100.0  # ms
+"""
 
 
 
 
 def generate_biased_polynomial(axis_idx, max_degree=2, num_noise_terms=2):
-    """
-    Generiert ein Polynom, das nahe an der Identität (f(x)=x) liegt,
-    aber durch POLYNOM_NOISE_LEVEL gestört wird.
-    
-    axis_idx: 0=x, 1=y, 2=z (Welche Achse ist die Identität?)
-    """
+
     global POLYNOM_NOISE_LEVEL
     noise = POLYNOM_NOISE_LEVEL
     
@@ -435,7 +461,7 @@ def create_distance_dependent_weight(base_weight: float,
             return base_weight
             
     except Exception as e:
-        print(f"⚠ Distance weight creation failed: {e}, using base weight")
+        print(f"Distance weight creation failed: {e}, using base weight")
         return base_weight
     
 
@@ -533,7 +559,7 @@ class SynapseCreationWidget(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         
-        header = QLabel("⚡ Synapse Configuration")
+        header = QLabel("Synapse Configuration")
         header.setStyleSheet("font-size: 14px; font-weight: bold; color: #2196F3;")
         main_layout.addWidget(header)
         
@@ -600,7 +626,7 @@ class SynapseCreationWidget(QWidget):
         self.custom_name_input.setPlaceholderText("Leave empty to use base model")
         custom_layout.addRow("Custom Name:", self.custom_name_input)
         
-        save_btn = QPushButton("💾 Save as Preset")
+        save_btn = QPushButton("Save as Preset")
         save_btn.clicked.connect(self._save_preset)
         custom_layout.addRow(save_btn)
         
@@ -608,12 +634,12 @@ class SynapseCreationWidget(QWidget):
         
         action_layout = QHBoxLayout()
         
-        self.apply_btn = QPushButton("✓ Apply Synapse")
+        self.apply_btn = QPushButton("Apply Synapse")
         self.apply_btn.setStyleSheet("background-color: #4CAF50; font-weight: bold;")
         self.apply_btn.clicked.connect(self._emit_synapse)
         action_layout.addWidget(self.apply_btn)
         
-        reset_btn = QPushButton("↺ Reset")
+        reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self._reset_to_defaults)
         action_layout.addWidget(reset_btn)
         
@@ -650,7 +676,7 @@ class SynapseCreationWidget(QWidget):
         
         if info.get('no_delay', False):
             self.delay_spin.setEnabled(False)
-            self.delay_warning.setText("⚠ This synapse type does not use delay!")
+            self.delay_warning.setText("This synapse type does not use delay!")
         else:
             self.delay_spin.setEnabled(True)
             self.delay_warning.setText("")
@@ -834,6 +860,23 @@ class NeuronParametersWidget(QWidget):
         try:
             with open("functional_models.json") as f:
                 self.all_models = json.load(f)
+            
+            global successful_neuron_models
+            
+            for model in self.all_models:
+                if model not in neuron_colors:
+                    neuron_colors[model] = "#FFFFFF"
+            
+            raw = list(self.all_models.keys())
+            successful_neuron_models = sorted(raw, key=lambda x: x.lower())
+            
+            priority = ['iaf_psc_alpha']
+            for p in reversed(priority):
+                if p in successful_neuron_models:
+                    successful_neuron_models.remove(p)
+                    successful_neuron_models.insert(0, p)
+            # -----------------------------------
+
         except FileNotFoundError:
             print("Warning: functional_models.json not found")
             self.all_models = {}
@@ -1039,9 +1082,9 @@ class NodeParametersWidget(QWidget):
         lbl.setStyleSheet("font-weight: bold;")
         
         combo = QComboBox()
-        priority = ['iaf_psc_alpha', 'iaf_cond_exp', 'aeif_cond_alpha', 'hh_psc_alpha']
-        sorted_models = sorted([m for m in successful_neuron_models if m not in priority])
-        combo.addItems(priority + sorted_models)
+        
+
+        combo.addItems(successful_neuron_models)
         
         combo.currentTextChanged.connect(self.on_change)
         
@@ -1083,7 +1126,6 @@ class NodeParametersWidget(QWidget):
 
 
     def _create_panel_custom(self):
-
         panel = QWidget()
         layout = QVBoxLayout(panel)
         
@@ -1092,11 +1134,13 @@ class NodeParametersWidget(QWidget):
         header.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
         
-        desc = QLabel("Generates Cluster via WFC,moves them through their vectorfields.")
+        desc = QLabel("Generates Cluster via WFC, moves them through their vectorfields.")
         desc.setStyleSheet("color: #888; font-size: 10px; margin-bottom: 10px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
         
+        self._add_field_to_layout(layout, "old", "Use WFC (Multitype)", field_type="bool", default=False)
+
         self._add_field_to_layout(layout, "grid_size", "Grid Size (X,Y,Z)", field_type="vector3_int")
         self._add_field_to_layout(layout, "sparsity_factor", "Sparsity Factor", field_type="float", 
                                   min_val=0.0, max_val=1.0, default=0.9)
@@ -1118,22 +1162,40 @@ class NodeParametersWidget(QWidget):
         layout.addWidget(header)
         
         self._add_model_selector(layout, "tool_neuron_model", "Neuron Model")
+        self._add_neuron_edit_button(layout)
         
         self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=3, max_val=100000, default=100)
         self._add_field_to_layout(layout, "radius", "Ring Radius", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
-        self._add_field_to_layout(layout, "k", "Inhibition Strength (k)", field_type="float", min_val=0.0, max_val=1000.0, default=10.0)
-        self._add_field_to_layout(layout, "bidirectional", "Bidirectional Connections", field_type="bool", default=False)
+        self._add_field_to_layout(layout, "bidirectional", "Bidirectional", field_type="bool", default=False)
+        
+        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setStyleSheet("color: #555;")
+        layout.addWidget(line)
+        layout.addWidget(QLabel("Connection Settings (Overrides):", styleSheet="font-weight:bold; color:#FF9800"))
+        
+        row_syn = QHBoxLayout()
+        row_syn.addWidget(QLabel("Synapse Model:"))
+        syn_combo = QComboBox()
+        syn_combo.addItems(["static_synapse", "stdp_synapse", "tsodyks_synapse"]) 
+        row_syn.addWidget(syn_combo)
+        layout.addLayout(row_syn)
+        self.widgets["ccw_syn_model"] = {'type': 'combo_text', 'widget': syn_combo}
+        
+        self._add_field_to_layout(layout, "ccw_weight_ex", "Exc Weight", field_type="float", default=30.0)
+        self._add_field_to_layout(layout, "ccw_delay_ex", "Delay (ms)", field_type="float", default=1.0)
+        self._add_field_to_layout(layout, "k", "Inh Factor (k)", field_type="float", default=10.0)
+        
         layout.addStretch()
         return panel
 
     def _create_panel_blob(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        header = QLabel(" Random Blob (Sphere)")
+        header = QLabel("Random Blob (Sphere)")
         header.setStyleSheet("color: #9C27B0; font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
         
         self._add_model_selector(layout, "tool_neuron_model", "Neuron Model") 
+        self._add_neuron_edit_button(layout) 
         
         self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=1, max_val=100000, default=100)
         self._add_field_to_layout(layout, "radius", "Sphere Radius", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
@@ -1148,10 +1210,11 @@ class NodeParametersWidget(QWidget):
         layout.addWidget(header)
         
         self._add_model_selector(layout, "tool_neuron_model", "Neuron Model")
+        self._add_neuron_edit_button(layout) 
         
         self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=1, max_val=100000, default=500)
-        self._add_field_to_layout(layout, "radius_bottom", "Bottom Radius (Base)", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
-        self._add_field_to_layout(layout, "radius_top", "Top Radius (Apex)", field_type="float", min_val=0.0, max_val=1000.0, default=1.0)
+        self._add_field_to_layout(layout, "radius_bottom", "Bottom Radius", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
+        self._add_field_to_layout(layout, "radius_top", "Top Radius", field_type="float", min_val=0.0, max_val=1000.0, default=1.0)
         self._add_field_to_layout(layout, "height", "Height", field_type="float", min_val=0.1, max_val=1000.0, default=10.0)
         layout.addStretch()
         return panel
@@ -1220,11 +1283,13 @@ class NodeParametersWidget(QWidget):
         layout.addLayout(row)
 
     def on_tool_changed(self):
-
         tool_id = self.tool_combo.currentData()
+        
         panel_index = self.tool_panels.get(tool_id, 0)
+        
         self.tool_stack.setCurrentIndex(panel_index)
-        self.on_change()  # Parameter-Update triggern
+        
+        self.on_change()
 
     def add_section(self, title):
         label = QLabel(title)
@@ -1355,26 +1420,37 @@ class NodeParametersWidget(QWidget):
             label = QLabel("No populations defined yet")
             label.setStyleSheet("color: #999; font-style: italic;")
             self.probability_layout.addWidget(label)
-            return
-        
-        prob_widgets = []
-        for i in range(count):
-            row = QHBoxLayout()
-            label = QLabel(f"Population {i+1}:")
-            label.setMinimumWidth(120)
+        else:
+            prob_widgets = []
+            for i in range(count):
+                row = QHBoxLayout()
+                label = QLabel(f"Population {i+1}:")
+                label.setMinimumWidth(120)
+                
+                spin = QDoubleSpinBox()
+                spin.setRange(0.0, 1.0)
+                spin.setDecimals(3)
+                spin.setValue(1.0 / count)
+                spin.valueChanged.connect(self.on_change)
+                
+                row.addWidget(label)
+                row.addWidget(spin)
+                self.probability_layout.addLayout(row)
+                prob_widgets.append(spin)
             
-            spin = QDoubleSpinBox()
-            spin.setRange(0.0, 1.0)
-            spin.setDecimals(3)
-            spin.setValue(1.0 / count)
-            spin.valueChanged.connect(self.on_change)
+            self.widgets['probability_vector'] = {'type': 'prob_list', 'widgets': prob_widgets}
+
+        if 'old' in self.widgets:
+            wfc_widget = self.widgets['old']['widget']
             
-            row.addWidget(label)
-            row.addWidget(spin)
-            self.probability_layout.addLayout(row)
-            prob_widgets.append(spin)
-        
-        self.widgets['probability_vector'] = {'type': 'prob_list', 'widgets': prob_widgets}
+            wfc_widget.blockSignals(True)
+            
+            if count > 1:
+                wfc_widget.setChecked(True)
+            else:
+                wfc_widget.setChecked(False)
+                
+            wfc_widget.blockSignals(False)
     
     def get_current_params(self):
         result = {}
@@ -1425,6 +1501,7 @@ class NodeParametersWidget(QWidget):
             value = data[key]
             wtype = info['type']
             
+            
             if wtype == 'combo_text': 
                 idx = info['widget'].findText(str(value))
                 if idx >= 0: info['widget'].setCurrentIndex(idx)
@@ -1453,13 +1530,23 @@ class NodeParametersWidget(QWidget):
                             info['widgets'][i].blockSignals(True)
                             info['widgets'][i].setValue(float(v))
                             info['widgets'][i].blockSignals(False)
-                            
-        if 'transform_matrix' in data:
-             pass
-             
+        
+        if 'tool_type' in data:
+            tool_id = data['tool_type']
+            panel_idx = self.tool_panels.get(tool_id, 0)
+            self.tool_stack.setCurrentIndex(panel_idx)
+        
         self.auto_save = True
+    def _add_neuron_edit_button(self, layout):
+        """Fügt einen Button hinzu, der zur Population-Edit-Ansicht springt."""
+        btn = QPushButton("⚙️ Edit Neuron Parameters (Pop 0)")
+        btn.setStyleSheet("background-color: #37474F; color: #EEE; border: 1px solid #555; padding: 5px;")
+        btn.clicked.connect(self._jump_to_neuron_editor)
+        layout.addWidget(btn)
 
+    def _jump_to_neuron_editor(self):
 
+        self.parent().parent().setCurrentIndex(2)
 
 
 def _set_visible(layout, visible):
@@ -1582,7 +1669,7 @@ class PolynomialTermRow(QWidget):
         self.spin_coeff.setRange(-100.0, 100.0)
         self.spin_coeff.setSingleStep(0.1)
         self.spin_coeff.setValue(1.0)
-        self.spin_coeff.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons) # Cleaner look
+        self.spin_coeff.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.spin_coeff.setFixedWidth(60)
         self.spin_coeff.setStyleSheet("""
             background-color: #2b2b2b; color: #00E5FF; font-weight: bold;
@@ -1767,13 +1854,12 @@ class GraphNameColorWidget(QWidget):
         return data
 
 
-################################################################################
 class GraphOverviewWidget(QWidget):
 
     node_selected = pyqtSignal(int, int)
     population_selected = pyqtSignal(int, int, int)
     connection_selected = pyqtSignal(dict)
-    requestConnectionCreation = pyqtSignal(int, int, int) # graph_id, node_id, pop_id    # Farben (High Contrast)
+    requestConnectionCreation = pyqtSignal(int, int, int) 
     requestConnectionDeletion = pyqtSignal(dict)  
 
     COLOR_GRAPH_BG = "#000000"      
@@ -1783,7 +1869,9 @@ class GraphOverviewWidget(QWidget):
     COLOR_POP_BG = "#424242"        
     COLOR_POP_FG = "#FFFFFF"        
     COLOR_CONN_BG = "#aaaa00"       
-    COLOR_CONN_FG = "#841414"       
+    COLOR_CONN_FG = "#841414" 
+    COLOR_DEVICE_BG = "#4A148C"     
+    COLOR_DEVICE_FG = "#E0E0E0"     
     
     def __init__(self, parent=None, graph_list=None):
         super().__init__(parent)
@@ -1797,7 +1885,7 @@ class GraphOverviewWidget(QWidget):
         layout.setSpacing(5)
         
         header = QHBoxLayout()
-        title = QLabel("📊 Graph Overview")
+        title = QLabel("Graph Overview")
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: #333;")
         header.addWidget(title)
         header.addStretch()
@@ -1816,7 +1904,7 @@ class GraphOverviewWidget(QWidget):
         
         self.collapse_btn = QPushButton("⊖")
         self.collapse_btn.setFixedSize(28, 28)
-        self.collapse_btn.setToolTip("Collapse All (Alles einklappen)")
+        self.collapse_btn.setToolTip("Collapse All")
         self.collapse_btn.clicked.connect(self._collapse_all)
         header.addWidget(self.collapse_btn)
         
@@ -1931,9 +2019,15 @@ class GraphOverviewWidget(QWidget):
             conn_data = data.get('connection')
             conn_name = conn_data.get('name', 'Connection')
             
-            action_del = QAction(f"🗑️ Delete '{conn_name}'", self)
+            action_del = QAction(f"Delete '{conn_name}'", self)
             action_del.triggered.connect(lambda: self.requestConnectionDeletion.emit(conn_data))
             menu.addAction(action_del)
+        elif item_type == 'device':
+            dev_data = data.get('device')
+            model = dev_data.get('model', 'Device')
+            action_info = QAction(f"ℹDevice: {model}", self)
+            action_info.setEnabled(False)
+            menu.addAction(action_info)
 
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -1948,20 +2042,16 @@ class GraphOverviewWidget(QWidget):
         total_nodes = 0
         total_pops = 0
         total_conns = 0
+        total_devs = 0 
         
         for graph in self.graph_list:
             graph_item = QTreeWidgetItem(self.tree)
             graph_name = getattr(graph, 'graph_name', f'Graph_{graph.graph_id}')
-            graph_item.setText(0, f"📊 {graph_name}")
+            graph_item.setText(0, f"{graph_name}")
             graph_item.setText(1, f"ID: {graph.graph_id} | {len(graph.node_list)} nodes")
             
             self._style_item(graph_item, self.COLOR_GRAPH_BG, self.COLOR_GRAPH_FG, bold=True)
-            
-            graph_item.setData(0, Qt.ItemDataRole.UserRole, {
-                'type': 'graph', 
-                'graph_id': graph.graph_id
-            })
-            
+            graph_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'graph', 'graph_id': graph.graph_id})
             graph_item.setExpanded(True)
             
             for node in graph.node_list:
@@ -1977,11 +2067,59 @@ class GraphOverviewWidget(QWidget):
                     for conn in connections:
                         total_conns += 1
                         self._create_connection_item(conn, pop_item)
+                    
+                    devices = self._get_devices_for_pop(node, pop_idx)
+                    for dev in devices:
+                        total_devs += 1
+                        self._create_device_item(dev, pop_item)
         
         self.status_label.setText(
-            f"📊 {len(self.graph_list)} graphs | 🟡 {total_nodes} nodes | 🟠 {total_pops} pops | → {total_conns} conns"
+            f"{len(self.graph_list)} graphs | 🟡 {total_nodes} nodes | 🟠 {total_pops} pops | → {total_conns} conns |  {total_devs} devs"
         )
     
+    def _get_devices_for_pop(self, node, pop_idx):
+
+        
+        dev_list = []
+        
+        if hasattr(node, 'parameters') and 'devices' in node.parameters:
+            for dev in node.parameters['devices']:
+                if dev.get('target_pop_id') == pop_idx:
+                    dev_list.append(dev)
+        elif hasattr(node, 'devices'):
+            for dev in node.devices:
+                if dev.get('target_pop_id') == pop_idx:
+                    dev_list.append(dev)
+                    
+        return dev_list
+
+    def _create_device_item(self, dev, parent_item):
+        item = QTreeWidgetItem(parent_item)
+        
+        model = dev.get('model', 'unknown_device')
+        dev_id = dev.get('id', '?')
+        
+        params = dev.get('params', {})
+        param_str = ""
+        if 'rate' in params: param_str += f"Rate={params['rate']}Hz "
+        if 'amplitude' in params: param_str += f"Amp={params['amplitude']}pA "
+        if 'mean' in params: param_str += f"Mean={params['mean']} "
+        if 'label' in params: param_str += f"File='{params['label']}' "
+        if not param_str: param_str = "params..."
+        
+        item.setText(0, f"       {model}")
+        item.setText(1, f"ID: {dev_id} | {param_str}")
+        
+        self._style_item(item, self.COLOR_DEVICE_BG, self.COLOR_DEVICE_FG, bold=False)
+        
+        item.setData(0, Qt.ItemDataRole.UserRole, {
+            'type': 'device',
+            'device': dev
+        })
+        
+        return item
+
+
     def _style_item(self, item, bg_color, fg_color, bold=False):
         bg_brush = QBrush(QColor(bg_color))
         fg_brush = QBrush(QColor(fg_color))
@@ -2159,16 +2297,18 @@ class GraphOverviewWidget(QWidget):
         pass
             
 ################################################################################
-
 node_parameters1 = {
-    "grid_size": [5, 5, 5],
+    "grid_size": [8, 8, 8], 
     "m": [0.0, 0.0, 0.0],
     "rot_theta": 0.0,
     "rot_phi": 0.0,
-    "transform_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-    "dt": 0.01,
+    "stretch_x": 1.0, 
+    "stretch_y": 1.0, 
+    "stretch_z": 1.0,
+    "transform_matrix": [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]],
+    "dt": 0.001,
     "old": True,
-    "num_steps": 2,
+    "num_steps": 5,
     "sparse_holes": 0,
     "sparsity_factor": 0.9,
     "probability_vector": [0.3, 0.2, 0.4],
@@ -2177,7 +2317,9 @@ node_parameters1 = {
     "polynom_max_power": 2,
     "center_of_mass": [0.0, 0.0, 0.0],
     "displacement": [0.0, 0.0, 0.0],
-    "displacement_factor": 1.0,
+    "displacement_factor": 1.0, 
+    "devices": [],
+    "connections": []
 }
 
 
@@ -2280,6 +2422,8 @@ class GraphCreatorWidget(QWidget):
         self.polynom_manager.polynomialsChanged.connect(self.on_polynomials_changed)
 
 
+
+
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         
@@ -2314,7 +2458,6 @@ class GraphCreatorWidget(QWidget):
         noise_layout.addWidget(self.noise_value_lbl)
         
         main_layout.addLayout(noise_layout)
-        # ------------------------------------
         
         content_layout = QHBoxLayout()
         
@@ -2345,6 +2488,14 @@ class GraphCreatorWidget(QWidget):
         twin_btn.clicked.connect(self.create_twin_node)
         twin_btn.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold;")
         btns_layout.addWidget(twin_btn)
+
+        self.remove_node_btn = QPushButton("🗑️")
+        self.remove_node_btn.setFixedWidth(40)
+        self.remove_node_btn.setToolTip("Remove selected node")
+        self.remove_node_btn.clicked.connect(self.remove_node)
+        self.remove_node_btn.setEnabled(False)
+        self.remove_node_btn.setStyleSheet("background-color: #F44336; color: white; font-weight: bold;")
+        btns_layout.addWidget(self.remove_node_btn)
         
         node_col.addLayout(btns_layout)
         content_layout.addLayout(node_col, 2)
@@ -2359,11 +2510,23 @@ class GraphCreatorWidget(QWidget):
         pop_scroll.setWidget(self.pop_list_widget)
         pop_col.addWidget(pop_scroll)
         
-        self.add_pop_btn = QPushButton("+ Add Population")
+        pop_btns_layout = QHBoxLayout()
+        
+        self.add_pop_btn = QPushButton("+ Add Pop")
         self.add_pop_btn.clicked.connect(self.add_population)
         self.add_pop_btn.setEnabled(False)
         self.add_pop_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        pop_col.addWidget(self.add_pop_btn)
+        pop_btns_layout.addWidget(self.add_pop_btn)
+        
+        self.remove_pop_btn = QPushButton("🗑️")
+        self.remove_pop_btn.setFixedWidth(40)
+        self.remove_pop_btn.setToolTip("Remove selected population")
+        self.remove_pop_btn.clicked.connect(self.remove_population)
+        self.remove_pop_btn.setEnabled(False)
+        self.remove_pop_btn.setStyleSheet("background-color: #F44336; color: white; font-weight: bold;")
+        pop_btns_layout.addWidget(self.remove_pop_btn)
+        
+        pop_col.addLayout(pop_btns_layout)
         
         content_layout.addLayout(pop_col, 2)
         
@@ -2400,9 +2563,7 @@ class GraphCreatorWidget(QWidget):
         main_layout.addLayout(bottom_layout)
 
 
-
     def show_add_node_menu(self, pos):
-        """Zeigt das Menü mit Cortex-Strukturen beim Rechtsklick an."""
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; border: 1px solid #555; }")
         
@@ -2442,7 +2603,7 @@ class GraphCreatorWidget(QWidget):
         
         safe_name = name.replace(" ", "_").replace("/", "-")
         node_data['params']['name'] = f"{safe_name}_{node_idx}"
-        node_data['params']['grid_size'] = [10, 10, 10] # Kleiner Patch wie gewünscht
+        node_data['params']['grid_size'] = [10, 10, 10]
         node_data['params']['probability_vector'] = probs
         node_data['params']['sparsity_factor'] = 0.85
         
@@ -2545,7 +2706,6 @@ class GraphCreatorWidget(QWidget):
             'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
             'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
         }
-        # ----------------------------------------
         
         node['populations'].append({
             'model': 'iaf_psc_alpha',
@@ -2611,12 +2771,10 @@ class GraphCreatorWidget(QWidget):
         for i, node in enumerate(self.node_list):
             tool_type = node['params'].get('tool_type', 'custom')
             
-            # Nur für Custom Nodes (WFC) sind manuelle Populationen zwingend
             if tool_type == 'custom' and not node['populations']:
                 print(f"ERROR: Node {i+1} (Custom) has no populations! Please add populations.")
                 return
             
-            # Probability Check nur wenn manuelle Populationen da sind
             if node['populations']:
                 prob_vec = node['params'].get('probability_vector', [])
                 total_prob = sum(prob_vec)
@@ -2624,7 +2782,6 @@ class GraphCreatorWidget(QWidget):
                     print(f"ERROR: Node {i+1} probability vector sums to {total_prob:.2f}, must be 1.0!")
                     return
         
-        # Aktuelle GUI-Werte des selektierten Nodes speichern
         if self.current_node_idx is not None:
             current_params = self.node_param_widget.get_current_params()
             if 'center_of_mass' in current_params:
@@ -2633,7 +2790,6 @@ class GraphCreatorWidget(QWidget):
         
         self.save_current_population_params()
         
-        # Polynomials speichern (falls vorhanden)
         if hasattr(self, '_last_polynomial_node_idx') and self._last_polynomial_node_idx is not None:
             last_node = self.node_list[self._last_polynomial_node_idx]
             all_polynomials = self.polynom_manager.get_all_polynomials()
@@ -2650,23 +2806,17 @@ class GraphCreatorWidget(QWidget):
             tool_type = node['params'].get('tool_type', 'custom')
             populations = node['populations']
             
-            # === LOGIK-WEICHE: TOOL VS CUSTOM ===
             if tool_type != 'custom' and not populations:
-                # AUTOMATISCHE KONFIGURATION FÜR TOOLS (z.B. CCW, Blob)
                 print(f"Auto-configuring {tool_type} node structure...")
                 
-                # --- ÄNDERUNG START ---
-                # Hole das Modell aus den Parametern, Fallback auf iaf_psc_alpha
                 selected_model = node['params'].get('tool_neuron_model', 'iaf_psc_alpha')
                 neuron_models = [selected_model] 
-                # --- ÄNDERUNG ENDE ---
                 
                 types = [0]
                 encoded_polynoms_per_type = [[]] 
                 prob_vec = [1.0]
                 pop_nest_params = [{}]
             else:
-                # STANDARD LOGIK (WFC / Manuelle Pops)
                 neuron_models = [pop['model'] for pop in populations]
                 types = list(range(len(populations)))
                 
@@ -2683,16 +2833,13 @@ class GraphCreatorWidget(QWidget):
                 if not prob_vec or len(prob_vec) != num_pops:
                     prob_vec = [1.0 / num_pops] * num_pops if num_pops > 0 else []
                 
-                # Normalisieren
                 if num_pops > 0 and abs(sum(prob_vec) - 1.0) > 0.01:
                     s = sum(prob_vec)
                     prob_vec = [p/s for p in prob_vec] if s > 0 else [1.0/num_pops]*num_pops
                 
                 pop_nest_params = [pop.get('params', {}) for pop in populations]
 
-            # Parameter zusammenbauen
             node_params = {
-                # Geometrie & Position
                 'grid_size': node['params'].get('grid_size', [10, 10, 10]),
                 'm': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
                 'center_of_mass': node['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
@@ -2701,7 +2848,6 @@ class GraphCreatorWidget(QWidget):
                 'rot_theta': node['params'].get('rot_theta', 0.0),
                 'rot_phi': node['params'].get('rot_phi', 0.0),
                 
-                # Tool Settings
                 'tool_type': tool_type,
                 'n_neurons': node['params'].get('n_neurons', 100),
                 'radius': node['params'].get('radius', 5.0),
@@ -2710,24 +2856,20 @@ class GraphCreatorWidget(QWidget):
                 'height': node['params'].get('height', 10.0),
                 'grid_side_length': node['params'].get('grid_side_length', 10),
                 
-                # Circuit Specifics (CCW)
                 'k': node['params'].get('k', 10.0),
                 'bidirectional': node['params'].get('bidirectional', False),
                 
-                # Transformations Matrix
                 'stretch_x': node['params'].get('stretch_x', 1.0),
                 'stretch_y': node['params'].get('stretch_y', 1.0),
                 'stretch_z': node['params'].get('stretch_z', 1.0),
                 'transform_matrix': node['params'].get('transform_matrix', [[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
                 
-                # WFC Stuff
                 'dt': node['params'].get('dt', 0.01),
                 'old': node['params'].get('old', True),
                 'num_steps': node['params'].get('num_steps', 8),
                 'sparse_holes': node['params'].get('sparse_holes', 0),
                 'sparsity_factor': node['params'].get('sparsity_factor', 0.9),
                 
-                # NEST / Structure
                 'name': node['params'].get('name', f'Node_{node_idx}'),
                 'id': node_idx,
                 'graph_id': graph_id,
@@ -2744,7 +2886,6 @@ class GraphCreatorWidget(QWidget):
                 'connections': []
             }
             
-            # Originale Populations-Liste für GUI-Status mitschleifen
             node['populations'] = populations.copy()
             converted_nodes.append(node_params)
         
@@ -2766,10 +2907,15 @@ class GraphCreatorWidget(QWidget):
         node_btn.clicked.connect(lambda checked=False, idx=node_idx: self.select_node(idx))
         self.node_list_layout.addWidget(node_btn)
         
-        node_params = node_parameters1.copy()
+        node_params = copy.deepcopy(node_parameters1)
+        
         node_params['id'] = node_idx
         node_params['name'] = f"Node_{node_idx}"
         node_params['probability_vector'] = []
+        
+        node_params['m'] = [0.0, 0.0, 0.0]
+        node_params['center_of_mass'] = [0.0, 0.0, 0.0]
+        node_params['displacement'] = [0.0, 0.0, 0.0]
         
         self.node_list.append({
             'params': node_params,
@@ -2778,66 +2924,129 @@ class GraphCreatorWidget(QWidget):
         })
         
         self.select_node(node_idx)
-    
-    def select_node(self, node_idx):
-        self.save_current_population_params()
+
+    def remove_population(self):
+        if self.current_node_idx is None or self.current_pop_idx is None:
+            return
+            
+        node = self.node_list[self.current_node_idx]
         
+        node['populations'].pop(self.current_pop_idx)
+        
+        prob_vec = node['params'].get('probability_vector', [])
+        if len(prob_vec) > self.current_pop_idx:
+            prob_vec.pop(self.current_pop_idx)
+            total = sum(prob_vec)
+            if total > 0:
+                node['params']['probability_vector'] = [p/total for p in prob_vec]
+            else:
+                if prob_vec:
+                    node['params']['probability_vector'] = [1.0/len(prob_vec)] * len(prob_vec)
+        
+        self.update_population_list()
+        
+        num_pops = len(node['populations'])
+        
+        self.node_param_widget.set_population_count(num_pops)
+        self.node_param_widget.load_data(node['params'])
+        
+        if num_pops > 0:
+            new_idx = max(0, self.current_pop_idx - 1)
+            self.select_population(new_idx)
+        else:
+            self.current_pop_idx = None
+            self.remove_pop_btn.setEnabled(False)
+            self.editor_stack.setCurrentIndex(1)
+    def remove_node(self):
+        if self.current_node_idx is None:
+            return
+
+        node_data = self.node_list.pop(self.current_node_idx)
+        
+        if 'button' in node_data:
+            node_data['button'].deleteLater()
+
+        for i, node in enumerate(self.node_list):
+            name = node['params'].get('name', 'Node')
+            node['button'].setText(f"Node {i + 1}: {name}")
+            
+            node['params']['id'] = i
+            
+            try: node['button'].clicked.disconnect()
+            except: pass
+            node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
+
+        if self.node_list:
+            new_idx = max(0, self.current_node_idx - 1)
+            self.select_node(new_idx)
+        else:
+            self.current_node_idx = None
+            self.editor_stack.setCurrentIndex(0)
+            self.remove_node_btn.setEnabled(False)
+    def select_node(self, node_idx):
+        if node_idx < 0 or node_idx >= len(self.node_list): return
+        
+        self.save_current_population_params()
         self.current_node_idx = node_idx
         self.current_pop_idx = None
         
+        # Buttons aktivieren
+        self.remove_node_btn.setEnabled(True)
+        self.add_pop_btn.setEnabled(True)
+        self.remove_pop_btn.setEnabled(False)
+        
         for i, node in enumerate(self.node_list):
-            if i == node_idx:
-                node['button'].setStyleSheet("background-color: #2196F3; color: white;")
-            else:
-                node['button'].setStyleSheet("")
-        
-        
-        num_pops = len(self.node_list[node_idx]['populations'])
+            node['button'].setStyleSheet("background-color: #2196F3; color: white;" if i == node_idx else "")
+        self.remove_node_btn.setEnabled(len(self.node_list) > 1)
+
+        node_data = self.node_list[node_idx]
+        tool_type = node_data['params'].get('tool_type', 'custom')
+
+        if tool_type != 'custom' and not node_data['populations']:
+            model = node_data['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+            node_data['populations'].append({
+                'model': model,
+                'params': {}, 
+                'polynomials': {'x': [], 'y': [], 'z': []} 
+            })
+
+        num_pops = len(node_data['populations'])
         self.node_param_widget.set_population_count(num_pops)
-        self.node_param_widget.load_data(self.node_list[node_idx]['params'])
+        self.node_param_widget.load_data(node_data['params'])
         self.editor_stack.setCurrentIndex(1)
         
         self.update_population_list()
-        self.add_pop_btn.setEnabled(True)
+        
+        self.add_pop_btn.setEnabled(tool_type == 'custom')
 
     def load_structure_preset(self, name, models, probs, grid_size=[10,10,10]):
         """Lädt ein Struktur-Preset und bereitet den Node vor."""
         print(f"Loading Structure Preset: {name}")
         
-        # 1. Resetten
         self.reset()
         
-        # 2. Namen setzen
         safe_name = name.replace(" ", "_").replace("/", "-")
         self.graph_name_input.setText(f"Graph_{safe_name}")
         
-        # 3. Node hinzufügen (Node 0)
         self.add_node()
         
-        # 4. Zugriff auf den neu erstellten Node
         node = self.node_list[0]
         
-        # 5. Parameter setzen
         node['params']['name'] = f"{safe_name}_Node"
         node['params']['grid_size'] = grid_size
         node['params']['probability_vector'] = probs
         
-        # WFC Parameter leicht anpassen für Strukturen
-        node['params']['sparsity_factor'] = 0.85 # Etwas dichter
+        node['params']['sparsity_factor'] = 0.85 
         node['params']['dt'] = 0.01
         
-        # 6. Populationen erstellen
         node['populations'] = []
         
         for i, model in enumerate(models):
-            # --- UPDATE ---
-            # Auch hier: Sanfte Abweichung statt totalem Chaos
             default_polynomials = {
                 'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
                 'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
                 'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
             }
-            # --------------
             
             node['populations'].append({
                 'model': model,
@@ -2891,7 +3100,7 @@ class GraphCreatorWidget(QWidget):
         self.save_current_population_params()
         
         self.current_pop_idx = pop_idx
-        
+        self.remove_pop_btn.setEnabled(True) 
         node = self.node_list[self.current_node_idx]
         for i, pop in enumerate(node['populations']):
             if i == pop_idx:
@@ -2934,14 +3143,11 @@ class GraphCreatorWidget(QWidget):
         return f"0x{r:02x}{g:02x}{b:02x}"
     
     def reset(self):
-        # 1. Interne Auswahl zurücksetzen
         self.current_node_idx = None
         self.current_pop_idx = None
         
-        # 2. Listen leeren
         self.node_list.clear()
         
-        # 3. UI-Layouts leeren (Buttons entfernen)
         while self.node_list_layout.count():
             item = self.node_list_layout.takeAt(0)
             if item.widget():
@@ -2952,17 +3158,13 @@ class GraphCreatorWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         
-        # 4. Editor-Ansicht zurücksetzen
         self.editor_stack.setCurrentIndex(0)
         self.add_pop_btn.setEnabled(False)
         
-        # --- NEU: Tool-Auswahl auf Standard ("custom") zurücksetzen ---
-        # Sucht den Index für "custom" und setzt ihn aktiv
         custom_idx = self.node_param_widget.tool_combo.findData("custom")
         if custom_idx >= 0:
             self.node_param_widget.tool_combo.setCurrentIndex(custom_idx)
         
-        # 5. NAME AKTUALISIEREN
         global next_graph_id
         next_name = f"Graph_{next_graph_id}"
         
@@ -2989,7 +3191,6 @@ class EditGraphWidget(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         
-        #  GRAPH SELECTOR 
         selector_layout = QHBoxLayout()
         selector_layout.addWidget(QLabel("Select Graph to Edit:"))
         
@@ -3003,7 +3204,6 @@ class EditGraphWidget(QWidget):
         
         main_layout.addLayout(selector_layout)
         
-        #  GRAPH NAME 
         name_layout = QHBoxLayout()
         name_layout.addWidget(QLabel("Graph Name:"))
         self.graph_name_input = QLineEdit()
@@ -3011,10 +3211,8 @@ class EditGraphWidget(QWidget):
         name_layout.addWidget(self.graph_name_input)
         main_layout.addLayout(name_layout)
         
-        # MAIN CONTENT 
         content_layout = QHBoxLayout()
         
-        #  NODE COLUMN 
         node_col = QVBoxLayout()
         node_col.addWidget(QLabel("NODES", alignment=Qt.AlignmentFlag.AlignCenter))
         
@@ -3031,20 +3229,17 @@ class EditGraphWidget(QWidget):
         self.btn_add_node.clicked.connect(self.add_node)
         self.btn_add_node.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         
-        # Rechtsklick Menü
         self.btn_add_node.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_add_node.customContextMenuRequested.connect(self.show_add_node_menu)
         self.btn_add_node.setToolTip("Left-Click: Empty Node\nRight-Click: Structure Patch")
 
         node_buttons_layout.addWidget(self.btn_add_node)
         
-        # --- NEUER BUTTON ---
         twin_btn = QPushButton("👥 Twin")
         twin_btn.setToolTip("Clone selected node as a NEW node at new position")
         twin_btn.clicked.connect(self.create_twin_node)
         twin_btn.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold;")
         node_buttons_layout.addWidget(twin_btn)
-        # --------------------
 
         self.remove_node_btn = QPushButton("🗑️ Remove")
         self.remove_node_btn.clicked.connect(self.remove_node)
@@ -3056,10 +3251,7 @@ class EditGraphWidget(QWidget):
         
         content_layout.addLayout(node_col, 2)
         
-        #  POPULATION COLUMN 
         pop_col = QVBoxLayout()
-        pop_col.addWidget(QLabel("POPULATIONS", alignment=Qt.AlignmentFlag.AlignCenter))
-        
         pop_scroll = QScrollArea()
         pop_scroll.setWidgetResizable(True)
         self.pop_list_widget = QWidget()
@@ -3067,11 +3259,23 @@ class EditGraphWidget(QWidget):
         pop_scroll.setWidget(self.pop_list_widget)
         pop_col.addWidget(pop_scroll)
         
-        self.add_pop_btn = QPushButton("+ Add Population")
+        pop_btns_layout = QHBoxLayout()
+        
+        self.add_pop_btn = QPushButton("+ Add Pop")
         self.add_pop_btn.clicked.connect(self.add_population)
         self.add_pop_btn.setEnabled(False)
         self.add_pop_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        pop_col.addWidget(self.add_pop_btn)
+        pop_btns_layout.addWidget(self.add_pop_btn)
+        
+        self.remove_pop_btn = QPushButton("🗑️")
+        self.remove_pop_btn.setFixedWidth(40)
+        self.remove_pop_btn.setToolTip("Remove selected population")
+        self.remove_pop_btn.clicked.connect(self.remove_population)
+        self.remove_pop_btn.setEnabled(False)
+        self.remove_pop_btn.setStyleSheet("background-color: #F44336; color: white; font-weight: bold;")
+        pop_btns_layout.addWidget(self.remove_pop_btn)
+        
+        pop_col.addLayout(pop_btns_layout)
         
         content_layout.addLayout(pop_col, 2)
         
@@ -3101,7 +3305,6 @@ class EditGraphWidget(QWidget):
         
         main_layout.addLayout(content_layout)
         
-        #  BOTTOM BUTTONS 
         bottom_layout = QHBoxLayout()
         
         polynom_btn = QPushButton("Edit Polynomial Flow Field")
@@ -3124,7 +3327,6 @@ class EditGraphWidget(QWidget):
         
         main_layout.addLayout(bottom_layout)
         
-        # Initial refresh
         self.refresh_graph_list()
 
     def select_node_by_id(self, graph_id, node_id):
@@ -3152,15 +3354,12 @@ class EditGraphWidget(QWidget):
             if pop_id < len(node_data['populations']):
                 self.select_population(pop_id)
     def delete_connection_by_data(self, conn_data):
-        """Löscht eine Verbindung basierend auf dem Dictionary und speichert."""
         
         src_gid = conn_data['source']['graph_id']
         src_nid = conn_data['source']['node_id']
         conn_id = conn_data.get('id')
 
-        # 1. Prüfen, ob wir im richtigen Graphen sind
         if self.current_graph_id != src_gid:
-            # Wir laden den Graphen, falls er nicht aktiv ist
             idx = self.graph_selector.findData(src_gid)
             if idx >= 0:
                 self.graph_selector.setCurrentIndex(idx)
@@ -3168,7 +3367,6 @@ class EditGraphWidget(QWidget):
                 print(f"Error: Graph {src_gid} not found for deletion.")
                 return
 
-        # 2. Node in der lokalen node_list finden
         target_node_idx = None
         for i, node in enumerate(self.node_list):
             if node['params']['id'] == src_nid:
@@ -3179,43 +3377,35 @@ class EditGraphWidget(QWidget):
             print(f"Error: Source Node {src_nid} not found in current editor list.")
             return
 
-        # 3. Verbindung aus der Parameter-Liste entfernen
         node = self.node_list[target_node_idx]
         connections = node['params'].get('connections', [])
         
-        # Filtern: Behalte alle, die NICHT die ID haben
         new_conns = [c for c in connections if c.get('id') != conn_id]
         
         if len(new_conns) == len(connections):
             print("Warning: Connection ID not found in node parameters. Already deleted?")
             return
 
-        # Update List
         node['params']['connections'] = new_conns
         
-        # 4. Auch aus 'original_node' entfernen (falls vorhanden), 
-        # damit die Änderung als "Structural Change" erkannt oder direkt übernommen wird
         if node.get('original_node'):
             orig = node['original_node']
             if hasattr(orig, 'connections'):
-                # Filtern im Objekt
                 orig.connections = [c for c in orig.connections if c.get('id') != conn_id]
 
-        print(f"🗑️ Connection {conn_id} removed from Node {src_nid}. Saving...")
+        print(f"Connection {conn_id} removed from Node {src_nid}. Saving...")
         
-        # 5. Sofort speichern und neu laden (Triggered NEST Reset wenn nötig)
         self.save_changes()
 
     def show_add_node_menu(self, pos):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; border: 1px solid #555; }")
         
-        header = QAction("🧠 Add Structure Patch:", self)
+        header = QAction("Add Structure Patch:", self)
         header.setEnabled(False)
         menu.addAction(header)
         menu.addSeparator()
 
-        # Daten aufbereiten (Identisch zu Creator)
         region_data = {r_key: {} for r_key in region_names.values()}
         for model, region_map in distributions.items():
             for r_key, prob in region_map.items():
@@ -3241,26 +3431,21 @@ class EditGraphWidget(QWidget):
         """Fügt Struktur im Editor hinzu."""
         if self.current_graph is None: return
 
-        # 1. Basis-Node
         self.add_node()
         
-        # 2. Daten holen
         node_idx = len(self.node_list) - 1
         node_data = self.node_list[node_idx]
         
-        # 3. Params
         safe_name = name.replace(" ", "_").replace("/", "-")
         node_data['params']['name'] = f"{safe_name}_{node_idx}"
         node_data['params']['grid_size'] = [10, 10, 10]
         node_data['params']['probability_vector'] = probs
         node_data['params']['sparsity_factor'] = 0.85
         
-        # UI Update
         is_new = node_data.get('original_node') is None
         suffix = " (NEW)" if is_new else ""
         node_data['button'].setText(f"Node {node_idx + 1}{suffix}: {node_data['params']['name']}")
         
-        # 4. Pops
         populations = []
         for i, model in enumerate(models):
             default_polynomials = {
@@ -3276,7 +3461,6 @@ class EditGraphWidget(QWidget):
             
         node_data['populations'] = populations
         
-        # 5. Refresh Params im UI Widget (da add_node evtl schon leere Daten geladen hat)
         self.select_node(node_idx)
         print(f"Added Structure Node to Editor: {name}")
 
@@ -3318,7 +3502,7 @@ class EditGraphWidget(QWidget):
             if found_conn:
                 self.conn_editor.load_data(found_conn)
                 self.editor_stack.setCurrentIndex(4)
-                print(f"🔌 Editing Connection ID {found_conn.get('id')}")
+                print(f"Editing Connection ID {found_conn.get('id')}")
             else:
                 print("Connection reference not found in Editor list (maybe unsaved?). Editing copy.")
                 self.conn_editor.load_data(connection_data)
@@ -3331,52 +3515,72 @@ class EditGraphWidget(QWidget):
     def remove_node(self):
         if self.current_node_idx is None:
             return
+            
+        node_data = self.node_list.pop(self.current_node_idx)
+        
+        if 'button' in node_data:
+            self.node_list_layout.removeWidget(node_data['button'])
+            node_data['button'].deleteLater()
+            
+        for i, node in enumerate(self.node_list):
+            node['params']['id'] = i
+            
+            old_name = node['params'].get('name', '')
+            if old_name.startswith("Node_"):
+                node['params']['name'] = f"Node_{i}"
+            
+            node['button'].setText(f"Node {i + 1}: {node['params']['name']}")
+            
+            try: node['button'].clicked.disconnect()
+            except: pass
+            node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
 
-        if len(self.node_list) <= 1:
-            QMessageBox.warning(self, "Cannot Remove", "A graph must have at least one node.")
-            return
-
-        node_name = self.node_list[self.current_node_idx]['params'].get('name', 'Node')
-
-        reply = QMessageBox.question(
-            self, 'Remove Node',
-            f"Remove '{node_name}'?\n\nThis will trigger NEST reset on save.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            removed_node = self.node_list.pop(self.current_node_idx)
-            if 'button' in removed_node:
-                removed_node['button'].deleteLater()
-
-            for i, node in enumerate(self.node_list):
-                if 'button' in node:
-                    try:
-                        node['button'].clicked.disconnect()
-                    except:
-                        pass
-                    
-                    # Reconnect with correct index using default argument trick
-                    node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
-                    
-                    name = node['params'].get('name', 'Node')
-                    is_new = node.get('original_node') is None
-                    suffix = " (NEW)" if is_new else ""
-                    node['button'].setText(f"Node {i+1}{suffix}: {name}")
-
+        if self.node_list:
+            new_idx = max(0, self.current_node_idx - 1)
+            self.select_node(new_idx)
+        else:
             self.current_node_idx = None
             self.current_pop_idx = None
-            self.editor_stack.setCurrentIndex(0)
-            self.remove_node_btn.setEnabled(len(self.node_list) > 1)
+            self.editor_stack.setCurrentIndex(0) 
+            self.remove_node_btn.setEnabled(False)
             self.add_pop_btn.setEnabled(False)
-
+            self.remove_pop_btn.setEnabled(False)
+            
             while self.pop_list_layout.count():
                 item = self.pop_list_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-            print(f"Node '{node_name}' removed from UI (will be deleted on save)")
-
+                if item.widget(): item.widget().deleteLater()
+    def remove_population(self):
+        if self.current_node_idx is None or self.current_pop_idx is None:
+            return
+            
+        node = self.node_list[self.current_node_idx]
+        
+        node['populations'].pop(self.current_pop_idx)
+        
+        prob_vec = node['params'].get('probability_vector', [])
+        if len(prob_vec) > self.current_pop_idx:
+            prob_vec.pop(self.current_pop_idx)
+            total = sum(prob_vec)
+            if total > 0:
+                node['params']['probability_vector'] = [p/total for p in prob_vec]
+            else:
+                if prob_vec:
+                    node['params']['probability_vector'] = [1.0/len(prob_vec)] * len(prob_vec)
+        
+        self.update_population_list()
+        
+        num_pops = len(node['populations'])
+        
+        self.node_param_widget.set_population_count(num_pops)
+        self.node_param_widget.load_data(node['params'])
+        
+        if num_pops > 0:
+            new_idx = max(0, self.current_pop_idx - 1)
+            self.select_population(new_idx)
+        else:
+            self.current_pop_idx = None
+            self.remove_pop_btn.setEnabled(False)
+            self.editor_stack.setCurrentIndex(1)
 
 
 
@@ -3440,7 +3644,6 @@ class EditGraphWidget(QWidget):
         self.current_node_idx = None
         self.current_pop_idx = None
         
-        # Clear existing UI
         self.node_list.clear()
         while self.node_list_layout.count():
             item = self.node_list_layout.takeAt(0)
@@ -3452,17 +3655,14 @@ class EditGraphWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         
-        # Load graph name
         graph_name = getattr(self.current_graph, 'graph_name', f'Graph_{self.current_graph_id}')
         self.graph_name_input.setText(graph_name)
         
-        # Load nodes
         for node in self.current_graph.node_list:
             self.load_node_from_graph(node)
         
         print(f"Loaded {len(self.node_list)} nodes")
         
-        # Select first node
         if self.node_list:
             self.select_node(0)
     
@@ -3536,16 +3736,22 @@ class EditGraphWidget(QWidget):
         print(f"  Loaded Node {node.id}: {node.name} ({len(populations)} populations)")
     
     def add_node(self):
+        import copy
         node_idx = len(self.node_list)
         node_btn = QPushButton(f"Node {node_idx + 1} (NEW)")
         node_btn.setMinimumHeight(50)
         node_btn.clicked.connect(lambda checked=False, idx=node_idx: self.select_node(idx))
         self.node_list_layout.addWidget(node_btn)
         
-        node_params = node_parameters1.copy()
+        node_params = copy.deepcopy(node_parameters1)
+        
         node_params['id'] = node_idx
         node_params['name'] = f"Node_{node_idx}"
         node_params['probability_vector'] = []
+        
+        node_params['m'] = [0.0, 0.0, 0.0]
+        node_params['center_of_mass'] = [0.0, 0.0, 0.0]
+        node_params['displacement'] = [0.0, 0.0, 0.0]
         
         self.node_list.append({
             'params': node_params,
@@ -3610,8 +3816,6 @@ class EditGraphWidget(QWidget):
         node = self.node_list[self.current_node_idx]
         pop_idx = len(node['populations'])
         
-        # --- HIER: Benutze ebenfalls den neuen Generator ---
-        # Greift auf die gleiche globale Variable zu, die im Creator-Slider gesetzt wird
         default_polynomials = {
             'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
             'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
@@ -3672,45 +3876,35 @@ class EditGraphWidget(QWidget):
         if self.current_node_idx is None:
             return
             
-        # 1. Save current state
         self.save_node_params(self.node_param_widget.get_current_params())
         self.save_current_population_params()
         
-        # 2. Source Data
         source_node = self.node_list[self.current_node_idx]
         current_pos = source_node['params'].get('center_of_mass', [0,0,0])
         old_id = source_node['params'].get('id')
         
-        # 3. Dialog
         dlg = PositionDialog(current_pos, self)
         if dlg.exec():
             new_pos = dlg.get_position()
             
-            # 4. Copy
-            import copy
-            import time
+
             new_node_data = copy.deepcopy(source_node)
             
-            # 5. Adjustments
             new_idx = len(self.node_list)
             new_name = f"{source_node['params'].get('name', 'Node')}_Twin"
             
             new_node_data['params']['id'] = new_idx
             new_node_data['params']['name'] = new_name
             
-            # Position Update
             new_node_data['params']['m'] = list(new_pos)
             new_node_data['params']['center_of_mass'] = list(new_pos)
             new_node_data['params']['old_center_of_mass'] = list(new_pos) 
             
-            # WICHTIG: Als neuen Node markieren
             new_node_data['original_node'] = None 
             
-            # 6. Connections (Nur interne kopieren)
             source_conns = source_node['params'].get('connections', [])
             twin_conns = []
             
-            # Wir suchen die höchste existierende Connection ID im ganzen Graphen, um Konflikte zu vermeiden
             max_conn_id = 0
             for node in self.node_list:
                 for c in node['params'].get('connections', []):
@@ -3721,20 +3915,16 @@ class EditGraphWidget(QWidget):
                 src_id = conn['source'].get('node_id')
                 tgt_id = conn['target'].get('node_id')
                 
-                # CHECK: Interne Verbindung?
                 if src_id == old_id and tgt_id == old_id:
                     new_conn = copy.deepcopy(conn)
                     
-                    # IDs auf Twin biegen
                     new_conn['source']['node_id'] = new_idx
                     new_conn['target']['node_id'] = new_idx
                     
-                    # Neue ID vergeben
                     max_conn_id += 1
                     new_conn['id'] = max_conn_id
                     new_conn['name'] = f"{conn.get('name', 'conn')}_Twin"
                     
-                    # Fehlerstatus zurücksetzen (falls das Original fehlerhaft war)
                     if 'error' in new_conn:
                         del new_conn['error']
                         
@@ -3742,7 +3932,6 @@ class EditGraphWidget(QWidget):
             
             new_node_data['params']['connections'] = twin_conns
             
-            # 7. UI Button
             node_btn = QPushButton(f"Node {new_idx + 1} (NEW TWIN)")
             node_btn.setMinimumHeight(50)
             node_btn.clicked.connect(lambda checked=False, idx=new_idx: self.select_node(idx))
@@ -3760,7 +3949,6 @@ class EditGraphWidget(QWidget):
             
     def save_current_population_params(self):
         if self.current_node_idx is not None and self.current_pop_idx is not None:
-            # Prüfe ob Index noch gültig ist
             if self.current_node_idx < 0 or self.current_node_idx >= len(self.node_list):
                 print(f"[DEBUG] Skipping save (invalid node index {self.current_node_idx}, list size {len(self.node_list)})")
                 return
@@ -3812,22 +4000,17 @@ class EditGraphWidget(QWidget):
             print("ERROR: Graph name required!")
             return
         
-        # --- VALIDATION UPDATE START ---
-        # Nur Custom-Nodes (WFC) benötigen zwingend manuelle Populationen.
-        # Tool-Nodes (Cone, CCW etc.) können automatisch generiert werden.
+
         for i, node in enumerate(self.node_list):
             tool_type = node['params'].get('tool_type', 'custom')
             if tool_type == 'custom' and not node['populations']:
                 print(f"ERROR: Node {i+1} (Custom) has no populations! Please add populations.")
                 return
-        # --- VALIDATION UPDATE END ---
 
-        # Update graph name im Objekt
         new_name = self.graph_name_input.text()
         self.current_graph.graph_name = new_name
         self.save_current_population_params()
         
-        # Save polynomials
         if hasattr(self, '_last_polynomial_node_idx') and self._last_polynomial_node_idx is not None:
             last_node = self.node_list[self._last_polynomial_node_idx]
             all_polynomials = self.polynom_manager.get_all_polynomials()
@@ -3847,14 +4030,15 @@ class EditGraphWidget(QWidget):
         
         structural_change_indices = {idx for _, idx in nodes_with_structural_changes}
 
+        global _nest_simulation_has_run
         nest.ResetKernel()
+        _nest_simulation_has_run = False  
         
         self.current_graph.node_list.clear()
         self.current_graph.nodes = 0
         self.current_graph._next_id = 0
         
         for node_idx, node_data in enumerate(self.node_list):
-            # Hier wird jetzt die robustere _build_node_params aufgerufen
             node_params = self._build_node_params(node_idx, node_data)
             original_node = node_data.get('original_node')
             
@@ -3865,11 +4049,20 @@ class EditGraphWidget(QWidget):
                     auto_build=False
                 )
             else:
-                new_node = self.current_graph.create_node(
-                    parameters=node_params,
-                    other=self.current_graph.node_list[node_idx - 1],
-                    auto_build=False
-                )
+                user_pos = node_params.get('center_of_mass', [0.0, 0.0, 0.0])
+                has_explicit_position = not np.allclose(user_pos, [0.0, 0.0, 0.0])
+                
+                if has_explicit_position:
+                    new_node = self.current_graph.create_node(
+                        parameters=node_params,
+                        auto_build=False
+                    )
+                else:
+                    new_node = self.current_graph.create_node(
+                        parameters=node_params,
+                        other=self.current_graph.node_list[node_idx - 1],
+                        auto_build=False
+                    )
             
             has_structural_change = node_idx in structural_change_indices
             
@@ -3877,17 +4070,15 @@ class EditGraphWidget(QWidget):
             if original_node and hasattr(original_node, 'positions') and original_node.positions:
                 original_has_points = any(len(c) > 0 for c in original_node.positions if c is not None)
 
-            # Logik für Rebuild vs. Copy
             if has_structural_change or not original_has_points:
                 reason = "Structural change" if has_structural_change else "Original positions empty/invalid"
                 print(f"  Node {node_idx}: REBUILD ({reason})")
                 try:
                     new_node.build()
                 except Exception as e:
-                    print(f"  ❌ Build failed for Node {node_idx}: {e}")
+                    print(f"Build failed for Node {node_idx}: {e}")
             
             elif original_node:
-                # Versuche Positionen zu übernehmen, wenn keine strukturelle Änderung vorliegt
                 old_com = np.array(original_node.center_of_mass)
                 new_com = np.array(node_params['center_of_mass'])
                 delta = new_com - old_com
@@ -3909,7 +4100,6 @@ class EditGraphWidget(QWidget):
             
             new_node.populate_node()
         
-        # Andere Graphen repopulaten (da NEST Reset)
         for graph in self.graph_list:
             if graph.graph_id == self.current_graph_id:
                 continue
@@ -4027,9 +4217,7 @@ class EditGraphWidget(QWidget):
         populations = node_data['populations']
         tool_type = node_data['params'].get('tool_type', 'custom')
 
-        # --- AUTOMATIC CONFIGURATION LOGIC START ---
-        # Wenn es ein Tool ist und keine Populationen manuell angelegt wurden, 
-        # erstellen wir die Struktur automatisch (wie im Creator).
+
         if tool_type != 'custom' and not populations:
             selected_model = node_data['params'].get('tool_neuron_model', 'iaf_psc_alpha')
             neuron_models = [selected_model]
@@ -4038,7 +4226,6 @@ class EditGraphWidget(QWidget):
             prob_vec = [1.0]
             pop_nest_params = [{}]
         else:
-            # Standard Logik für Custom/Existierende Populationen
             neuron_models = [pop['model'] for pop in populations]
             types = list(range(len(populations)))
             
@@ -4055,7 +4242,6 @@ class EditGraphWidget(QWidget):
                 prob_vec = [1.0/len(populations)] * len(populations)
             
             pop_nest_params = [pop.get('params', {}) for pop in populations]
-        # --- AUTOMATIC CONFIGURATION LOGIC END ---
 
         old_com = node_data['params'].get('old_center_of_mass', None)
         if old_com is None and node_data.get('original_node'):
@@ -4075,57 +4261,52 @@ class EditGraphWidget(QWidget):
             [0.0, sy, 0.0],
             [0.0, 0.0, sz]
         ]
-
+        raw_params = node_data['params']
+        tool_type = raw_params.get('tool_type', 'custom')
         return {
-            # Core Params
-            'name': node_data['params'].get('name', f'Node_{node_idx}'),
+            'name': raw_params.get('name', f'Node_{node_idx}'),
             'id': node_idx,
             'graph_id': self.current_graph_id,
-            'tool_type': tool_type,
-            
-            # Structure (Autogenerated or Manual)
+            'tool_type': tool_type, 
             'neuron_models': neuron_models,
             'types': types,
             'distribution': prob_vec,
             'probability_vector': prob_vec,
             'encoded_polynoms_per_type': encoded_polynoms_per_type,
             'population_nest_params': pop_nest_params,
-
-            # Geometry & Physics
-            'grid_size': node_data['params'].get('grid_size', [10, 10, 10]),
-            'm': node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
-            'center_of_mass': node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
-            'displacement': node_data['params'].get('displacement', [0.0, 0.0, 0.0]),
-            'displacement_factor': node_data['params'].get('displacement_factor', 1.0),
-            'rot_theta': node_data['params'].get('rot_theta', 0.0),
-            'rot_phi': node_data['params'].get('rot_phi', 0.0),
+            'ccw_syn_model': raw_params.get('ccw_syn_model', 'static_synapse'),
+            'ccw_weight_ex': float(raw_params.get('ccw_weight_ex', 30.0)),
+            'ccw_delay_ex': float(raw_params.get('ccw_delay_ex', 1.0)),
+            'k': float(raw_params.get('k', 10.0)), # inhibition factor
+            'bidirectional': bool(raw_params.get('bidirectional', False)),
+            'm': raw_params.get('center_of_mass', [0.0, 0.0, 0.0]),
+            'center_of_mass': raw_params.get('center_of_mass', [0.0, 0.0, 0.0]),
+            'displacement': raw_params.get('displacement', [0.0, 0.0, 0.0]),
+            'displacement_factor': raw_params.get('displacement_factor', 1.0),
+            'rot_theta': raw_params.get('rot_theta', 0.0),
+            'rot_phi': raw_params.get('rot_phi', 0.0),
             'transform_matrix': transform_matrix,
             'stretch_x': sx, 'stretch_y': sy, 'stretch_z': sz,
             'old_center_of_mass': old_com,
-            
-            # Tool Specifics
-            'n_neurons': node_data['params'].get('n_neurons', 100),
-            'radius': node_data['params'].get('radius', 5.0),
-            'radius_top': node_data['params'].get('radius_top', 1.0),
-            'radius_bottom': node_data['params'].get('radius_bottom', 5.0),
-            'height': node_data['params'].get('height', 10.0),
-            'grid_side_length': node_data['params'].get('grid_side_length', 10),
-            'k': node_data['params'].get('k', 10.0),
-            'bidirectional': node_data['params'].get('bidirectional', False),
-
-            # WFC
-            'dt': node_data['params'].get('dt', 0.01),
-            'old': node_data['params'].get('old', True),
-            'num_steps': node_data['params'].get('num_steps', 8),
-            'sparse_holes': node_data['params'].get('sparse_holes', 0),
-            'sparsity_factor': node_data['params'].get('sparsity_factor', 0.9),
-            'polynom_max_power': node_data['params'].get('polynom_max_power', 5),
-            
-            # Empty fields
+            'n_neurons': int(raw_params.get('n_neurons', 100)),
+            'radius': float(raw_params.get('radius', 5.0)),
+            'radius_top': float(raw_params.get('radius_top', 1.0)),
+            'radius_bottom': float(raw_params.get('radius_bottom', 5.0)),
+            'height': float(raw_params.get('height', 10.0)),
+            'grid_side_length': int(raw_params.get('grid_side_length', 10)),
+            'k': float(raw_params.get('k', 10.0)),
+            'bidirectional': bool(raw_params.get('bidirectional', False)),
+            'grid_size': raw_params.get('grid_size', [10, 10, 10]),
+            'dt': raw_params.get('dt', 0.01),
+            'old': raw_params.get('old', True),
+            'num_steps': raw_params.get('num_steps', 8),
+            'sparse_holes': raw_params.get('sparse_holes', 0),
+            'sparsity_factor': raw_params.get('sparsity_factor', 0.9),
+            'polynom_max_power': raw_params.get('polynom_max_power', 5),
             'conn_prob': [],
             'field': None,
             'coefficients': None,
-            'connections': [] # Connections werden in der Loop außen behandelt/bewahrt
+            'connections': [] 
         }
     
     def delete_graph(self):
@@ -4146,8 +4327,10 @@ class EditGraphWidget(QWidget):
             self.graph_list.remove(self.current_graph)
             print(f"Graph {self.current_graph_id} deleted")
             
+            global _nest_simulation_has_run
             import nest
             nest.ResetKernel()
+            _nest_simulation_has_run = False 
             print("NEST Kernel reset")
             
             for graph in self.graph_list:
@@ -4161,7 +4344,124 @@ class EditGraphWidget(QWidget):
             self.graphUpdated.emit(-1)
 
 
-# In WidgetLib.py, ersetze die komplette class ConnectionTool
+class ConnectionTargetRow(QWidget):
+
+    removeClicked = pyqtSignal(QWidget)
+    def __init__(self, graph_list, index, parent=None):
+        super().__init__(parent)
+        self.graph_list = graph_list
+        self.index = index
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        frame = QFrame()
+        frame.setStyleSheet("background-color: #2b2b2b; border: 1px solid #444; border-radius: 4px;")
+        frame_layout = QGridLayout(frame)
+        frame_layout.setContentsMargins(5, 5, 5, 5)
+        
+        lbl_title = QLabel(f"Target #{self.index + 1}")
+        lbl_title.setStyleSheet("color: #FF9800; font-weight: bold; font-size: 10px;")
+        
+        self.btn_del = QPushButton("×")
+        self.btn_del.setFixedSize(20, 20)
+        self.btn_del.setStyleSheet("""
+            QPushButton { background-color: #D32F2F; color: white; border: none; border-radius: 2px; font-weight: bold; }
+            QPushButton:hover { background-color: #F44336; }
+        """)
+        self.btn_del.clicked.connect(lambda: self.removeClicked.emit(self))
+        
+        if self.index == 0:
+            self.btn_del.setVisible(False)
+
+        # Combos
+        self.combo_graph = QComboBox()
+        self.combo_node = QComboBox()
+        self.combo_pop = QComboBox()
+        
+        for c in [self.combo_graph, self.combo_node, self.combo_pop]:
+            c.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; padding: 2px;")
+            c.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # Logik
+        self.combo_graph.currentIndexChanged.connect(self.on_graph_changed)
+        self.combo_node.currentIndexChanged.connect(self.on_node_changed)
+
+        # Layout
+        frame_layout.addWidget(lbl_title, 0, 0)
+        frame_layout.addWidget(self.btn_del, 0, 1, alignment=Qt.AlignmentFlag.AlignRight)
+        
+        frame_layout.addWidget(QLabel("G:"), 1, 0)
+        frame_layout.addWidget(self.combo_graph, 1, 1)
+        
+        frame_layout.addWidget(QLabel("N:"), 2, 0)
+        frame_layout.addWidget(self.combo_node, 2, 1)
+        
+        frame_layout.addWidget(QLabel("P:"), 3, 0)
+        frame_layout.addWidget(self.combo_pop, 3, 1)
+
+        layout.addWidget(frame)
+        
+        self.refresh_data()
+
+    def refresh_data(self, new_graph_list=None):
+        if new_graph_list is not None:
+            self.graph_list = new_graph_list
+            
+        current_g = self.combo_graph.currentData()
+        
+        self.combo_graph.blockSignals(True)
+        self.combo_graph.clear()
+        for graph in self.graph_list:
+            name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
+            self.combo_graph.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
+        
+        if current_g is not None:
+            idx = self.combo_graph.findData(current_g)
+            if idx >= 0: self.combo_graph.setCurrentIndex(idx)
+            
+        self.combo_graph.blockSignals(False)
+        
+        if self.combo_graph.count() > 0:
+            self.on_graph_changed()
+
+    def on_graph_changed(self):
+        self.combo_node.blockSignals(True)
+        self.combo_node.clear()
+        
+        graph_id = self.combo_graph.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        
+        if graph:
+            for node in graph.node_list:
+                self.combo_node.addItem(f"{node.name} (ID: {node.id})", node.id)
+        
+        self.combo_node.blockSignals(False)
+        self.on_node_changed()
+
+    def on_node_changed(self):
+        self.combo_pop.clear()
+        graph_id = self.combo_graph.currentData()
+        node_id = self.combo_node.currentData()
+        
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if graph:
+            node = next((n for n in graph.node_list if n.id == node_id), None)
+            if node and hasattr(node, 'population'):
+                for i, pop in enumerate(node.population):
+                    model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                    self.combo_pop.addItem(f"Pop {i}: {model}", i)
+
+    def get_selection(self):
+        g = self.combo_graph.currentData()
+        n = self.combo_node.currentData()
+        p = self.combo_pop.currentData()
+        return g, n, p
+
+
 
 
 class ConnectionTool(QWidget):
@@ -4172,22 +4472,23 @@ class ConnectionTool(QWidget):
         self.next_conn_id = 0
         self.current_conn_idx = None
         self.syn_param_widgets = {} 
+        
+        self.target_rows = []
+        
         self.init_ui()
+
     def refresh(self):
-        """Alias für refresh_graph_list, wird von CleanAlpha aufgerufen."""
         self.refresh_graph_list()
+
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # ==========================================
-        # SPALTE 1: SOURCE & TARGET (Links)
-        # ==========================================
+
         left_col = QVBoxLayout()
+        left_col.setContentsMargins(5, 5, 5, 5)
         
-        # --- Source Group ---
-        src_group = QGroupBox("Source Population")
-        src_group.setStyleSheet("QGroupBox { border: 1px solid #4CAF50; margin-top: 10px; } QGroupBox::title { color: #4CAF50; }")
+        src_group = QGroupBox("Source Population (1)")
+        src_group.setStyleSheet("QGroupBox { border: 1px solid #4CAF50; font-weight: bold; margin-top: 10px; } QGroupBox::title { color: #4CAF50; }")
         src_layout = QFormLayout(src_group)
         
         self.source_graph_combo = QComboBox()
@@ -4205,33 +4506,38 @@ class ConnectionTool(QWidget):
         
         lbl_arrow = QLabel("⬇ connects to ⬇")
         lbl_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_arrow.setStyleSheet("font-weight: bold; color: #777; margin: 5px;")
+        lbl_arrow.setStyleSheet("font-weight: bold; color: #888; margin: 5px;")
         left_col.addWidget(lbl_arrow)
         
-        # --- Target Group ---
-        tgt_group = QGroupBox("Target Population")
-        tgt_group.setStyleSheet("QGroupBox { border: 1px solid #FF9800; margin-top: 10px; } QGroupBox::title { color: #FF9800; }")
-        tgt_layout = QFormLayout(tgt_group)
+        tgt_group = QGroupBox("Target Populations (N)")
+        tgt_group.setStyleSheet("QGroupBox { border: 1px solid #FF9800; font-weight: bold; margin-top: 10px; } QGroupBox::title { color: #FF9800; }")
+        tgt_outer_layout = QVBoxLayout(tgt_group)
+        tgt_outer_layout.setContentsMargins(2, 10, 2, 2)
         
-        self.target_graph_combo = QComboBox()
-        self.target_graph_combo.currentIndexChanged.connect(self.on_target_graph_changed)
-        tgt_layout.addRow("Graph:", self.target_graph_combo)
+        self.scroll_targets = QScrollArea()
+        self.scroll_targets.setWidgetResizable(True)
+        self.scroll_targets.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_targets.setStyleSheet("background: transparent;")
         
-        self.target_node_combo = QComboBox()
-        self.target_node_combo.currentIndexChanged.connect(self.on_target_node_changed)
-        tgt_layout.addRow("Node:", self.target_node_combo)
+        self.targets_container = QWidget()
+        self.targets_layout = QVBoxLayout(self.targets_container)
+        self.targets_layout.setContentsMargins(0, 0, 0, 0)
+        self.targets_layout.setSpacing(5)
+        self.targets_layout.addStretch() # Push items up
         
-        self.target_pop_combo = QComboBox()
-        tgt_layout.addRow("Pop:", self.target_pop_combo)
+        self.scroll_targets.setWidget(self.targets_container)
+        tgt_outer_layout.addWidget(self.scroll_targets)
         
-        left_col.addWidget(tgt_group)
-        left_col.addStretch()
+        self.btn_add_target = QPushButton("+ Add Target")
+        self.btn_add_target.setStyleSheet("background-color: #333; color: #FF9800; border: 1px solid #FF9800; border-radius: 4px; padding: 4px;")
+        self.btn_add_target.clicked.connect(self.add_target_row)
+        tgt_outer_layout.addWidget(self.btn_add_target)
+        
+        left_col.addWidget(tgt_group, 2) 
         
         main_layout.addLayout(left_col, 2)
         
-        # ==========================================
-        # SPALTE 2: PARAMETER (Mitte)
-        # ==========================================
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
@@ -4240,33 +4546,24 @@ class ConnectionTool(QWidget):
         middle_col = QVBoxLayout(middle_container)
         middle_col.setContentsMargins(10, 0, 10, 0)
         
-        # Name
         name_layout = QHBoxLayout()
         self.conn_name_input = QLineEdit()
-        self.conn_name_input.setPlaceholderText("Connection Name (Optional)")
+        self.conn_name_input.setPlaceholderText("Connection Name (Base)")
         name_layout.addWidget(QLabel("Name:"))
         name_layout.addWidget(self.conn_name_input)
         middle_col.addLayout(name_layout)
 
-        # Tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #444; }
-            QTabBar::tab { background: #333; color: #AAA; padding: 8px 20px; }
-            QTabBar::tab:selected { background: #2196F3; color: white; font-weight: bold; }
-        """)
-        
         self.tab_spatial = QWidget()
         self._init_spatial_tab()
-        self.tabs.addTab(self.tab_spatial, "🌍 Spatial (Geometric)")
+        self.tabs.addTab(self.tab_spatial, "🌍 Spatial")
         
         self.tab_topo = QWidget()
         self._init_topological_tab()
-        self.tabs.addTab(self.tab_topo, "🕸️ Topological (Graph)")
+        self.tabs.addTab(self.tab_topo, "🕸️ Topological")
         
         middle_col.addWidget(self.tabs)
         
-        # Synapse Settings
         syn_group = QGroupBox("Synapse Properties")
         syn_layout = QFormLayout(syn_group)
         
@@ -4318,9 +4615,7 @@ class ConnectionTool(QWidget):
         scroll_area.setWidget(middle_container)
         main_layout.addWidget(scroll_area, 3)
         
-        # ==========================================
-        # SPALTE 3: LISTE & ACTIONS (Rechts)
-        # ==========================================
+
         right_col = QVBoxLayout()
         right_col.addWidget(QLabel("Connection Queue", alignment=Qt.AlignmentFlag.AlignCenter))
         
@@ -4331,8 +4626,7 @@ class ConnectionTool(QWidget):
         conn_scroll.setWidget(self.conn_list_widget)
         right_col.addWidget(conn_scroll)
         
-        # Buttons
-        self.add_conn_btn = QPushButton("⬇ Add to Queue")
+        self.add_conn_btn = QPushButton("⬇ Add All to Queue")
         self.add_conn_btn.setStyleSheet("background-color: #2196F3; font-weight: bold; padding: 8px;")
         self.add_conn_btn.clicked.connect(self.add_connection)
         right_col.addWidget(self.add_conn_btn)
@@ -4348,202 +4642,53 @@ class ConnectionTool(QWidget):
         self.create_all_btn.clicked.connect(self.create_all_connections)
         right_col.addWidget(self.create_all_btn)
         
-        # ✅ HIER FEHLTE DAS STATUS LABEL
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #bbb; font-size: 11px; font-weight: bold;")
         self.status_label.setWordWrap(True)
         right_col.addWidget(self.status_label)
-        # ==========================================
         
         main_layout.addLayout(right_col, 2)
         
-        # Initial Refresh
         self.refresh_graph_list()
+        self.add_target_row() 
         if self.syn_model_combo.count() > 0:
             self.on_synapse_model_changed(self.syn_model_combo.currentText())
 
-    def _init_spatial_tab(self):
-        layout = QVBoxLayout(self.tab_spatial)
-        info = QLabel("Connects neurons based on spatial positions.")
-        info.setStyleSheet("color: #AAA; font-style: italic;")
-        layout.addWidget(info)
-        form = QFormLayout()
-        self.mask_type_combo = QComboBox()
-        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
-        form.addRow("Mask Shape:", self.mask_type_combo)
-        self.radius_spin = QDoubleSpinBox()
-        self.radius_spin.setRange(0.01, 1000.0)
-        self.radius_spin.setValue(0.5)
-        self.radius_spin.setSuffix(" mm")
-        form.addRow("Outer Radius/Size:", self.radius_spin)
-        self.inner_radius_spin = QDoubleSpinBox()
-        self.inner_radius_spin.setRange(0.0, 1000.0)
-        self.inner_radius_spin.setValue(0.0)
-        self.inner_radius_spin.setSuffix(" mm")
-        form.addRow("Inner Radius:", self.inner_radius_spin)
-        layout.addLayout(form)
+    def add_target_row(self):
+        idx = len(self.target_rows)
+        row = ConnectionTargetRow(self.graph_list, idx, self)
+        
+        row.removeClicked.connect(self.remove_target_row)
+        
+        self.target_rows.append(row)
+        self.targets_layout.insertWidget(idx, row)
+        
+        QTimer.singleShot(100, lambda: self.scroll_targets.verticalScrollBar().setValue(
+            self.scroll_targets.verticalScrollBar().maximum()
+        ))
 
-
-        dist_layout = QHBoxLayout()
-        
-        self.dist_dep_check = QCheckBox("Scale Weight by Distance")
-        self.dist_dep_check.setToolTip("Multiply base weight by (distance * factor) + offset")
-        self.dist_dep_check.toggled.connect(self._toggle_dist_inputs)
-        
-        self.dist_factor_spin = QDoubleSpinBox()
-        self.dist_factor_spin.setRange(-100.0, 100.0)
-        self.dist_factor_spin.setValue(1.0)
-        self.dist_factor_spin.setPrefix("Factor: ")
-        self.dist_factor_spin.setEnabled(False)
-        
-        self.dist_offset_spin = QDoubleSpinBox()
-        self.dist_offset_spin.setRange(-100.0, 100.0)
-        self.dist_offset_spin.setValue(0.0)
-        self.dist_offset_spin.setPrefix("Offset: ")
-        self.dist_offset_spin.setEnabled(False)
-
-        dist_layout.addWidget(self.dist_dep_check)
-        dist_layout.addWidget(self.dist_factor_spin)
-        dist_layout.addWidget(self.dist_offset_spin)
-        
-        layout.addLayout(dist_layout)
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Connectivity:"))
-        prob_layout = QHBoxLayout()
-        prob_layout.addWidget(QLabel("Probability (p):"))
-        self.spatial_prob_spin = QDoubleSpinBox()
-        self.spatial_prob_spin.setRange(0.0, 1.0)
-        self.spatial_prob_spin.setValue(1.0)
-        self.spatial_prob_spin.setSingleStep(0.1)
-        prob_layout.addWidget(self.spatial_prob_spin)
-        layout.addLayout(prob_layout)
-        layout.addStretch()
-    def reset_interface(self):
-        """Setzt die Eingabefelder auf Standardwerte zurück."""
-        self.conn_name_input.clear()
-        
-        # Spatial Tab Defaults
-        self.mask_type_combo.setCurrentIndex(0) # sphere
-        self.radius_spin.setValue(0.5)
-        self.inner_radius_spin.setValue(0.0)
-        self.dist_dep_check.setChecked(False)
-        self.spatial_prob_spin.setValue(1.0)
-        
-        # Dist inputs (die werden durch toggle automatisch disabled)
-        self.dist_factor_spin.setValue(1.0)
-        self.dist_offset_spin.setValue(0.0)
-        
-        # Topological Tab Defaults
-        self.rule_combo.setCurrentIndex(0) # all_to_all
-        self.indegree_spin.setValue(10)
-        self.outdegree_spin.setValue(10)
-        self.total_num_spin.setValue(100)
-        self.topo_prob_spin.setValue(0.1)
-        
-        # Synapse Defaults
-        # Tipp: Wir lassen das Synapsen-Modell absichtlich stehen, 
-        # damit man schneller mehrere ähnliche Verbindungen erstellen kann.
-        self.weight_spin.setValue(1.0)
-        self.delay_spin.setValue(1.0)
-        self.allow_autapses_check.setChecked(True)
-        self.allow_multapses_check.setChecked(True)
-        self.receptor_spin.setValue(0)
-        
-        # Source/Target Combos lassen wir so, wie sie sind, 
-        # damit der Workflow nicht unterbrochen wird.
-    def _toggle_dist_inputs(self, checked):
-        self.dist_factor_spin.setEnabled(checked)
-        self.dist_offset_spin.setEnabled(checked)
-        
-    def _init_topological_tab(self):
-        layout = QVBoxLayout(self.tab_topo)
-        self.rule_combo = QComboBox()
-        self.rule_combo.addItems(["all_to_all", "fixed_indegree", "fixed_outdegree", "fixed_total_number", "pairwise_bernoulli", "one_to_one"])
-        self.rule_combo.currentTextChanged.connect(self.on_rule_changed)
-        layout.addWidget(QLabel("Connection Rule:"))
-        layout.addWidget(self.rule_combo)
-        self.topo_params_widget = QWidget()
-        self.topo_params_layout = QFormLayout(self.topo_params_widget)
-        layout.addWidget(self.topo_params_widget)
-        self.indegree_spin = QSpinBox(); self.indegree_spin.setRange(1, 100000); self.indegree_spin.setValue(10)
-        self.outdegree_spin = QSpinBox(); self.outdegree_spin.setRange(1, 100000); self.outdegree_spin.setValue(10)
-        self.total_num_spin = QSpinBox(); self.total_num_spin.setRange(1, 1000000); self.total_num_spin.setValue(100)
-        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1)
-        self.on_rule_changed("all_to_all")
-        layout.addStretch()
-
-    def on_rule_changed(self, rule):
-        while self.topo_params_layout.count():
-            item = self.topo_params_layout.takeAt(0)
-            if item.widget(): item.widget().setParent(None)
-        if rule == "fixed_indegree": self.topo_params_layout.addRow("Indegree:", self.indegree_spin)
-        elif rule == "fixed_outdegree": self.topo_params_layout.addRow("Outdegree:", self.outdegree_spin)
-        elif rule == "fixed_total_number": self.topo_params_layout.addRow("Total Connections:", self.total_num_spin)
-        elif "bernoulli" in rule: self.topo_params_layout.addRow("Probability:", self.topo_prob_spin)
-
-    def _get_current_params(self):
-        """Sammelt Parameter basierend auf dem aktiven Tab."""
-        is_spatial = (self.tabs.currentIndex() == 0)
-        
-        params = {
-            'synapse_model': self.syn_model_combo.currentText(), # ✅ FIX: self.syn_model_combo
-            'weight': self.weight_spin.value(),
-            'delay': self.delay_spin.value(),
-            'allow_autapses': self.allow_autapses_check.isChecked(),
-            'allow_multapses': self.allow_multapses_check.isChecked(),
-            'receptor_type': self.receptor_spin.value(),
-            'use_spatial': is_spatial
-        }
-        
-        if is_spatial:
-            params['rule'] = 'pairwise_bernoulli'
-            params['p'] = self.spatial_prob_spin.value()
-            params['mask_type'] = self.mask_type_combo.currentText()
-            params['mask_radius'] = self.radius_spin.value()
-            params['mask_inner_radius'] = self.inner_radius_spin.value()
-            params['distance_dependent_weight'] = self.dist_dep_check.isChecked()
-            params['dist_factor'] = self.dist_factor_spin.value()
-            params['dist_offset'] = self.dist_offset_spin.value()
-        else:
-            rule = self.rule_combo.currentText()
-            params['rule'] = rule
-            if rule == 'fixed_indegree': params['indegree'] = self.indegree_spin.value()
-            elif rule == 'fixed_outdegree': params['outdegree'] = self.outdegree_spin.value()
-            elif rule == 'fixed_total_number': params['N'] = self.total_num_spin.value()
-            elif 'bernoulli' in rule: params['p'] = self.topo_prob_spin.value()
-                
-        for name, widget in self.syn_param_widgets.items():
-             params[name] = widget.get_value()
-        return params
-
-    def on_synapse_model_changed(self, model_name):
-        while self.dynamic_syn_params_layout.count():
-            item = self.dynamic_syn_params_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.syn_param_widgets.clear()
-        if model_name not in SYNAPSE_MODELS: return
-        params = SYNAPSE_MODELS[model_name]
-        for param_name, info in params.items():
-            p_type = info.get('type', 'float')
-            p_default = info.get('default', 0.0)
-            widget = None
-            if p_type == 'float': widget = DoubleInputField(param_name, default_value=float(p_default))
-            elif p_type == 'integer': widget = IntegerInputField(param_name, default_value=int(p_default))
-            if widget:
-                self.dynamic_syn_params_layout.addWidget(widget)
-                self.syn_param_widgets[param_name] = widget
+    def remove_target_row(self, row_widget):
+        if row_widget in self.target_rows:
+            self.target_rows.remove(row_widget)
+            self.targets_layout.removeWidget(row_widget)
+            row_widget.deleteLater()
+            
+            for i, r in enumerate(self.target_rows):
+                r.index = i
 
     def refresh_graph_list(self):
         self.source_graph_combo.clear()
-        self.target_graph_combo.clear()
         for graph in self.graph_list:
             name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
             self.source_graph_combo.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
-            self.target_graph_combo.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
+        
         if len(self.graph_list) > 0:
             self.on_source_graph_changed(0)
-            self.on_target_graph_changed(0)
+            
+        for row in self.target_rows:
+            row.refresh_data(self.graph_list)
+
 
     def on_source_graph_changed(self, index):
         self.source_node_combo.clear()
@@ -4565,87 +4710,86 @@ class ConnectionTool(QWidget):
         if not graph: return
         node = next((n for n in graph.node_list if n.id == node_id), None)
         if not node: return
-        for i, pop in enumerate(node.population):
-            self.source_pop_combo.addItem(f"Pop {i}", i)
-
-    def on_target_graph_changed(self, index):
-        self.target_node_combo.clear()
-        self.target_pop_combo.clear()
-        if index < 0: return
-        graph_id = self.target_graph_combo.currentData()
-        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
-        if not graph: return
-        for node in graph.node_list:
-            self.target_node_combo.addItem(f"{node.name} (ID: {node.id})", node.id)
-        if len(graph.node_list) > 0: self.on_target_node_changed(0)
-
-    def on_target_node_changed(self, index):
-        self.target_pop_combo.clear()
-        if index < 0: return
-        graph_id = self.target_graph_combo.currentData()
-        node_id = self.target_node_combo.currentData()
-        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
-        if not graph: return
-        node = next((n for n in graph.node_list if n.id == node_id), None)
-        if not node: return
-        for i, pop in enumerate(node.population):
-            self.target_pop_combo.addItem(f"Pop {i}", i)
+        if hasattr(node, 'population') and node.population:
+            for i, pop in enumerate(node.population):
+                model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                self.source_pop_combo.addItem(f"Pop {i}: {model}", i)
 
     def add_connection(self):
         s_gid = self.source_graph_combo.currentData()
         s_nid = self.source_node_combo.currentData()
         s_pid = self.source_pop_combo.currentData()
-        t_gid = self.target_graph_combo.currentData()
-        t_nid = self.target_node_combo.currentData()
-        t_pid = self.target_pop_combo.currentData()
         
-        if None in [s_gid, s_nid, s_pid, t_gid, t_nid, t_pid]:
-            print("Select Source and Target!")
+        if None in [s_gid, s_nid, s_pid]:
+            print("Source not fully selected!")
             return
 
-        params = self._get_current_params()
-        name = self.conn_name_input.text() or f"Conn_{self.next_conn_id}"
+        base_params = self._get_current_params()
+        base_name = self.conn_name_input.text().strip() or "Conn"
         
-        # --- ÄNDERUNG START ---
-        # Wir erstellen jetzt eine VERSCHACHTELTE Struktur, die der Executor erwartet
-        conn_dict = {
-            'id': self.next_conn_id,
-            'name': name,
-            'source': {
-                'graph_id': s_gid,
-                'node_id': s_nid,
-                'pop_id': s_pid
-            },
-            'target': {
-                'graph_id': t_gid,
-                'node_id': t_nid,
-                'pop_id': t_pid
-            },
-            'params': params
-        }
+        count_added = 0
         
-        self.connections.append(conn_dict)
-        self.next_conn_id += 1
-        self.update_connection_list()
-        print(f"Added to Queue: {name}")
+        for i, row in enumerate(self.target_rows):
+            t_gid, t_nid, t_pid = row.get_selection()
+            
+            if None in [t_gid, t_nid, t_pid]:
+                print(f"Skipping Target Row {i+1}: Incomplete selection")
+                continue
+            
+            current_name = base_name
+            if len(self.target_rows) > 1:
+                current_name = f"{base_name}_{i+1}"
+                
+            params_copy = copy.deepcopy(base_params)
+            
+            conn_dict = {
+                'id': self.next_conn_id,
+                'name': current_name,
+                'source': {
+                    'graph_id': s_gid,
+                    'node_id': s_nid,
+                    'pop_id': s_pid
+                },
+                'target': {
+                    'graph_id': t_gid,
+                    'node_id': t_nid,
+                    'pop_id': t_pid
+                },
+                'params': params_copy
+            }
+            
+            self.connections.append(conn_dict)
+            self.next_conn_id += 1
+            count_added += 1
+            
+        if count_added > 0:
+            self.update_connection_list()
+            self.status_label.setText(f"Added {count_added} connections to queue.")
+        else:
+            self.status_label.setText("No valid targets found.")
 
+    
     def update_connection_list(self):
         while self.conn_list_layout.count():
             item = self.conn_list_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
-            
         for i, conn in enumerate(self.connections):
-            mode = "🌍" if conn['params'].get('use_spatial', False) else "🕸️"
-            btn = QPushButton(f"{mode} {conn['name']}")
+            mode_icon = "🌍" if conn['params'].get('use_spatial', False) else "🕸️"
+            btn = QPushButton(f"{mode_icon} {conn['name']}")
             btn.setMinimumHeight(30)
             btn.clicked.connect(lambda checked, idx=i: self.select_connection(idx))
+            if 'error' in conn:
+                btn.setStyleSheet("background-color: #4a1818; color: #ff9999; border: 1px solid #ff5555;")
+                btn.setToolTip(f"Failed: {conn['error']}")
+            if i == self.current_conn_idx:
+                btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
             self.conn_list_layout.addWidget(btn)
         self.conn_list_layout.addStretch()
 
     def select_connection(self, idx):
         self.current_conn_idx = idx
         self.delete_conn_btn.setEnabled(True)
-        print(f"Selected connection index {idx}")
+        self.update_connection_list()
 
     def delete_connection(self):
         if self.current_conn_idx is not None:
@@ -4655,113 +4799,114 @@ class ConnectionTool(QWidget):
             self.update_connection_list()
 
     def create_all_connections(self):
-        if not self.connections:
-            print("No connections to create!")
-            return
-        
-        print("Creating connections...")
-        
-        # ✅ FIX: Executor JEDES MAL neu erstellen mit aktuellem Graph-Dictionary
-        # Das ist wichtig, da sich die Graph-Objekte nach einem Rebuild ändern können!
+        if not self.connections: return
         graphs_dict = {g.graph_id: g for g in self.graph_list}
         self.connection_executor = ConnectionExecutor(graphs_dict)
-
-        # Ausführen
-        success_count, fail_count, failed_items = self.connection_executor.execute_pending_connections(self.connections)
-        
-        print(f"Created: {success_count}, Failed: {fail_count}")
-        
-        # Update List Logic
+        success, fail, failed_items = self.connection_executor.execute_pending_connections(self.connections)
         self.connections = failed_items
         self.update_connection_list()
-        
-        if fail_count == 0:
-            self.status_label.setText(f"✅ All {success_count} connections created successfully.")
-            self.reset_interface()
-        else:
-            self.status_label.setText(f"⚠️ {success_count} created, {fail_count} failed. Check red items.")
+        if fail == 0: self.status_label.setText(f"All {success} created.")
+        else: self.status_label.setText(f"{success} created, {fail} failed.")
 
-    def update_connection_list(self):
-        """Aktualisiert die Liste. Färbt fehlerhafte Einträge rot."""
-        
-        # Alte Widgets entfernen
-        while self.conn_list_layout.count():
-            item = self.conn_list_layout.takeAt(0)
-            if item.widget(): 
-                item.widget().deleteLater()
-            
-        for i, conn in enumerate(self.connections):
-            # Standard-Text
-            mode_icon = "🌍" if conn['params'].get('use_spatial', False) else "🕸️"
-            btn_text = f"{mode_icon} {conn['name']}"
-            
-            btn = QPushButton(btn_text)
-            btn.setMinimumHeight(30)
-            btn.clicked.connect(lambda checked, idx=i: self.select_connection(idx))
-            
-            # === FEHLER BEHANDLUNG ===
-            if 'error' in conn:
-                # Fehlerhafte Connection: Rötlicher Style
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #4a1818; /* Dunkelrot */
-                        color: #ff9999;            /* Helles Rot für Text */
-                        border: 1px solid #ff5555; /* Roter Rand */
-                        font-weight: bold;
-                        text-align: left;
-                        padding-left: 10px;
-                    }
-                    QPushButton:hover { background-color: #662222; }
-                    QPushButton:pressed { background-color: #331111; }
-                """)
-                
-                # Tooltip mit Fehlergrund (Rein informierend)
-                error_msg = conn['error']
-                # Bereinige evtl. vorhandene "NEST error:" Präfixe für saubere Anzeige
-                clean_msg = error_msg.replace("NEST error:", "").strip()
-                btn.setToolTip(f"Failed: {clean_msg}")
-                
-            else:
-                # Normale (wartende) Connection
-                btn.setStyleSheet("") # Standard Style
-                btn.setToolTip("Pending creation")
-
-            # Selektions-Highlight (überschreibt Style temporär, wenn ausgewählt)
-            if i == self.current_conn_idx:
-                btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-            
-            self.conn_list_layout.addWidget(btn)
-            
-        self.conn_list_layout.addStretch()
     def set_source(self, graph_id, node_id, pop_id):
-        """
-        Setzt die Source-Comboboxen programmatisch auf die angegebenen IDs.
-        Wird vom Kontextmenü im GraphOverview aufgerufen.
-        """
-        # 1. Graph auswählen
         idx_graph = self.source_graph_combo.findData(graph_id)
         if idx_graph >= 0:
             self.source_graph_combo.setCurrentIndex(idx_graph)
-            # Durch das Signal 'currentIndexChanged' werden die Nodes neu geladen.
-            # Wir erzwingen hier aber ein sofortiges Update der Node-Box, falls nötig, 
-            # aber meistens reicht das Signal. Da Qt Signale synchron sein können, 
-            # probieren wir den direkten Zugriff danach.
-            
-            # 2. Node auswählen
             idx_node = self.source_node_combo.findData(node_id)
             if idx_node >= 0:
                 self.source_node_combo.setCurrentIndex(idx_node)
-                
-                # 3. Population auswählen
                 idx_pop = self.source_pop_combo.findData(pop_id)
-                if idx_pop >= 0:
-                    self.source_pop_combo.setCurrentIndex(idx_pop)
-                else:
-                    print(f"⚠ Pop ID {pop_id} not found in source combo")
-            else:
-                print(f"⚠ Node ID {node_id} not found in source combo")
+                if idx_pop >= 0: self.source_pop_combo.setCurrentIndex(idx_pop)
+
+    def _init_spatial_tab(self):
+        layout = QVBoxLayout(self.tab_spatial)
+        layout.addWidget(QLabel("Connects neurons based on spatial positions.", styleSheet="color: #AAA; font-style: italic;"))
+        form = QFormLayout()
+        self.mask_type_combo = QComboBox()
+        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
+        form.addRow("Mask Shape:", self.mask_type_combo)
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.01, 1000.0); self.radius_spin.setValue(0.5)
+        form.addRow("Outer Radius/Size:", self.radius_spin)
+        self.inner_radius_spin = QDoubleSpinBox()
+        self.inner_radius_spin.setRange(0.0, 1000.0); self.inner_radius_spin.setValue(0.0)
+        form.addRow("Inner Radius:", self.inner_radius_spin)
+        layout.addLayout(form)
+        dist_layout = QHBoxLayout()
+        self.dist_dep_check = QCheckBox("Scale Weight by Distance")
+        self.dist_dep_check.toggled.connect(lambda c: [self.dist_factor_spin.setEnabled(c), self.dist_offset_spin.setEnabled(c)])
+        self.dist_factor_spin = QDoubleSpinBox(); self.dist_factor_spin.setEnabled(False); self.dist_factor_spin.setValue(1.0)
+        self.dist_offset_spin = QDoubleSpinBox(); self.dist_offset_spin.setEnabled(False); self.dist_offset_spin.setValue(0.0)
+        dist_layout.addWidget(self.dist_dep_check); dist_layout.addWidget(self.dist_factor_spin); dist_layout.addWidget(self.dist_offset_spin)
+        layout.addLayout(dist_layout)
+        prob_layout = QHBoxLayout()
+        self.spatial_prob_spin = QDoubleSpinBox(); self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
+        prob_layout.addWidget(QLabel("Probability (p):")); prob_layout.addWidget(self.spatial_prob_spin)
+        layout.addLayout(prob_layout); layout.addStretch()
+
+    def _init_topological_tab(self):
+        layout = QVBoxLayout(self.tab_topo)
+        self.rule_combo = QComboBox()
+        self.rule_combo.addItems(["all_to_all", "fixed_indegree", "fixed_outdegree", "fixed_total_number", "pairwise_bernoulli", "one_to_one"])
+        self.rule_combo.currentTextChanged.connect(self.on_rule_changed)
+        layout.addWidget(QLabel("Connection Rule:"))
+        layout.addWidget(self.rule_combo)
+        self.topo_params_widget = QWidget(); self.topo_params_layout = QFormLayout(self.topo_params_widget)
+        layout.addWidget(self.topo_params_widget)
+        self.indegree_spin = QSpinBox(); self.indegree_spin.setRange(1, 100000); self.indegree_spin.setValue(10)
+        self.outdegree_spin = QSpinBox(); self.outdegree_spin.setRange(1, 100000); self.outdegree_spin.setValue(10)
+        self.total_num_spin = QSpinBox(); self.total_num_spin.setRange(1, 1000000); self.total_num_spin.setValue(100)
+        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1)
+        self.on_rule_changed("all_to_all"); layout.addStretch()
+
+    def on_rule_changed(self, rule):
+        while self.topo_params_layout.count():
+            item = self.topo_params_layout.takeAt(0)
+            if item.widget(): item.widget().setParent(None)
+        if rule == "fixed_indegree": self.topo_params_layout.addRow("Indegree:", self.indegree_spin)
+        elif rule == "fixed_outdegree": self.topo_params_layout.addRow("Outdegree:", self.outdegree_spin)
+        elif rule == "fixed_total_number": self.topo_params_layout.addRow("Total Connections:", self.total_num_spin)
+        elif "bernoulli" in rule: self.topo_params_layout.addRow("Probability:", self.topo_prob_spin)
+
+    def on_synapse_model_changed(self, model_name):
+        while self.dynamic_syn_params_layout.count():
+            item = self.dynamic_syn_params_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.syn_param_widgets.clear()
+        if model_name not in SYNAPSE_MODELS: return
+        params = SYNAPSE_MODELS[model_name]
+        for param_name, info in params.items():
+            p_type = info.get('type', 'float'); p_default = info.get('default', 0.0)
+            widget = None
+            if p_type == 'float': widget = DoubleInputField(param_name, default_value=float(p_default))
+            elif p_type == 'integer': widget = IntegerInputField(param_name, default_value=int(p_default))
+            if widget:
+                self.dynamic_syn_params_layout.addWidget(widget)
+                self.syn_param_widgets[param_name] = widget
+
+    def _get_current_params(self):
+        is_spatial = (self.tabs.currentIndex() == 0)
+        params = {
+            'synapse_model': self.syn_model_combo.currentText(),
+            'weight': self.weight_spin.value(),
+            'delay': self.delay_spin.value(),
+            'allow_autapses': self.allow_autapses_check.isChecked(),
+            'allow_multapses': self.allow_multapses_check.isChecked(),
+            'receptor_type': self.receptor_spin.value(),
+            'use_spatial': is_spatial
+        }
+        if is_spatial:
+            params.update({'rule': 'pairwise_bernoulli', 'p': self.spatial_prob_spin.value(), 'mask_type': self.mask_type_combo.currentText(), 'mask_radius': self.radius_spin.value(), 'mask_inner_radius': self.inner_radius_spin.value(), 'distance_dependent_weight': self.dist_dep_check.isChecked(), 'dist_factor': self.dist_factor_spin.value(), 'dist_offset': self.dist_offset_spin.value()})
         else:
-            print(f"⚠ Graph ID {graph_id} not found in source combo")
+            rule = self.rule_combo.currentText(); params['rule'] = rule
+            if rule == 'fixed_indegree': params['indegree'] = self.indegree_spin.value()
+            elif rule == 'fixed_outdegree': params['outdegree'] = self.outdegree_spin.value()
+            elif rule == 'fixed_total_number': params['N'] = self.total_num_spin.value()
+            elif 'bernoulli' in rule: params['p'] = self.topo_prob_spin.value()
+        for name, widget in self.syn_param_widgets.items(): params[name] = widget.get_value()
+        return params
+
+
 
 """
 for graph in self.graph_list:
@@ -5054,7 +5199,6 @@ class BlinkingNetworkWidget(QWidget):
                 
                 for conn in node.connections:
                     try:
-                        # === SOURCE ===
                         source_graph_id = conn['source']['graph_id']
                         source_node_id = conn['source']['node_id']
                         source_pop_id = conn['source']['pop_id']
@@ -5338,9 +5482,16 @@ def validate_delay(delay: float, resolution: float = None) -> float:
 
 
 def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List[str]]:
-    
     warnings = []
     
+
+    gui_keys = {
+        'use_spatial', 
+        'mask_type', 'mask_radius', 'mask_inner_radius', 'mask_size', 
+        'distance_dependent_weight', 'dist_factor', 'dist_offset',
+        'custom_name', 'base_model', 'topology_type' 
+    }
+
     rule = params.get('rule', 'all_to_all')
     synapse_model = params.get('synapse_model', 'static_synapse')
     
@@ -5352,70 +5503,59 @@ def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List
             if p in params:
                 conn_spec[p] = params[p]
     
-    if rule == 'fixed_indegree' and 'indegree' not in conn_spec:
-        conn_spec['indegree'] = 1
-        warnings.append("fixed_indegree requires 'indegree', defaulting to 1")
+    if rule == 'fixed_indegree' and 'indegree' not in conn_spec: conn_spec['indegree'] = 1
+    if rule == 'fixed_outdegree' and 'outdegree' not in conn_spec: conn_spec['outdegree'] = 1
+    if rule == 'fixed_total_number' and 'N' not in conn_spec: conn_spec['N'] = 10
+    if rule == 'pairwise_bernoulli' and 'p' not in conn_spec: conn_spec['p'] = 0.1
     
-    if rule == 'fixed_outdegree' and 'outdegree' not in conn_spec:
-        conn_spec['outdegree'] = 1
-        warnings.append("fixed_outdegree requires 'outdegree', defaulting to 1")
-    
-    if rule == 'fixed_total_number' and 'N' not in conn_spec:
-        conn_spec['N'] = 10
-        warnings.append("fixed_total_number requires 'N', defaulting to 10")
-    
-    if rule == 'pairwise_bernoulli' and 'p' not in conn_spec:
-        conn_spec['p'] = 0.1
-        warnings.append("pairwise_bernoulli requires 'p', defaulting to 0.1")
+    conn_spec['allow_autapses'] = params.get('allow_autapses', True)
+    conn_spec['allow_multapses'] = params.get('allow_multapses', True)
     
     syn_spec = {'synapse_model': synapse_model}
+    syn_spec['weight'] = float(params.get('weight', 1.0))
+    syn_spec['delay'] = validate_delay(float(params.get('delay', 1.0)))
     
-    syn_spec['weight'] = params.get('weight', 1.0)
-    syn_spec['delay'] = validate_delay(params.get('delay', 1.0))
-    if 'receptor_type' in params:
+    if 'receptor_type' in params and params['receptor_type'] != 0:
         syn_spec['receptor_type'] = int(params['receptor_type'])
+
+    known_syn_params = set()
     if synapse_model in SYNAPSE_MODELS:
-        model_params = SYNAPSE_MODELS[synapse_model]
-        for param_name, param_info in model_params.items():
-            if param_name in params and param_name not in ['weight', 'delay']:
+        model_params_def = SYNAPSE_MODELS[synapse_model].get('params', {})
+        for param_name in model_params_def:
+            known_syn_params.add(param_name)
+            if param_name in params:
                 syn_spec[param_name] = params[param_name]
     
-    known_params = {'rule', 'synapse_model', 'weight', 'delay', 
+    
+    
+    handled_keys = {'rule', 'synapse_model', 'weight', 'delay', 
                     'allow_autapses', 'allow_multapses', 'indegree', 
                     'outdegree', 'N', 'p', 'receptor_type'}
-    if synapse_model in SYNAPSE_MODELS:
-        known_params.update(SYNAPSE_MODELS[synapse_model].keys())
     
-    for key in params:
-        if key not in known_params:
-            syn_spec[key] = params[key]
-            warnings.append(f"Unknown parameter '{key}' passed to syn_spec")
+    for key, value in params.items():
+        if key in handled_keys: continue
+        if key in gui_keys: continue 
+        if key in known_syn_params: continue 
+        
+        warnings.append(f"Ignored unknown parameter '{key}' (not in known synapse params)")
     
     return conn_spec, syn_spec, warnings
 
 
 class ConnectionExecutor:
-    """
-    Führt NEST-Verbindungen aus.
-    
-    Korrigierte Version mit NEST 3.x Mask-Support.
-    """
+
     
     def __init__(self, graphs: Dict[int, Any]):
-        """
-        Args:
-            graphs: Dictionary {graph_id: Graph object}
-        """
+
         self.graphs = graphs
         self._connection_counter = 0
-        self._created_models: List[str] = []  # Track für Cleanup
+        self._created_models: List[str] = [] 
     
     def _get_next_connection_id(self) -> int:
         self._connection_counter += 1
         return self._connection_counter
     
     def _get_population(self, graph_id: int, node_id: int, pop_id: int):
-        """Holt eine Population aus Graph/Node/Pop-IDs."""
         if graph_id not in self.graphs:
             return None, f"Graph {graph_id} not found"
         
@@ -5438,22 +5578,13 @@ class ConnectionExecutor:
         return pop, None
     
     def execute_connection(self, connection: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Führt eine einzelne Verbindung aus.
         
-        Args:
-            connection: Dict mit 'source', 'target', 'params', 'name', 'id'
-            
-        Returns:
-            (success: bool, message: str)
-        """
         try:
             source_info = connection['source']
             target_info = connection['target']
             params = connection.get('params', {})
             conn_name = connection.get('name', f"Conn_{connection.get('id', '?')}")
             
-            # === 1. Get Populations ===
             src_pop, err = self._get_population(
                 source_info['graph_id'],
                 source_info['node_id'],
@@ -5469,11 +5600,9 @@ class ConnectionExecutor:
             )
             if err:
                 return False, f"Target: {err}"
-            # === SPECIAL TOPOLOGY CHECK (CCW Ring, etc.) ===
             topo_type = params.get('topology_type')
             
             if topo_type == 'ring_ccw':
-                # IDs holen
                 src_ids = nest.GetStatus(src_pop, 'global_id')
                 tgt_ids = nest.GetStatus(tgt_pop, 'global_id')
                 
@@ -5484,22 +5613,19 @@ class ConnectionExecutor:
                 w = float(params.get('weight', 10.0))
                 d = float(params.get('delay', 1.0))
                 
-                # Listen für one_to_one mapping erstellen: i -> (i+1)%n
                 pre_neurons = []
                 post_neurons = []
                 
                 for i in range(n):
                     pre = src_ids[i]
-                    post = tgt_ids[(i + 1) % n] # Wrap around
+                    post = tgt_ids[(i + 1) % n] 
                     pre_neurons.append(pre)
                     post_neurons.append(post)
                 
-                # Verbindung erstellen
                 nest.Connect(pre_neurons, post_neurons, 
                              {'rule': 'one_to_one'}, 
                              {'weight': w, 'delay': d, 'synapse_model': 'static_synapse'})
 
-                # --- WICHTIG: AUCH HIER SPEICHERN DAMIT DIE GUI ES SIEHT ---
                 try:
                     src_graph = self.graphs.get(source_info['graph_id'])
                     if src_graph:
@@ -5508,7 +5634,6 @@ class ConnectionExecutor:
                             if not hasattr(src_node_obj, 'connections'):
                                 src_node_obj.connections = []
                             
-                            # Check auf Duplikate
                             exists = False
                             for existing in src_node_obj.connections:
                                 if existing.get('id') == connection.get('id'):
@@ -5519,16 +5644,13 @@ class ConnectionExecutor:
                                 src_node_obj.connections.append(copy.deepcopy(connection))
                 except Exception as e:
                     print(f"Warning: Could not save ring connection to model: {e}")
-                # -----------------------------------------------------------
                 
                 return True, f"✓ CCW Ring created ({n} connections)"
-            # === 2. Target Model Check (für HT-Neuron Fix) ===
             try:
                 target_model = nest.GetStatus(tgt_pop, 'model')[0]
             except:
                 target_model = 'unknown'
             
-            # HT-Neuron Receptor Fix
             if 'ht_neuron' in str(target_model):
                 rec_map = {1: 'AMPA', 2: 'NMDA', 3: 'GABA_A', 4: 'GABA_B'}
                 current_rec = params.get('receptor_type', 0)
@@ -5537,11 +5659,9 @@ class ConnectionExecutor:
                 elif current_rec == 0:
                     params.pop('receptor_type', None)
             
-            # === 3. Build conn_spec ===
             rule = params.get('rule', 'all_to_all')
             conn_spec = {'rule': rule}
             
-            # Rule-specific params
             if rule == 'fixed_indegree':
                 conn_spec['indegree'] = int(params.get('indegree', 1))
             elif rule == 'fixed_outdegree':
@@ -5554,7 +5674,6 @@ class ConnectionExecutor:
             conn_spec['allow_autapses'] = params.get('allow_autapses', True)
             conn_spec['allow_multapses'] = params.get('allow_multapses', True)
             
-            # === 4. Spatial Mask (NEST 3.x kompatibel!) ===
             if params.get('use_spatial', False):
                 mask_type = params.get('mask_type', 'spherical')
                 mask_params = {
@@ -5565,7 +5684,6 @@ class ConnectionExecutor:
                     'size': params.get('mask_radius', 1.0)
                 }
                 
-                # Korrekter Mask-Typ Mapping
                 mask_type_map = {
                     'sphere': 'spherical',
                     'spherical': 'spherical',
@@ -5579,13 +5697,10 @@ class ConnectionExecutor:
                 if mask is not None:
                     conn_spec['mask'] = mask
             
-            # === 5. Build Synapse Model ===
             base_model = params.get('synapse_model', 'static_synapse')
             
-            # Check if delay should be excluded
             no_delay = base_model in ['gap_junction', 'rate_connection_instantaneous']
             
-            # Keys that shouldn't go into CopyModel
             control_keys = {
                 'rule', 'indegree', 'outdegree', 'N', 'p',
                 'synapse_model', 'weight', 'delay',
@@ -5595,13 +5710,11 @@ class ConnectionExecutor:
                 'custom_name', 'no_delay', 'base_model'
             }
             
-            # Extract model-specific params
             model_params = {
                 k: v for k, v in params.items() 
                 if k not in control_keys and v is not None
             }
             
-            # Create custom model if needed
             final_model = base_model
             if model_params:
                 ts = int(time.time() * 1e6)
@@ -5611,12 +5724,10 @@ class ConnectionExecutor:
                     final_model = custom_name
                     self._created_models.append(custom_name)
                 except Exception as e:
-                    print(f"  ⚠ CopyModel failed: {e}, using {base_model}")
+                    print(f"CopyModel failed: {e}, using {base_model}")
             
-            # === 6. Build syn_spec ===
             syn_spec = {'synapse_model': final_model}
             
-            # Weight (possibly distance-dependent)
             weight = float(params.get('weight', 1.0))
             if params.get('use_spatial') and params.get('distance_dependent_weight'):
                 factor = float(params.get('dist_factor', 1.0))
@@ -5627,25 +5738,19 @@ class ConnectionExecutor:
             else:
                 syn_spec['weight'] = weight
             
-            # Delay (nur wenn erlaubt)
             if not no_delay:
                 delay = float(params.get('delay', 1.0))
                 syn_spec['delay'] = max(delay, nest.resolution)
             
-            # Receptor Type
             receptor = params.get('receptor_type')
             if receptor is not None and receptor != 0:
                 syn_spec['receptor_type'] = receptor
             
-            # === 7. Size Check für one_to_one ===
             if rule == 'one_to_one' and len(src_pop) != len(tgt_pop):
                 return False, f"one_to_one size mismatch: {len(src_pop)} vs {len(tgt_pop)}"
             
-            # === 8. Execute Connection! ===
             nest.Connect(src_pop, tgt_pop, conn_spec, syn_spec)
             
-            # --- SAVE TO GRAPH MODEL (FIX FOR GUI OVERVIEW) ---
-            # Wir müssen die Verbindung auch im Node-Objekt speichern, damit der TreeView sie sieht.
             try:
                 src_graph = self.graphs.get(source_info['graph_id'])
                 if src_graph:
@@ -5654,7 +5759,6 @@ class ConnectionExecutor:
                         if not hasattr(src_node_obj, 'connections'):
                             src_node_obj.connections = []
                         
-                        # Prüfen ob Verbindung schon existiert (um Duplikate zu vermeiden)
                         exists = False
                         for existing in src_node_obj.connections:
                             if existing.get('id') == connection.get('id'):
@@ -5662,12 +5766,10 @@ class ConnectionExecutor:
                                 break
                         
                         if not exists:
-                            # Wichtig: Kopie speichern, damit Queue-Referenzen keine Rolle spielen
                             import copy
                             src_node_obj.connections.append(copy.deepcopy(connection))
             except Exception as save_err:
                 print(f"Warning: Connection created in NEST but failed to save to Model: {save_err}")
-            # --------------------------------------------------
 
             return True, f"✓ {conn_name}: {len(src_pop)}→{len(tgt_pop)} neurons"
             
@@ -5679,10 +5781,7 @@ class ConnectionExecutor:
 
 
     def execute_pending_connections(self, connections: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[str, Any]]]:
-        """
-        Führt eine Liste von Verbindungen aus und gibt die fehlgeschlagenen Objekte zurück.
-        Dies wird vom ConnectionTool benötigt, um die Queue zu aktualisieren.
-        """
+
         success_count = 0
         fail_count = 0
         failed_items = []
@@ -5697,7 +5796,6 @@ class ConnectionExecutor:
                 print(f"  {msg}")
             else:
                 fail_count += 1
-                # Speichere den Fehlergrund direkt im Objekt für die GUI (rotes Highlight/Tooltip)
                 conn['error'] = msg
                 failed_items.append(conn)
                 print(f"  ✗ {conn.get('name', '?')}: {msg}")
@@ -5706,16 +5804,7 @@ class ConnectionExecutor:
     
     def execute_all(self, connections: List[Dict[str, Any]], 
                    progress_callback=None) -> Tuple[int, int, List[str]]:
-        """
-        Führt alle Verbindungen aus.
         
-        Args:
-            connections: Liste von Connection-Dicts
-            progress_callback: Optional callback(current, total, message)
-            
-        Returns:
-            (created, failed, error_messages)
-        """
         created = 0
         failed = 0
         errors = []
@@ -5743,17 +5832,14 @@ class ConnectionExecutor:
         return created, failed, errors
     
     def cleanup_custom_models(self):
-        """Entfernt alle erstellten Custom-Models (optional)."""
-        # NEST unterstützt kein direktes Löschen von Modellen,
-        # aber wir können die Liste für Debugging nutzen
+
         self._created_models.clear()
 
 
 class ConnectionQueueWidget(QWidget):
-    """Widget zur Anzeige und Verwaltung der Connection-Queue."""
     
-    connectionSelected = pyqtSignal(int)  # index
-    connectionRemoved = pyqtSignal(int)   # index
+    connectionSelected = pyqtSignal(int) 
+    connectionRemoved = pyqtSignal(int)  
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5765,7 +5851,7 @@ class ConnectionQueueWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         # Header
-        header = QLabel("📋 Connection Queue")
+        header = QLabel("Connection Queue")
         header.setStyleSheet("font-weight: bold;")
         layout.addWidget(header)
         
@@ -5789,7 +5875,6 @@ class ConnectionQueueWidget(QWidget):
         
         layout.addLayout(btn_layout)
         
-        # Status
         self.status_label = QLabel("0 connections")
         self.status_label.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(self.status_label)
@@ -5798,7 +5883,6 @@ class ConnectionQueueWidget(QWidget):
         """Fügt eine Verbindung hinzu."""
         self.connections.append(conn)
         
-        # Create list item
         name = conn.get('name', f"Connection {len(self.connections)}")
         src = conn.get('source', {})
         tgt = conn.get('target', {})
@@ -5808,7 +5892,6 @@ class ConnectionQueueWidget(QWidget):
         
         item = QListWidgetItem(label)
         
-        # Color based on synapse type
         syn = conn.get('params', {}).get('synapse_model', 'static')
         if 'stdp' in syn:
             item.setBackground(QColor(100, 50, 150, 50))
@@ -5868,7 +5951,6 @@ def create_nest_connections_from_stored(
         print("RECREATING ALL STORED CONNECTIONS")
         print("="*60)
     
-    # Collect all connections from all nodes in all graphs
     all_connections = []
     
     for graph_id, graph in graphs.items():
@@ -5891,7 +5973,6 @@ def create_nest_connections_from_stored(
     if verbose:
         print(f"\nTotal connections to recreate: {len(all_connections)}")
     
-    # Recreate each connection
     for conn in all_connections:
         conn_name = conn.get('name', f"Connection_{conn['id']}")
         source = conn['source']
@@ -5899,7 +5980,6 @@ def create_nest_connections_from_stored(
         params = conn['params']
         
         try:
-            # Get source and target populations
             source_graph = graphs.get(source['graph_id'])
             target_graph = graphs.get(target['graph_id'])
             
@@ -5916,7 +5996,6 @@ def create_nest_connections_from_stored(
             if target_node is None:
                 raise ValueError(f"Target node {target['node_id']} not found")
             
-            # Check populations exist
             if not source_node.population or source['pop_id'] >= len(source_node.population):
                 raise ValueError(f"Source population {source['pop_id']} not available")
             if not target_node.population or target['pop_id'] >= len(target_node.population):
@@ -5930,10 +6009,8 @@ def create_nest_connections_from_stored(
             if target_pop is None or len(target_pop) == 0:
                 raise ValueError("Target population is empty")
             
-            # Validate and execute
             conn_spec, syn_spec, warnings = validate_connection_params(params)
             
-            # Special check for one_to_one
             if conn_spec['rule'] == 'one_to_one' and len(source_pop) != len(target_pop):
                 raise ValueError(f"one_to_one: size mismatch ({len(source_pop)} vs {len(target_pop)})")
             
@@ -5975,7 +6052,6 @@ def repopulate_all_graphs(graphs: Dict[int, Any], verbose: bool = False) -> int:
                         print(f"Building Node {node.id}...")
                     node.build()
                 
-                # Populate with NEST neurons
                 if verbose:
                     print(f"Populating Node {node.id}...")
                 node.populate_node()
@@ -6005,12 +6081,12 @@ def safe_nest_reset_and_repopulate(
     if verbose:
         print("# SAFE NEST RESET AND REPOPULATE")
     
-    # 1. Reset NEST kernel
+    global _nest_simulation_has_run
     if verbose:
         print("\nResetting NEST kernel...")
     nest.ResetKernel()
+    _nest_simulation_has_run = False 
     
-    # 2. Re-enable structural plasticity if requested
     if enable_structural_plasticity:
         try:
             nest.EnableStructuralPlasticity()
@@ -6021,10 +6097,8 @@ def safe_nest_reset_and_repopulate(
                 print(f"Could not enable structural plasticity: {e}")
             enable_structural_plasticity = False
     
-    # 3. Repopulate all nodes
     total_pops = repopulate_all_graphs(graphs, verbose=verbose)
     
-    # 4. Recreate all connections
     created, failed, failed_list = create_nest_connections_from_stored(graphs, verbose=verbose)
     
     result = {
@@ -6062,11 +6136,9 @@ def get_all_connections_summary(graphs: Dict[int, Any]) -> Dict[str, Any]:
             for conn in (node.connections or []):
                 params = conn.get('params', {})
                 
-                # Count by synapse model
                 model = params.get('synapse_model', 'static_synapse')
                 summary['by_synapse_model'][model] = summary['by_synapse_model'].get(model, 0) + 1
                 
-                # Count by rule
                 rule = params.get('rule', 'all_to_all')
                 summary['by_rule'][rule] = summary['by_rule'].get(rule, 0) + 1
         
@@ -6144,12 +6216,10 @@ def create_connection_from_gui_params(
     allow_autapses: bool = False,
     allow_multapses: bool = True,
     connection_name: str = None,
-    # Rule-specific params
     indegree: int = None,
     outdegree: int = None,
     N: int = None,
     p: float = None,
-    # Synapse-specific params
     **synapse_params
 ) -> Dict[str, Any]:
     
@@ -6162,7 +6232,6 @@ def create_connection_from_gui_params(
         'allow_multapses': allow_multapses,
     }
     
-    # Add rule-specific params if provided
     if indegree is not None:
         params['indegree'] = indegree
     if outdegree is not None:
@@ -6172,7 +6241,6 @@ def create_connection_from_gui_params(
     if p is not None:
         params['p'] = p
     
-    # Add synapse-specific params
     params.update(synapse_params)
     
     return {
@@ -6194,8 +6262,6 @@ def create_connection_from_gui_params(
 
 
 def validate_SYNAPSE_MODELS():
-    """Prüft ob SYNAPSE_MODELS nur echte NEST Synapse-Modelle enthält."""
-    import nest
     
     nest_synapses = set(nest.SYNAPSE_MODELS)
     
@@ -6206,7 +6272,7 @@ def validate_SYNAPSE_MODELS():
     for model in SYNAPSE_MODELS.keys():
         if model in nest_synapses:
             valid.append(model)
-            print(f"  ✅ {model}")
+            print(f"{model}")
         else:
             invalid.append(model)
             print(f"{model} - NOT A VALID SYNAPSE MODEL!")
@@ -6225,8 +6291,7 @@ def validate_SYNAPSE_MODELS():
 
 
 
-from pathlib import Path
-from datetime import datetime
+
 
 
 
@@ -6252,7 +6317,7 @@ def generate_node_parameters_list(n_nodes=5,
         
         types = list(range(node_n_types))
         
-        available_models = ["iaf_psc_alpha", "iaf_psc_exp", "iaf_psc_delta"]
+        available_models = successful_neuron_models
         neuron_models = [available_models[t % len(available_models)] 
                         for t in range(node_n_types)]
         
@@ -6376,8 +6441,6 @@ def generate_node_parameters_list(n_nodes=5,
     
     return params_list
 
-
-
 class SaveLoadWidget(QWidget):
     
     def __init__(self, main_window, Graph_class=None, parent=None):
@@ -6392,7 +6455,7 @@ class SaveLoadWidget(QWidget):
         layout.setSpacing(10)
         
         # Save Button
-        self.save_btn = QPushButton("💾 Save Graph")
+        self.save_btn = QPushButton("Save Graph")
         self.save_btn.setMinimumWidth(100)
         self.save_btn.setStyleSheet("""
             QPushButton {
@@ -6408,7 +6471,6 @@ class SaveLoadWidget(QWidget):
         """)
         self.save_btn.clicked.connect(self.save_graph_dialog)
         
-        # Load Button
         self.load_btn = QPushButton("Load Graph")
         self.load_btn.setMinimumWidth(100)
         self.load_btn.setStyleSheet("""
@@ -6495,8 +6557,6 @@ class SaveLoadWidget(QWidget):
         else:
             QMessageBox.critical(self, "Error", "Loading Error!")
 
-
-
 def add_save_load_buttons(main_window, Graph_class=None, target_layout=None):
     
     widget = SaveLoadWidget(main_window, Graph_class)
@@ -6513,10 +6573,6 @@ def add_save_load_buttons(main_window, Graph_class=None, target_layout=None):
     main_window.save_load_widget = widget
     print("Save/Load Buttons hinzugefügt")
     return widget
-
-
-
-
 
 class SimulationControlWidget(QWidget):
     def __init__(self, parent=None):
@@ -6543,17 +6599,16 @@ class SimulationControlWidget(QWidget):
         stop_style = btn_style + "QPushButton { background-color: #F44336; color: white; }"
         io_style = btn_style + "QPushButton { background-color: #2196F3; color: white; }"
         
-        # Buttons erstellen
         self.btn_start = QPushButton("Simulate")
         self.btn_start.setStyleSheet(start_style)
         
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setStyleSheet(stop_style)
         
-        self.btn_save = QPushButton("💾 Save Graphs")
+        self.btn_save = QPushButton("Save Graphs")
         self.btn_save.setStyleSheet(io_style)
     
-        self.btn_load = QPushButton("📂 Load Graphs")
+        self.btn_load = QPushButton("Load Graphs")
         self.btn_load.setStyleSheet(io_style)
         
         for btn in [self.btn_start, self.btn_stop, self.btn_save, self.btn_load]:
@@ -6564,7 +6619,6 @@ class SimulationControlWidget(QWidget):
         layout.addWidget(self.btn_save)
         layout.addWidget(self.btn_load)
 
-
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):
@@ -6574,7 +6628,6 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, (np.floating, np.float64, np.float32)):
             return float(obj)
         return super().default(obj)
-
 
 def _clean_params(params: dict) -> dict:
     clean = {}
@@ -6605,7 +6658,6 @@ def _clean_params(params: dict) -> dict:
             clean[k] = v
     return clean
 
-
 def _serialize_connections(connections: list) -> list:
     if not connections:
         return []
@@ -6621,9 +6673,7 @@ def _serialize_connections(connections: list) -> list:
         result.append(conn_data)
     return result
 
-
 def save_graph(graph, filepath: str) -> bool:
-    
     try:
         data = {
             'meta': {
@@ -6642,16 +6692,36 @@ def save_graph(graph, filepath: str) -> bool:
         }
         
         for node in graph.node_list:
+            cleaned_devices = []
+            
+            source_devices = getattr(node, 'devices', [])
+            if not source_devices and hasattr(node, 'parameters') and 'devices' in node.parameters:
+                source_devices = node.parameters['devices']
+
+            for dev in source_devices:
+                dev_copy = dev.copy()
+                if 'runtime_gid' in dev_copy:
+                    del dev_copy['runtime_gid']
+                if 'params' in dev_copy:
+                    dev_copy['params'] = _clean_params(dev_copy['params'])
+                cleaned_devices.append(dev_copy)
+            
+            safe_params = _clean_params(node.parameters) if hasattr(node, 'parameters') else {}
+            
+            if 'devices' in safe_params:
+                del safe_params['devices']
+
             node_data = {
                 'id': node.id,
                 'name': node.name,
                 'graph_id': node.graph_id if hasattr(node, 'graph_id') else 0,
-                'parameters': _clean_params(node.parameters) if hasattr(node, 'parameters') else {},
+                'parameters': safe_params,
                 'center_of_mass': list(node.center_of_mass) if hasattr(node, 'center_of_mass') else [0,0,0],
                 'types': node.types if hasattr(node, 'types') else [],
+                'devices': cleaned_devices, 
+                'connections': _serialize_connections(node.connections) if hasattr(node, 'connections') else [],
                 'neuron_models': node.neuron_models if hasattr(node, 'neuron_models') else [],
                 'distribution': list(node.distribution) if hasattr(node, 'distribution') and node.distribution else [],
-                'connections': _serialize_connections(node.connections) if hasattr(node, 'connections') else [],
                 'parent_id': node.parent.id if hasattr(node, 'parent') and node.parent else None,
                 'next_ids': [n.id for n in node.next] if hasattr(node, 'next') else [],
                 'prev_ids': [n.id for n in node.prev] if hasattr(node, 'prev') else [],
@@ -6677,9 +6747,7 @@ def save_graph(graph, filepath: str) -> bool:
         traceback.print_exc()
         return False
 
-
 def load_graph(filepath: str, Graph_class):
-    
     try:
         filepath = Path(filepath)
         if not filepath.exists():
@@ -6711,24 +6779,24 @@ def load_graph(filepath: str, Graph_class):
             params['graph_id'] = nd.get('graph_id', 0)
             params['connections'] = nd.get('connections', [])
             
+            if 'devices' in nd:
+                params['devices'] = nd['devices']
+
             if 'center_of_mass' in nd:
                 params['center_of_mass'] = np.array(nd['center_of_mass'])
             
-            parent_id = nd.get('parent_id')
-            parent = graph.get_node(parent_id) if parent_id is not None else None
-            is_root = (nd['id'] == 0 or parent_id is None)
-            
             new_node = graph.create_node(
                 parameters=params,
-                other=parent,
-                is_root=is_root,
+                is_root=(nd['id']==0), 
                 auto_build=False
             )
             
             if nd.get('positions'):
                 new_node.positions = [np.array(pos) for pos in nd['positions']]
                 new_node.center_of_mass = np.array(nd['center_of_mass'])
-        
+            
+            new_node.populate_node()
+
         for nd in nodes_data:
             node = graph.get_node(nd['id'])
             if not node:
@@ -6869,9 +6937,7 @@ class ConnectionParamWidget(QWidget):
         print(f"Connection '{self.current_conn_data['name']}' updated in local memory.")
 
 class DeviceTargetSelector(QGroupBox):
-    """
-    Linker Bereich im Tool-Menü: Wählt aus, WO das Gerät angeschlossen wird.
-    """
+
     def __init__(self, graph_list, parent=None):
         super().__init__("Target Selection", parent)
         self.graph_list = graph_list
@@ -6939,14 +7005,9 @@ class DeviceTargetSelector(QGroupBox):
             'pop_id': self.combo_pop.currentData()
         }
 
-
-
 class DeviceConfigPage(QWidget):
-    """
-    Konfigurationsseite für ein spezifisches Gerät.
-    Generiert Parameter-Felder basierend auf dem Device-Typ und parst Eingaben.
-    """
-    deviceCreated = pyqtSignal(dict) # Sendet Daten zurück an ToolsWidget
+
+    deviceCreated = pyqtSignal(dict) 
 
     def __init__(self, device_label, device_type, graph_list, parent=None):
         super().__init__(parent)
@@ -6960,7 +7021,6 @@ class DeviceConfigPage(QWidget):
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         
-        # --- LINKE SEITE: Target Selector ---
         left_container = QWidget()
         left_layout = QVBoxLayout(left_container)
         left_layout.setContentsMargins(0,0,0,0)
@@ -6969,16 +7029,13 @@ class DeviceConfigPage(QWidget):
         left_layout.addWidget(self.target_selector)
         left_layout.addStretch()
         
-        # --- RECHTE SEITE: Parameter ---
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
         
-        # Header
         header = QLabel(f"Configure {self.device_label}")
         header.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {self._get_color()};")
         right_layout.addWidget(header)
         
-        # Formular
         form_group = QGroupBox("Device Parameters")
         self.form_layout = QFormLayout(form_group)
         
@@ -6987,7 +7044,6 @@ class DeviceConfigPage(QWidget):
         right_layout.addWidget(form_group)
         right_layout.addStretch()
         
-        # Create Button
         self.btn_create = QPushButton(f"✚ Create {self.device_label}")
         self.btn_create.setMinimumHeight(45)
         self.btn_create.setStyleSheet(f"background-color: {self._get_color()}; color: white; font-weight: bold;")
@@ -7005,10 +7061,8 @@ class DeviceConfigPage(QWidget):
     def _build_parameters(self):
         """Erstellt Felder basierend auf NEST Dokumentation + Verbindungsparameter."""
         
-        # --- A. DEVICE PARAMETERS ---
         self.form_layout.addRow(QLabel("--- Device Settings ---"))
         
-        # Standards für alle
         self._add_param("start", 0.0, "Start Time (ms)")
         self._add_param("stop", 10000.0, "Stop Time (ms)")
         
@@ -7047,10 +7101,8 @@ class DeviceConfigPage(QWidget):
         elif "voltmeter" in self.device_type:
             self._add_param("interval", 1.0, "Recording Interval (ms)")
 
-        # --- B. CONNECTION PARAMETERS (NEU) ---
         self.form_layout.addRow(QLabel("--- Connection Settings ---"))
         
-        # Standard-Gewicht höher setzen für Generatoren, damit man was sieht
         default_weight = 10.0 if "generator" in self.device_type else 1.0
         
         self._add_param("conn_weight", default_weight, "Synapse Weight (pA)")
@@ -7076,7 +7128,6 @@ class DeviceConfigPage(QWidget):
         if not text.strip():
             return []
         try:
-            # Entferne Klammern falls User [1,2] eingibt
             cleaned = text.replace('[', '').replace(']', '')
             parts = cleaned.split(',')
             return [dtype(p.strip()) for p in parts if p.strip()]
@@ -7091,19 +7142,16 @@ class DeviceConfigPage(QWidget):
             print("Error: No target selected!")
             return
             
-        # Parameter extrahieren und trennen
         device_params = {}
         conn_params = {}
         
         for key, widget in self.param_widgets.items():
             val = None
             
-            # Value holen
             if isinstance(widget, QDoubleSpinBox):
                 val = widget.value()
             elif isinstance(widget, QLineEdit):
                 text_val = widget.text()
-                # Listen Parsing
                 if key in ["amplitude_times", "amplitude_values", "spike_times"]:
                     val = self._parse_list_input(text_val, dtype=float)
                 elif key == "spike_multiplicities":
@@ -7115,38 +7163,32 @@ class DeviceConfigPage(QWidget):
                 else:
                     val = text_val
             
-            # Sortieren: Ist es Connection-Parameter oder Device-Parameter?
             if key.startswith("conn_"):
                 # "conn_weight" -> "weight"
                 clean_key = key.replace("conn_", "")
                 conn_params[clean_key] = val
             else:
-                if val is not None: # Leere Strings ignorieren? Ggf. anpassen
+                if val is not None:
                     device_params[key] = val
         
-        # Datenpaket schnüren
         device_data = {
             "model": self.device_type,
             "target": target,
-            "params": device_params,      # Geht an nest.Create
-            "conn_params": conn_params    # Geht an nest.Connect
+            "params": device_params,     
+            "conn_params": conn_params    
         }
         
         self.deviceCreated.emit(device_data)
 
-
-
 class ToolsWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.graph_list = [] # Wird von CleanAlpha gesetzt/aktualisiert
+        self.graph_list = [] 
         self.button_map = {}
         self.init_ui()
         
     def update_graphs(self, graph_list):
-        """Wird von CleanAlpha aufgerufen, wenn sich Graphen ändern."""
         self.graph_list = graph_list
-        # Refresh aktiven Selector
         current_widget = self.config_stack.currentWidget()
         if isinstance(current_widget, DeviceConfigPage):
             current_widget.target_selector.graph_list = graph_list
@@ -7156,7 +7198,6 @@ class ToolsWidget(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # === MENÜ ===
         menu_container = QWidget()
         menu_container.setFixedWidth(160)
         menu_container.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
@@ -7182,7 +7223,6 @@ class ToolsWidget(QWidget):
         
         self.config_stack = QStackedWidget()
         
-        # Startseite
         info_page = QLabel("Select a device from the left menu.")
         info_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
         info_page.setStyleSheet("color: #666;")
@@ -7208,8 +7248,7 @@ class ToolsWidget(QWidget):
                 QPushButton:hover {{ background: #2c2c2c; }}
             """)
             
-            # Page erstellen
-            # Wir übergeben self.graph_list (Referenz)
+
             page = DeviceConfigPage(label, model, self.graph_list)
             page.deviceCreated.connect(self.on_device_created)
             
@@ -7228,84 +7267,154 @@ class ToolsWidget(QWidget):
             btn.setChecked(btn == clicked_btn)
         self.config_stack.setCurrentIndex(index)
         
-        # Refresh data on switch
         widget = self.config_stack.widget(index)
         if isinstance(widget, DeviceConfigPage):
             widget.target_selector.graph_list = self.graph_list
             widget.target_selector.refresh()
 
     def on_device_created(self, data):
-        """
-        Logik zum Erstellen des Devices in NEST und Speichern im Graph-Objekt.
-        Nutzt jetzt User-definierte Gewichte.
-        """
-        print(f"\nCreating Device: {data['model']}")
+ 
+        global _nest_simulation_has_run
+        
+        model_name = data['model']
+        print(f"\nCreating Device: {model_name}")
+        
+        if _nest_simulation_has_run:
+            print(" NEST Reset...")
+            try:
+                nest.ResetKernel()
+                _nest_simulation_has_run = False
+                
+                for graph in self.graph_list:
+                    for node in graph.node_list:
+                        if not hasattr(node, 'positions') or not node.positions:
+                            node.build()
+                        elif all(len(p) == 0 for p in node.positions if p is not None):
+                            node.build()
+                        
+                        node.populate_node()
+                        
+                        if hasattr(node, 'devices') and node.devices:
+                            pass 
+                
+                print("  ✓ Done")
+                
+            except Exception as e:
+                print(f"  Reset failed: {e}")
+                import traceback
+                traceback.print_exc()
+                return
         
         target = data['target']
         graph_id = target['graph_id']
         node_id = target['node_id']
         pop_id = target['pop_id']
         
-        # 1. Node finden
         target_graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
-        if not target_graph: return
+        if not target_graph: 
+            print(f"Error: Graph {graph_id} not found.")
+            return
+            
         target_node = next((n for n in target_graph.node_list if n.id == node_id), None)
-        if not target_node: return
+        if not target_node: 
+            print(f"Error: Node {node_id} not found.")
+            return
+        
+        conn_params = data.get('conn_params', {})
         
         if not hasattr(target_node, 'devices'):
             target_node.devices = []
             
-        # 2. NEST Device erstellen
-        try:
-            device = nest.Create(data['model'], params=data['params'])
-            print(f"  ✓ NEST ID: {device}")
+        if 'devices' not in target_node.parameters:
+            target_node.parameters['devices'] = []
             
-            # 3. Verbinden mit User-Parametern
+        device_record = {
+            "id": len(target_node.parameters['devices']),
+            "model": model_name,
+            "target_pop_id": pop_id,
+            "params": data['params'],     
+            "conn_params": conn_params,    
+            "runtime_gid": None           
+        }
+            
+        target_node.parameters['devices'].append(device_record)
+        
+        target_node.devices.append(device_record)
+            
+        print(f"  ✓ Saved to Node Parameters (Total devices: {len(target_node.parameters['devices'])})")
+
+        try:
+            nest_device = nest.Create(model_name, params=data['params'])
+            
+            device_record['runtime_gid'] = nest_device
+            print(f"  ✓ NEST ID created: {nest_device}")
+            
+            if pop_id >= len(target_node.population):
+                raise ValueError(f"Population index {pop_id} out of range.")
+
             pop_nest = target_node.population[pop_id]
             
-            # Synapse Spec bauen
-            conn_params = data.get('conn_params', {})
+            weight = float(conn_params.get('weight', 1.0))
+            delay = max(float(conn_params.get('delay', 1.0)), 0.1)
+            
             syn_spec = {
-                'weight': float(conn_params.get('weight', 1.0)),
-                'delay': max(float(conn_params.get('delay', 1.0)), 0.1)
+                'synapse_model': 'static_synapse',
+                'weight': weight,
+                'delay': delay
             }
             
-            if "generator" in data['model']:
-                nest.Connect(device, pop_nest, syn_spec=syn_spec)
-                print(f"  ✓ Connected Generator -> Population (W={syn_spec['weight']}, D={syn_spec['delay']})")
+            if "generator" in model_name or "stimulator" in model_name:
+                nest.Connect(nest_device, pop_nest, syn_spec=syn_spec)
+                direction_str = "-> Population"
             else:
-                # Recorder: Gewicht ist hier meist irrelevant, aber Delay zählt
-                nest.Connect(pop_nest, device, syn_spec=syn_spec)
-                print(f"  ✓ Connected Population -> Recorder (D={syn_spec['delay']})")
+                nest.Connect(pop_nest, nest_device, syn_spec=syn_spec)
+                direction_str = "<- Population"
                 
-            # 4. Speichern im Datenmodell
-            device_record = {
-                "id": len(target_node.devices),
-                "model": data['model'],
-                "target_pop_id": pop_id,
-                "params": data['params'],
-                "conn_params": conn_params # Speichern für späteres Laden/Anzeigen
-            }
-            target_node.devices.append(device_record)
-            print(f"  ✓ Saved to Node Model (Total devices: {len(target_node.devices)})")
+            print(f"  ✓ Connected: {model_name} {direction_str} (W={weight}, D={delay})")
             
-            # Feedback
             from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Success", f"{data['model']} created!\nWeight: {syn_spec['weight']}")
+            QMessageBox.information(
+                self, 
+                "Device Created", 
+                f"Successfully created {model_name}!\nID: {nest_device}"
+            )
             
         except Exception as e:
-            print(f"Error creating device: {e}")
+            print(f" Error creating device in NEST: {e}")
             import traceback
             traceback.print_exc()
+            
+            if device_record in target_node.parameters['devices']:
+                target_node.parameters['devices'].remove(device_record)
+            if device_record in target_node.devices:
+                target_node.devices.remove(device_record)
+            
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "NEST Error", f"Could not create device:\n{str(e)}")
 
+class SafeGLViewWidget(gl.GLViewWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rendering_enabled = True
 
+    def paintGL(self, *args, **kwargs):
+
+        if not self.rendering_enabled or not self.isVisible() or not self.isValid():
+            return
+            
+        try:
+            super().paintGL(*args, **kwargs)
+        except Exception:
+            pass
+
+    def stop_rendering(self):
+        self.rendering_enabled = False
+        
+    def start_rendering(self):
+        self.rendering_enabled = True
 
 class StructuresWidget(QWidget):
-    """
-    Zeigt Buttons für biologische Kortex-Regionen an.
-    Bei Klick wird ein Signal mit den Modellen und Verteilungen gesendet.
-    """
-    # Signal sendet: (Region Name, Liste der Modelle, Liste der Wahrscheinlichkeiten)
+
     structureSelected = pyqtSignal(str, list, list)
 
     def __init__(self):
@@ -7316,7 +7425,7 @@ class StructuresWidget(QWidget):
         layout = QVBoxLayout(self)
         
         # Header
-        header_lbl = QLabel("🧠 CORTICAL STRUCTURES")
+        header_lbl = QLabel("CORTICAL STRUCTURES")
         header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #E91E63; border-bottom: 2px solid #E91E63; padding-bottom: 5px;")
         layout.addWidget(header_lbl)
         
@@ -7324,7 +7433,6 @@ class StructuresWidget(QWidget):
         info.setStyleSheet("color: #888; font-style: italic; margin-bottom: 10px;")
         layout.addWidget(info)
 
-        # Scroll Area für die Regionen
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("border: none;")
@@ -7332,11 +7440,7 @@ class StructuresWidget(QWidget):
         container = QWidget()
         self.grid_layout = QGridLayout(container)
         self.grid_layout.setSpacing(10)
-        
-        # --- DATEN AUS NEURON_TOOLBOX LADEN ---
-        # Wir müssen die Daten transponieren: Von Model->Region zu Region->ModelList
-        
-        # 1. Dictionary vorbereiten: RegionKey -> {Model: Prob}
+
         region_data = {r_key: {} for r_key in region_names.values()}
         
         for model, region_map in distributions.items():
@@ -7344,18 +7448,15 @@ class StructuresWidget(QWidget):
                 if prob > 0:
                     region_data[r_key][model] = prob
 
-        # 2. Buttons erstellen
         row, col = 0, 0
         for display_name, r_key in region_names.items():
             if r_key not in region_data or not region_data[r_key]:
                 continue
             
-            # Modelle und Probs extrahieren
             models_probs = region_data[r_key]
             model_list = list(models_probs.keys())
             prob_list = list(models_probs.values())
             
-            # Normalisieren auf 1.0
             total = sum(prob_list)
             if total > 0:
                 prob_list = [p/total for p in prob_list]
@@ -7381,21 +7482,18 @@ class StructuresWidget(QWidget):
                 }
             """)
             
-            # Tooltip bauen
             tooltip_txt = f"<b>{display_name}</b><br>Contains:<br>"
             for m, p in zip(model_list, prob_list):
                 tooltip_txt += f"• {m}: {p*100:.1f}%<br>"
             btn.setToolTip(tooltip_txt)
             
-            # Signal verbinden (Nutze Default-Args um Closure-Problem zu vermeiden)
             btn.clicked.connect(lambda checked, n=display_name, m=model_list, p=prob_list: 
                               self.structureSelected.emit(n, m, p))
             
             self.grid_layout.addWidget(btn, row, col)
             
             col += 1
-            if col > 1: # 2 Spalten
-                col = 0
+            if col > 1: 
                 row += 1
         
         scroll.setWidget(container)
@@ -7552,10 +7650,8 @@ class FlowFieldWidget(QWidget):
 class SimulationDashboardWidget(QWidget):
     """
     Zentrale Steuereinheit für die Simulation.
-    Zeigt Statistiken, Pie-Charts und Konfigurationen vor dem Start.
     """
-    requestStartSimulation = pyqtSignal(float) # sendet duration
-    requestOpenSpectator = pyqtSignal()
+    requestStartSimulation = pyqtSignal(float) 
     requestShowResults = pyqtSignal()
 
     def __init__(self, graph_list):
@@ -7568,20 +7664,16 @@ class SimulationDashboardWidget(QWidget):
         main_layout.setSpacing(20)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # --- HEADER ---
         header = QLabel("SIMULATION DASHBOARD")
         header.setStyleSheet("font-size: 18px; font-weight: bold; color: #FF9800; letter-spacing: 2px;")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(header)
 
-        # --- CONTENT AREA (Grid) ---
         content_layout = QHBoxLayout()
         
-        # LINKS: Konfiguration & Stats
         left_col = QVBoxLayout()
         
-        # 1. Config Group
-        config_group = QGroupBox("⚙️ Configuration")
+        config_group = QGroupBox("Configuration")
         config_layout = QFormLayout(config_group)
         
         self.duration_spin = QDoubleSpinBox()
@@ -7599,8 +7691,7 @@ class SimulationDashboardWidget(QWidget):
         
         left_col.addWidget(config_group)
         
-        # 2. Stats Group
-        stats_group = QGroupBox("📊 Network Summary")
+        stats_group = QGroupBox("Network Summary")
         self.stats_layout = QFormLayout(stats_group)
         self.lbl_nodes = QLabel("0")
         self.lbl_pops = QLabel("0")
@@ -7608,7 +7699,6 @@ class SimulationDashboardWidget(QWidget):
         self.lbl_conns = QLabel("0")
         self.lbl_devices = QLabel("0")
         
-        # Style für Zahlen
         number_style = "color: #00E5FF; font-weight: bold; font-size: 12px;"
         self.lbl_nodes.setStyleSheet(number_style)
         self.lbl_pops.setStyleSheet(number_style)
@@ -7627,7 +7717,6 @@ class SimulationDashboardWidget(QWidget):
         
         content_layout.addLayout(left_col, 1)
 
-        # RECHTS: Pie Chart
         right_col = QVBoxLayout()
         chart_group = QGroupBox("Neuron Distribution")
         chart_layout = QVBoxLayout(chart_group)
@@ -7642,15 +7731,14 @@ class SimulationDashboardWidget(QWidget):
 
         main_layout.addLayout(content_layout)
 
-        # --- ACTIONS AREA ---
         action_container = QWidget()
         action_layout = QVBoxLayout(action_container)
         action_layout.setSpacing(10)
         
-        # Start Button
-        self.btn_start = QPushButton("▶ START SIMULATION")
+        self.btn_start = QPushButton("▶ RUN SIMULATION (Headless)")
         self.btn_start.setMinimumHeight(60)
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setToolTip("Runs the simulation without live visualization (faster).")
         self.btn_start.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50; 
@@ -7665,18 +7753,6 @@ class SimulationDashboardWidget(QWidget):
         """)
         self.btn_start.clicked.connect(self._on_start_clicked)
         
-        # Live Spectator
-        self.btn_spectator = QPushButton("👁️ Open Live Spectator")
-        self.btn_spectator.setMinimumHeight(40)
-        self.btn_spectator.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3; color: white; font-weight: bold; font-size: 14px; border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #42A5F5; }
-        """)
-        self.btn_spectator.clicked.connect(self.requestOpenSpectator.emit)
-
-        # Results (Disabled)
         self.btn_results = QPushButton("📊 Results (No Data)")
         self.btn_results.setMinimumHeight(40)
         self.btn_results.setEnabled(False)
@@ -7691,7 +7767,6 @@ class SimulationDashboardWidget(QWidget):
         self.btn_results.clicked.connect(self.requestShowResults.emit)
 
         action_layout.addWidget(self.btn_start)
-        action_layout.addWidget(self.btn_spectator)
         action_layout.addWidget(self.btn_results)
         
         main_layout.addWidget(action_container)
@@ -7714,15 +7789,12 @@ class SimulationDashboardWidget(QWidget):
             total_nodes += len(graph.node_list)
             
             for node in graph.node_list:
-                # Connections
                 if hasattr(node, 'connections'):
                     total_conns += len(node.connections)
                 
-                # Devices
                 if hasattr(node, 'devices'):
                     total_devices += len(node.devices)
                 
-                # Populations & Neurons
                 if hasattr(node, 'population') and node.population:
                     for i, nest_pop in enumerate(node.population):
                         if nest_pop:
@@ -7744,7 +7816,6 @@ class SimulationDashboardWidget(QWidget):
         self.lbl_conns.setText(str(total_conns))
         self.lbl_devices.setText(str(total_devices))
         
-        # Update Chart
         self._plot_pie_chart(model_counts)
 
     def _plot_pie_chart(self, counts):
@@ -7759,74 +7830,383 @@ class SimulationDashboardWidget(QWidget):
 
         labels = list(counts.keys())
         sizes = list(counts.values())
+        total = sum(sizes)
         
-        # Farben holen
         colors = [neuron_colors.get(l, "#888888") for l in labels]
         
         ax = self.figure.add_subplot(111)
+        
         wedges, texts, autotexts = ax.pie(
             sizes, 
-            labels=labels, 
+            labels=None,      
             autopct='%1.1f%%',
             startangle=90,
             colors=colors,
-            textprops=dict(color="white")
+            textprops=dict(color="white"),
+            pctdistance=0.85   
         )
         
-        # Style Anpassungen für Dark Mode
-        for text in texts:
-            text.set_color("#cccccc")
-            text.set_fontsize(9)
-        for autotext in autotexts:
+        for i, autotext in enumerate(autotexts):
             autotext.set_color("black") 
             autotext.set_weight("bold")
+            autotext.set_fontsize(9)
             
-        self.figure.patch.set_facecolor('#2b2b2b') # Hintergrund des Plots
+            if total > 0 and (sizes[i] / total) < 0.02:
+                autotext.set_visible(False)
+            
+        ax.legend(
+            wedges, 
+            labels,
+            title="Models",
+            loc="center left",
+            bbox_to_anchor=(0.9, 0, 0.5, 1),
+            frameon=False,
+            labelcolor='#cccccc',
+            fontsize='small'
+        )
+            
+        self.figure.patch.set_facecolor('#2b2b2b')
+        self.figure.subplots_adjust(left=0.0, bottom=0.0, right=0.75, top=1.0) 
         
         self.canvas.draw()
 
-class LiveSpectatorWindow(QMainWindow):
+
+class AnalysisDashboard(QWidget):
+
     def __init__(self, graph_list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Live Spectator (PyQtGraph)")
-        self.resize(1000, 800)
         self.graph_list = graph_list
+        self.docks = {}
+        self.dock_counter = 0
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
+        menu_frame = QFrame()
+        menu_frame.setStyleSheet("background-color: #2b2b2b; border-right: 1px solid #444;")
+        menu_layout = QVBoxLayout(menu_frame)
+        
+        lbl = QLabel("DATA TOOLBOX")
+        lbl.setStyleSheet("color: #00E5FF; font-weight: bold; font-size: 12px; letter-spacing: 2px;")
+        menu_layout.addWidget(lbl)
+        menu_layout.addSpacing(20)
+        
+        self.add_btn("Raster Plot (2D)", self.add_raster_plot, menu_layout, "#4CAF50")
+        self.add_btn("Firing Rate (PSTH)", self.add_rate_plot, menu_layout, "#2196F3")
+        self.add_btn("ISI Histogram", self.add_isi_plot, menu_layout, "#9C27B0")
+        self.add_btn("Spike Matrix (Heatmap)", self.add_heatmap_plot, menu_layout, "#FF9800")
+        
+        menu_layout.addSpacing(20)
+        lbl_3d = QLabel("3D ANALYSIS")
+        lbl_3d.setStyleSheet("color: #E91E63; font-weight: bold; font-size: 12px;")
+        menu_layout.addWidget(lbl_3d)
+        
+        self.add_btn("Spike Cloud (OpenGL)", self.add_3d_spike_cloud, menu_layout, "#E91E63")
+        self.add_btn("Activity Surface", self.add_3d_surface, menu_layout, "#E91E63")
+        
+        menu_layout.addStretch()
+        
+        btn_clear = QPushButton("Clear Dashboard")
+        btn_clear.clicked.connect(self.clear_docks)
+        btn_clear.setStyleSheet("background-color: #444; color: #bbb; border: 1px solid #555;")
+        menu_layout.addWidget(btn_clear)
+        
+        self.area = dock.DockArea()
+        self.area.setStyleSheet("background-color: #1a1a1a;")
+        
+        layout.addWidget(menu_frame, 15)
+        layout.addWidget(self.area, 85)
+
+    def add_btn(self, text, func, layout, color):
+        btn = QPushButton(text)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent; text-align: left; padding: 10px;
+                color: #ddd; border: 1px solid #444; border-radius: 4px;
+            }}
+            QPushButton:hover {{ background-color: {color}; color: white; border: 1px solid {color}; }}
+        """)
+        btn.clicked.connect(func)
+        layout.addWidget(btn)
+
+    def _get_spike_data(self):
+        """Holt Spike-Daten aus dem globalen Recorder."""
+        
+        try:
+            
+            nodes = nest.GetNodes((0,))[0] 
+            recorders = [n for n in nodes if nest.GetStatus([n], 'model')[0] == 'spike_recorder']
+            
+            if not recorders:
+                return None, None
+            
+            
+            all_events = {'senders': [], 'times': []}
+            
+            for rec in recorders:
+                events = nest.GetStatus(rec, 'events')[0]
+                all_events['senders'].extend(events['senders'])
+                all_events['times'].extend(events['times'])
+            
+            return np.array(all_events['senders']), np.array(all_events['times'])
+            
+        except Exception as e:
+            print(f"Data fetch error: {e}")
+            return None, None
+
+    def create_dock(self, name, widget, position='right'):
+        self.dock_counter += 1
+        d = dock.Dock(f"{name} #{self.dock_counter}", size=(500, 400), closable=True)
+        d.addWidget(widget)
+        self.area.addDock(d, position)
+        return d
+
+    def clear_docks(self):
+        self.area.clear() 
+        for d in self.area.findAll()[1]:
+            d.close()
+
+
+    def add_raster_plot(self):
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0:
+            print("No Data found.")
+            return
+
+        w = pg.GraphicsLayoutWidget()
+        p = w.addPlot(title="Spike Raster Plot")
+        p.plot(times, senders, pen=None, symbol='o', symbolSize=3, symbolBrush='w')
+        p.setLabel('bottom', 'Time', units='ms')
+        p.setLabel('left', 'Neuron ID')
+        
+        self.create_dock("Raster", w)
+
+    def add_rate_plot(self):
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0: return
+
+        # Calculation
+        sim_time = times.max() if len(times) > 0 else 1000.0
+        bin_size = 10.0
+        bins = np.arange(0, sim_time + bin_size, bin_size)
+        spike_counts, _ = np.histogram(times, bins=bins)
+        
+        n_neurons = len(np.unique(senders))
+        if n_neurons == 0: n_neurons = 1
+        firing_rate = spike_counts / (bin_size / 1000) / n_neurons
+
+        w = pg.GraphicsLayoutWidget()
+        p = w.addPlot(title="Population Firing Rate (PSTH)")
+        p.plot(bins[:-1] + bin_size/2, firing_rate, pen=pg.mkPen('#2196F3', width=2), fillLevel=0, brush=(33, 150, 243, 50))
+        p.setLabel('bottom', 'Time', units='ms')
+        p.setLabel('left', 'Rate', units='Hz')
+        
+        self.create_dock("PSTH", w)
+
+    def add_isi_plot(self):
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0: return
+
+        all_isis = []
+        for neuron_id in np.unique(senders):
+            neuron_times = np.sort(times[senders == neuron_id])
+            if len(neuron_times) > 1:
+                isis = np.diff(neuron_times)
+                all_isis.extend(isis)
+        
+        if not all_isis: return
+
+        y, x = np.histogram(all_isis, bins=50)
+        
+        w = pg.GraphicsLayoutWidget()
+        p = w.addPlot(title="Inter-Spike Interval (ISI) Distribution")
+        bg = pg.BarGraphItem(x=x[:-1], height=y, width=(x[1]-x[0]), brush='m')
+        p.addItem(bg)
+        p.setLabel('bottom', 'Interval', units='ms')
+        p.setLabel('left', 'Count')
+        
+        self.create_dock("ISI", w)
+
+    def add_heatmap_plot(self):
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0: return
+
+        sim_time = times.max()
+        time_bins = np.arange(0, sim_time + 10, 10)
+        neuron_list = np.unique(senders)
+        
+        spike_matrix = np.zeros((len(neuron_list), len(time_bins) - 1))
+
+        for i, nid in enumerate(neuron_list):
+            neuron_times = times[senders == nid]
+            counts, _ = np.histogram(neuron_times, bins=time_bins)
+            spike_matrix[i, :] = counts
+
+        w = pg.GraphicsLayoutWidget()
+        p = w.addPlot(title="Spike Activity Heatmap")
+        img = pg.ImageItem(spike_matrix)
+        img.setLookupTable(pg.colormap.get('inferno').getLookupTable())
+        p.addItem(img)
+        p.setLabel('bottom', 'Time Bin (x10 ms)')
+        p.setLabel('left', 'Neuron Index')
+        
+        self.create_dock("Heatmap", w)
+
+    def add_3d_spike_cloud(self):
+
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0: return
+
+        w = gl.GLViewWidget()
+        w.opts['distance'] = 200
+        w.setWindowTitle('Spike Cloud')
+
+        t_norm = (times - times.min()) / (times.max() - times.min() + 1e-9) * 100
+        n_norm = (senders - senders.min()) / (senders.max() - senders.min() + 1e-9) * 50
+        
+        pos = np.column_stack([t_norm, n_norm, np.zeros_like(times)])
+        
+        colors = np.zeros((len(times), 4))
+        colors[:, 0] = t_norm / 100      # R
+        colors[:, 1] = 1 - t_norm / 100  # G
+        colors[:, 2] = 0.5               # B
+        colors[:, 3] = 0.8               # Alpha
+
+        sp = gl.GLScatterPlotItem(pos=pos, color=colors, size=5, pxMode=True)
+        sp.setGLOptions('translucent')
+        w.addItem(sp)
+        
+        # Grid
+        g = gl.GLGridItem()
+        g.scale(10, 5, 1)
+        w.addItem(g)
+        
+        self.create_dock("3D Cloud", w)
+
+    def add_3d_surface(self):
+        senders, times = self._get_spike_data()
+        if senders is None or len(senders) == 0: return
+
+        sim_time = times.max()
+        time_bins = np.arange(0, sim_time + 20, 20)
+        neuron_list = np.unique(senders)
+        
+        if len(neuron_list) > 200:
+            neuron_list = neuron_list[:200]
+            
+        spike_matrix = np.zeros((len(neuron_list), len(time_bins) - 1))
+        for i, nid in enumerate(neuron_list):
+            cts, _ = np.histogram(times[senders == nid], bins=time_bins)
+            spike_matrix[i, :] = cts
+
+        w = gl.GLViewWidget()
+        w.setCameraPosition(distance=100, elevation=30, azimuth=45)
+        
+        z = spike_matrix.T 
+        z = ndimage.gaussian_filter(z, sigma=1)
+
+        p = gl.GLSurfacePlotItem(
+            z=z, shader='heightColor', 
+            computeNormals=False, smooth=True
+        )
+        p.shader()['colorMap'] = np.array([0,0,1,1,  0,1,0,1,  1,1,0,1,  1,0,0,1]) 
+        p.scale(1, 1, 5.0)
+        p.translate(-z.shape[0]/2, -z.shape[1]/2, 0)
+        
+        w.addItem(p)
+        
+        g = gl.GLGridItem()
+        g.scale(5, 5, 1)
+        g.translate(0, 0, -1)
+        w.addItem(g)
+        
+        self.create_dock("Surface", w)
+
+
+class SimulationViewWidget(QWidget):
+
+    
+    def __init__(self, graph_list, parent=None):
+        super().__init__(parent)
+        
+        self.graph_list = graph_list
         self.sim_running = False
-        self.current_time = 0.0
-        self.update_interval = 25.0  # ms pro Schritt
-        self.timer_interval = 20     # ms (50 FPS target)
+        self.sim_paused = False
         
         self.all_positions = None
         self.neuron_colors = None
         self.neuron_activity = None
         self.gid_to_idx = {}
         self.global_recorder = None
+        self.scatter = None
         
+        self.timer_interval = 20
+        self._initialized = False
+        self._reset_pending = False 
+
         self.init_ui()
-        self.build_scene_data()
 
     def init_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # 1. View
-        self.view = gl.GLViewWidget()
+        # --- HEADER ---
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(10, 10, 10, 5)
+        lbl_title = QLabel("LIVE VISUALIZATION")
+        lbl_title.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 14px;")
+        header_layout.addWidget(lbl_title)
+        
+        header_layout.addStretch()
+        
+        self.chk_enable_3d = QCheckBox("Enable 3D Render")
+        self.chk_enable_3d.setChecked(True)
+        self.chk_enable_3d.setStyleSheet("color: #ddd; font-weight: bold;")
+        self.chk_enable_3d.toggled.connect(self._on_3d_toggled)
+        header_layout.addWidget(self.chk_enable_3d)
+        
+        self.btn_refresh = QPushButton("🔄 REFRESH")
+        self.btn_refresh.setMinimumHeight(30)
+        self.btn_refresh.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_refresh.clicked.connect(self.request_reset)
+        header_layout.addWidget(self.btn_refresh)
+        
+        layout.addLayout(header_layout)
+
+        self.view = SafeGLViewWidget()
         self.view.opts['distance'] = 60
-        self.view.setBackgroundColor('#111111') # Soft Black
+        self.view.setBackgroundColor('#0a0a0a') 
         layout.addWidget(self.view, 1)
         
-        # 2. Controls
         controls = QHBoxLayout()
+        controls.setContentsMargins(10, 10, 10, 10)
+        controls.setSpacing(10)
         
-        self.btn_play = QPushButton("▶ START")
-        self.btn_play.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
-        self.btn_play.clicked.connect(self.toggle_simulation)
-        controls.addWidget(self.btn_play)
+        style_base = "font-weight: bold; padding: 8px 20px; border-radius: 4px; font-size: 13px; color: white; min-width: 80px;"
         
-        self.lbl_stats = QLabel("Waiting...")
-        self.lbl_stats.setStyleSheet("color: #00E5FF; font-weight: bold; font-size: 14px; margin-left: 20px;")
+        self.btn_start = QPushButton("▶ START")
+        self.btn_start.setStyleSheet(f"QPushButton {{ background-color: #4CAF50; {style_base} }} QPushButton:hover {{ background-color: #66BB6A; }} QPushButton:disabled {{ background-color: #2E7D32; color: #888; }}")
+        self.btn_start.clicked.connect(self.start_simulation)
+        
+        self.btn_pause = QPushButton("⏸ PAUSE")
+        self.btn_pause.setStyleSheet(f"QPushButton {{ background-color: #FF9800; {style_base} }} QPushButton:hover {{ background-color: #FFA726; }} QPushButton:disabled {{ background-color: #E65100; color: #888; }}")
+        self.btn_pause.clicked.connect(self.pause_simulation)
+        self.btn_pause.setEnabled(False)
+        
+        self.btn_stop = QPushButton("⏹ STOP")
+        self.btn_stop.setStyleSheet(f"QPushButton {{ background-color: #f44336; {style_base} }} QPushButton:hover {{ background-color: #ef5350; }} QPushButton:disabled {{ background-color: #c62828; color: #888; }}")
+        self.btn_stop.clicked.connect(self.stop_simulation)
+        self.btn_stop.setEnabled(False)
+        
+        controls.addWidget(self.btn_start)
+        controls.addWidget(self.btn_pause)
+        controls.addWidget(self.btn_stop)
+        
+        controls.addSpacing(20)
+        self.lbl_stats = QLabel("Ready.")
+        self.lbl_stats.setStyleSheet("color: #00E5FF; font-weight: bold;")
         controls.addWidget(self.lbl_stats)
         
         controls.addStretch()
@@ -7835,10 +8215,131 @@ class LiveSpectatorWindow(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.simulation_step)
 
-    def build_scene_data(self):
-        print("Building Spectator Scene...")
-        self.view.clear()
+    def start_simulation(self):
+        if self.scatter is None:
+            self.lbl_stats.setText("No neurons found. Try Refresh.")
+            return
         
+        self.sim_running = True
+        self.sim_paused = False
+        self.timer.start(self.timer_interval)
+        self._update_button_states()
+        self.lbl_stats.setText("Running...")
+
+    def pause_simulation(self):
+        self.sim_paused = True
+        self.timer.stop()
+        self._update_button_states()
+        self.lbl_stats.setText("Paused.")
+
+    def stop_simulation(self):
+        self.sim_running = False
+        self.sim_paused = False
+        self.timer.stop()
+        
+        # Reset activity
+        if self.neuron_activity is not None:
+            self.neuron_activity.fill(0)
+            self._reset_colors()
+            
+        self._update_button_states()
+        self.lbl_stats.setText("Stopped.")
+
+    def _update_button_states(self):
+        if not self.sim_running:
+            # STOPPED
+            self.btn_start.setEnabled(True)
+            self.btn_start.setText("▶ START")
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+        elif self.sim_paused:
+            # PAUSED
+            self.btn_start.setEnabled(True)
+            self.btn_start.setText("▶ RESUME")
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+        else:
+            # RUNNING
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(True)
+            self.btn_stop.setEnabled(True)
+
+    def _on_3d_toggled(self, checked):
+        if checked:
+            self.request_reset()
+        else:
+            self.cleanup_gl_context()
+            self.lbl_stats.setText("3D Disabled.")
+
+    def request_reset(self):
+        if self._reset_pending: return
+        self._reset_pending = True
+        QTimer.singleShot(50, self._execute_reset)
+    
+    def _execute_reset(self):
+        self.full_reset()
+        self._reset_pending = False
+
+    def full_reset(self):
+        if not self.chk_enable_3d.isChecked(): return
+        
+        
+        was_running = self.sim_running
+        self.stop_simulation() 
+        
+        self.cleanup_gl_context()
+        
+        self.build_scene_data()
+        
+        self.lbl_stats.setText(f"Scene rebuilt. {len(self.all_positions) if self.all_positions is not None else 0} neurons.")
+
+    def cleanup_gl_context(self):
+        """Zwingt den View dazu, alle Items SOFORT zu vergessen."""
+        if hasattr(self.view, 'stop_rendering'):
+            self.view.stop_rendering()
+
+        self.scatter = None 
+        
+        if hasattr(self, 'view'):
+            try:
+                self.view.makeCurrent()
+                self.view.clear() 
+                self.view.items = []
+                self.view.doneCurrent()
+            except: pass
+
+    def on_deactivated(self):
+        """Tab verlassen."""
+        self.stop_simulation()
+        self.cleanup_gl_context()
+
+    def on_activated(self):
+        """Tab betreten."""
+        if hasattr(self.view, 'start_rendering'):
+            self.view.start_rendering()
+        if self._initialized and self.chk_enable_3d.isChecked():
+            self.request_reset()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._initialized:
+            self._initialized = True
+            QTimer.singleShot(100, lambda: self.request_reset())
+
+    def _reset_colors(self):
+        if self.neuron_colors is not None and self.scatter is not None:
+            self.neuron_colors[:, 0] = 0.0 # R
+            self.neuron_colors[:, 1] = 0.2 # G
+            self.neuron_colors[:, 2] = 0.8 # B
+            self.neuron_colors[:, 3] = 0.6 # Alpha
+            try:
+                self.scatter.setData(color=self.neuron_colors)
+            except: pass
+
+    def build_scene_data(self):
+        if not self.isVisible() or not self.chk_enable_3d.isChecked() or not self.view.isValid():
+            return
+
         pos_list = []
         gids_list = []
         
@@ -7846,123 +8347,109 @@ class LiveSpectatorWindow(QMainWindow):
             for node in graph.node_list:
                 if hasattr(node, 'population') and node.population:
                     for i, pop in enumerate(node.population):
-                        if pop:
-                            if hasattr(node, 'positions') and i < len(node.positions):
-                                coords = node.positions[i]
-                                try:
-                                    status = nest.GetStatus(pop, 'global_id')
-                                    if isinstance(status, tuple): gids = status
-                                    else: gids = list(status)
-                                    
-                                    if len(coords) == len(gids):
-                                        pos_list.append(coords)
-                                        gids_list.extend(gids)
-                                    else:
-                                        min_len = min(len(coords), len(gids))
-                                        pos_list.append(coords[:min_len])
-                                        gids_list.extend(gids[:min_len])
-                                        
-                                except Exception as e:
-                                    print(f"Warning skipping pop {i}: {e}")
+                        if pop and hasattr(node, 'positions') and i < len(node.positions):
+                            coords = node.positions[i]
+                            if coords is None or len(coords) == 0: continue
+                            if np.isnan(coords).any(): continue
+                            
+                            try:
+                                status = nest.GetStatus(pop, 'global_id')
+                                gids = list(status) if not isinstance(status, tuple) else list(status)
+                                min_len = min(len(coords), len(gids))
+                                if min_len > 0:
+                                    pos_list.append(coords[:min_len])
+                                    gids_list.extend(gids[:min_len])
+                            except: pass
 
         if not pos_list:
-            if hasattr(self, 'lbl_stats'):
-                self.lbl_stats.setText("No neurons found.")
             return
 
         self.all_positions = np.vstack(pos_list)
         num_neurons = len(self.all_positions)
-        
         self.gid_to_idx = {gid: i for i, gid in enumerate(gids_list)}
         
         try:
             if self.global_recorder is None:
                 self.global_recorder = nest.Create("spike_recorder")
-                nest.Connect(list(self.gid_to_idx.keys()), self.global_recorder)
-                print(f"Spectator connected to {num_neurons} neurons.")
-        except Exception as e:
-            print(f"Recorder Error: {e}")
-        
+            else:
+                nest.GetStatus(self.global_recorder)
+        except:
+            self.global_recorder = nest.Create("spike_recorder")
+            
+        try:
+            nest.Connect(list(self.gid_to_idx.keys()), self.global_recorder)
+        except: pass
+
         self.neuron_colors = np.zeros((num_neurons, 4), dtype=np.float32)
-        self.neuron_colors[:, 0] = 0.0 
-        self.neuron_colors[:, 1] = 0.2
-        self.neuron_colors[:, 2] = 0.8
-        self.neuron_colors[:, 3] = 0.6 
-        
+        self._reset_colors()
         self.neuron_activity = np.zeros(num_neurons, dtype=np.float32)
 
-        self.scatter = gl.GLScatterPlotItem(
-            pos=self.all_positions,
-            color=self.neuron_colors,
-            size=5, 
-            pxMode=True 
-        )
-        
-
-        self.scatter.setGLOptions('translucent') 
-        
-        self.view.addItem(self.scatter)
-
-    def toggle_simulation(self):
-        if self.sim_running:
-            self.sim_running = False
-            self.btn_play.setText("▶ RESUME")
-            self.btn_play.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
-            self.timer.stop()
-        else:
-            self.sim_running = True
-            self.btn_play.setText("⏸ PAUSE")
-            self.btn_play.setStyleSheet("background-color: #FF9800; font-weight: bold; padding: 10px;")
-            self.timer.start(self.timer_interval)
+        try:
+            self.view.makeCurrent()
+            new_scatter = gl.GLScatterPlotItem(
+                pos=self.all_positions,
+                color=self.neuron_colors,
+                size=5, 
+                pxMode=True
+            )
+            new_scatter.setGLOptions('translucent')
+            self.view.addItem(new_scatter)
+            self.scatter = new_scatter
+            self.view.doneCurrent()
+            self.view.update()
+        except Exception as e:
+            print(f"GL Item Creation Error: {e}")
+            self.scatter = None
+            try: self.view.doneCurrent() 
+            except: pass
 
     def simulation_step(self):
-        if not self.sim_running: return
-        
+        if self.scatter is None or not self.isVisible(): return
+        if hasattr(self.scatter, 'shader') and self.scatter.shader is None: return
+
         try:
-            # 1. NEST simulieren
-            nest.Simulate(self.update_interval)
-            self.current_time += self.update_interval
-            
-            # 2. Spikes holen
-            events = nest.GetStatus(self.global_recorder, "events")[0]
-            senders = events["senders"]
-            
-            # WICHTIG: Recorder leeren für nächsten Step!
+            events = nest.GetStatus(self.global_recorder, 'events')[0]
+            senders = events['senders']
             nest.SetStatus(self.global_recorder, {'n_events': 0})
             
-            # 3. Aktivität berechnen
-            # Decay (Abklingen alter Aktivität)
-            self.neuron_activity *= 0.85 
-            
-            spike_count = len(senders)
-            if spike_count > 0:
-                # Map GIDs to Indices
-                indices = [self.gid_to_idx[gid] for gid in senders if gid in self.gid_to_idx]
-                if indices:
-                    # Setze Aktivität auf 1.0 (Feuern)
-                    self.neuron_activity[indices] = 1.0
-            
-            # 4. Farben updaten (Vektorisiert)
-            # Inaktiv (Blau) -> Aktiv (Weiß/Gelb)
-            # R: 0 -> 1
-            self.neuron_colors[:, 0] = self.neuron_activity
-            # G: 0.2 -> 1.0
-            self.neuron_colors[:, 1] = 0.2 + (self.neuron_activity * 0.8)
-            # B: 0.8 -> 0.2
-            self.neuron_colors[:, 2] = 0.8 - (self.neuron_activity * 0.6)
-            # A: 0.4 -> 1.0
-            self.neuron_colors[:, 3] = 0.4 + (self.neuron_activity * 0.6)
-            
-            self.scatter.setData(color=self.neuron_colors)
-            
-            # 5. Stats anzeigen
-            self.lbl_stats.setText(f"T: {self.current_time:.0f}ms | Spikes: {spike_count}")
-            
+            self.neuron_activity *= 0.90
+            if len(senders) > 0:
+                for sender in senders:
+                    idx = self.gid_to_idx.get(sender)
+                    if idx is not None:
+                        self.neuron_activity[idx] += 1.0
+
+            if self.chk_enable_3d.isChecked():
+                act_clamped = np.clip(self.neuron_activity, 0, 1)
+                self.neuron_colors[:, 0] = act_clamped
+                self.neuron_colors[:, 1] = 0.2 + 0.8 * act_clamped
+                self.neuron_colors[:, 2] = 0.8 - 0.3 * act_clamped
+                self.neuron_colors[:, 3] = 0.6 + 0.4 * act_clamped
+                self.scatter.setData(color=self.neuron_colors)
         except Exception as e:
-            print(f"Live Sim Error: {e}")
+            print(f"Sim Step Error: {e}")
             self.stop_simulation()
 
-    def closeEvent(self, event):
-        self.sim_running = False
-        self.timer.stop()
-        event.accept()
+
+
+
+
+
+
+def build_gid_to_meta_map(graph_list):
+    gid_map = {}
+    
+    for graph in graph_list:
+        for node in graph.node_list:
+            if hasattr(node, 'population') and node.population:
+                for pop_idx, pop in enumerate(node.population):
+                    if pop:
+                        for local_idx, gid in enumerate(pop.tolist()):
+                            gid_map[gid] = {
+                                'graph_id': graph.graph_id,
+                                'node_id': node.id,
+                                'node_name': getattr(node, 'name', 'unnamed'),
+                                'pop_idx': pop_idx,
+                                'local_idx': local_idx
+                            }
+    return gid_map
