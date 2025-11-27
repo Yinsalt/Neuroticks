@@ -1,33 +1,38 @@
 import sys
-from PyQt6.QtWidgets import QApplication,QAbstractSpinBox,QListWidget,QSlider, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QApplication,QDialog,QAbstractSpinBox,QDialogButtonBox,QListWidget,QSlider, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLabel,QGroupBox, QStackedWidget, QToolBar, QMenu, QGridLayout, QStackedLayout
 from PyQt6.QtGui import QColor, QPalette, QAction,QIcon,QBrush
 from PyQt6.QtCore import QSize, Qt, pyqtSignal,QTimer
 import pyvista as pv
 from pyvistaqt import QtInteractor
-from matplotlib.backends.backend_qtagg import FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 import numpy as np
 import time
+import vtk
+import pyqtgraph.opengl as gl
+import pyqtgraph as pg
 from typing import Dict, Any, Tuple, Optional, List
 import matplotlib.colors as mcolors
 from datetime import datetime
 from pathlib import Path
 from neuron_toolbox import *
 from WidgetLib import *
+from neuron_toolbox import successful_neuron_models
 from PyQt6.QtWidgets import (
-    QLineEdit,      # Text-Eingabefeld (einzeilig)
-    QTextEdit,      # Text-Eingabefeld (mehrzeilig)
-    QSpinBox,       # Integer-Input mit +/- Buttons
-    QDoubleSpinBox, # Float-Input mit +/- Buttons
-    QComboBox,      # Dropdown-Menü
-    QCheckBox,      # Checkbox (an/aus)
-    QRadioButton,   # Radio Button (eine Option aus Gruppe)
-    QSlider,        # Schieberegler
-    QDial,          # Drehregler
-    QPushButton,    # Button
-    QFileDialog,    # Datei-Auswahl Dialog
-    QColorDialog,   # Farb-Auswahl Dialog
+    QLineEdit,      
+    QTextEdit,      
+    QSpinBox,       
+    QDoubleSpinBox, 
+    QComboBox,      
+    QCheckBox,      
+    QRadioButton,   
+    QSlider,       
+    QDial,         
+    QPushButton,   
+    QFileDialog,   
+    QColorDialog,   
     QTreeWidget,    
     QTreeWidgetItem 
 )
@@ -35,37 +40,37 @@ from PyQt6.QtWidgets import QScrollArea, QInputDialog
 current_graph_metadata = []
 graph_parameters = {}     #graph_id 
 next_graph_id = 0
+POLYNOM_NOISE_LEVEL = 0.05
 
-
-# WidgetLib.py
 
 NODE_TOOLS = {
     "custom": {
-        "label": "🌊 WFC & Flow Field (Custom)",
+        "label": "WFC & Flow Field (Custom)",
         "params": ["grid_size", "sparsity_factor", "sparse_holes", "num_steps", "dt"]
     },
     "CCW": {
-        "label": "⭕ CCW Ring (Attractor)",
-        # Hier fügen wir 'k' und 'bidirectional' hinzu
+        "label": "CCW Ring (Attractor)",
         "params": ["n_neurons", "radius", "k", "bidirectional"] 
     },
     "Blob": {
-        "label": "☁ Random Blob",
+        "label": "Random Blob",
         "params": ["n_neurons", "radius"]
     },
     "Cone": {
-        "label": "hk Cone / Column",
+        "label": "Cone / Column",
         "params": ["n_neurons", "radius_bottom", "radius_top", "height"]
     },
     "Grid": {
-        "label": "▦ 2D Grid",
+        "label": "2D Grid",
         "params": ["grid_side_length"]
     }
 }
 
-___all__ = [
+__all__ = [
     'SYNAPSE_MODELS',
     'create_nest_mask',
+    "LiveSpectatorWindow",
+    "SimulationDashboardWidget",
     'create_distance_dependent_weight',
     'SynapseParamWidget',
     'SynapseCreationWidget',
@@ -74,6 +79,7 @@ ___all__ = [
     'BlinkingNetworkWidget', 
     'FlowFieldWidget',       
     'GraphCreatorWidget',
+    "StructuresWidget",
     'EditGraphWidget',
     'GraphOverviewWidget',
     'ConnectionTool',
@@ -84,7 +90,6 @@ ___all__ = [
     '_clean_params',
     '_serialize_connections',
     'NumpyEncoder',
-    # --- NEU HINZUGEFÜGT ---
     'create_nest_connections_from_stored',
     'safe_nest_reset_and_repopulate',
     'repopulate_all_graphs',
@@ -94,7 +99,6 @@ ___all__ = [
 ]
 
 SYNAPSE_MODELS = {
-    # === STATIC & BASIC ===
     "static_synapse": {
         "category": "basic",
         "description": "Standard-Synapse mit konstantem Gewicht",
@@ -118,7 +122,6 @@ SYNAPSE_MODELS = {
         "params": {}
     },
 
-    # === GAP JUNCTION ===
     "gap_junction": {
         "category": "electrical",
         "description": "Elektrische Synapse (Kein Delay!)",
@@ -126,7 +129,6 @@ SYNAPSE_MODELS = {
         "params": {}
     },
 
-    # === STDP (Spike-Timing Dependent Plasticity) ===
     "stdp_synapse": {
         "category": "plasticity",
         "description": "Standard STDP nach Song et al.",
@@ -226,7 +228,6 @@ SYNAPSE_MODELS = {
         }
     },
 
-    # === SHORT-TERM PLASTICITY (STP) ===
     "tsodyks_synapse": {
         "category": "stp",
         "description": "Short-Term Plasticity (Tsodyks & Markram)",
@@ -266,7 +267,6 @@ SYNAPSE_MODELS = {
         }
     },
 
-    # === SPECIAL ===
     "ht_synapse": {
         "category": "special",
         "description": "Hill-Tononi Synapse",
@@ -294,15 +294,90 @@ SYNAPSE_MODELS = {
 }
 
 
+
+
+def generate_biased_polynomial(axis_idx, max_degree=2, num_noise_terms=2):
+    """
+    Generiert ein Polynom, das nahe an der Identität (f(x)=x) liegt,
+    aber durch POLYNOM_NOISE_LEVEL gestört wird.
+    
+    axis_idx: 0=x, 1=y, 2=z (Welche Achse ist die Identität?)
+    """
+    global POLYNOM_NOISE_LEVEL
+    noise = POLYNOM_NOISE_LEVEL
+    
+    main_coeff = 1.0 + random.uniform(-noise, noise)
+    
+    indices = [[axis_idx, 1]]
+    coefficients = [main_coeff]
+    
+    for _ in range(num_noise_terms):
+        v_idx = random.randint(0, 2) 
+        power = random.randint(0, max_degree)
+        
+        if v_idx == axis_idx and power == 1:
+            power = 0 
+            
+        coeff = random.uniform(-1.0, 1.0) * noise
+        
+        indices.append([v_idx, power])
+        coefficients.append(coeff)
+        
+    return {
+        'indices': indices,
+        'coefficients': coefficients,
+        'n': max_degree,
+        'decay': 0.5
+    }
+
+
+
+
+
+
+class PositionDialog(QDialog):
+    def __init__(self, current_pos=[0.0, 0.0, 0.0], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Target Position for Twin")
+        self.selected_pos = list(current_pos)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        info = QLabel("Set the Center of Mass (m) for the Twin Node.\n"
+                      "The structure will be regenerated locally at this new position.")
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        self.spins = []
+        labels = ['X:', 'Y:', 'Z:']
+        
+        for i, lbl in enumerate(labels):
+            spin = QDoubleSpinBox()
+            spin.setRange(-10000, 10000)
+            spin.setDecimals(3)
+            spin.setValue(self.selected_pos[i])
+            form.addRow(lbl, spin)
+            self.spins.append(spin)
+            
+        layout.addLayout(form)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_position(self):
+        return [s.value() for s in self.spins]
+    
+
 def create_nest_mask(mask_type: str, params: Dict[str, Any]) -> Optional[Any]:
-    """
-    Erstellt eine NEST-Maske für räumliche Verbindungen.
-    """
+
     try:
         if mask_type == 'spherical' or mask_type == 'sphere':
-            # NEST verlangt oft 'radius' explizit statt 'r' in neueren Versionen bei CreateMask
             radius = float(params.get('radius', params.get('r', 1.0)))
-            return nest.CreateMask('spherical', {'radius': radius}) # 'r' -> 'radius' geändert
+            return nest.CreateMask('spherical', {'radius': radius}) 
             
         elif mask_type == 'rectangular' or mask_type == 'box':
             size = float(params.get('size', params.get('r', 1.0)))
@@ -340,32 +415,18 @@ def create_distance_dependent_weight(base_weight: float,
                                      factor: float = 1.0, 
                                      offset: float = 0.0,
                                      mode: str = 'linear') -> Any:
-    """
-    Erstellt ein distanzabhängiges Gewicht für NEST.
     
-    Args:
-        base_weight: Basisgewicht
-        factor: Multiplikator für Distanz
-        offset: Offset
-        mode: 'linear', 'exponential', 'gaussian'
-        
-    Returns:
-        NEST Parameter expression oder float
-    """
     try:
         dist = nest.spatial.distance
         
         if mode == 'linear':
-            # weight = base + distance * factor
             return base_weight + dist * factor + offset
             
         elif mode == 'exponential':
-            # weight = base * exp(-distance * factor)
             import nest.math as nm
             return base_weight * nm.exp(-dist * factor)
             
         elif mode == 'gaussian':
-            # weight = base * exp(-(distance/sigma)^2)
             import nest.math as nm
             sigma = factor if factor > 0 else 1.0
             return base_weight * nm.exp(-(dist / sigma) ** 2)
@@ -376,8 +437,10 @@ def create_distance_dependent_weight(base_weight: float,
     except Exception as e:
         print(f"⚠ Distance weight creation failed: {e}, using base weight")
         return base_weight
+    
+
+
 class SynapseParamWidget(QWidget):
-    """Dynamisches Widget für einen einzelnen Synapse-Parameter."""
     
     valueChanged = pyqtSignal()
     
@@ -391,7 +454,6 @@ class SynapseParamWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
         
-        # Label mit Tooltip
         label = QLabel(f"{self.name}:")
         label.setMinimumWidth(100)
         desc = self.info.get('description', self.name)
@@ -402,7 +464,6 @@ class SynapseParamWidget(QWidget):
             label.setToolTip(desc)
         layout.addWidget(label)
         
-        # Input Widget basierend auf Typ
         ptype = self.info.get('type', 'float')
         default = self.info.get('default', 0.0)
         
@@ -436,14 +497,12 @@ class SynapseParamWidget(QWidget):
         
         layout.addWidget(self.input, 1)
         
-        # Unit Label
         if unit:
             unit_label = QLabel(unit)
             unit_label.setStyleSheet("color: #888; font-size: 10px;")
             layout.addWidget(unit_label)
     
     def get_value(self):
-        """Gibt den aktuellen Wert zurück."""
         if isinstance(self.input, (QDoubleSpinBox, QSpinBox)):
             return self.input.value()
         elif isinstance(self.input, QCheckBox):
@@ -452,7 +511,6 @@ class SynapseParamWidget(QWidget):
             return self.input.text()
     
     def set_value(self, value):
-        """Setzt den Wert."""
         if isinstance(self.input, (QDoubleSpinBox, QSpinBox)):
             self.input.setValue(value)
         elif isinstance(self.input, QCheckBox):
@@ -461,49 +519,36 @@ class SynapseParamWidget(QWidget):
             self.input.setText(str(value))
 
 class SynapseCreationWidget(QWidget):
-    """
-    Widget zum Erstellen und Bearbeiten von Synapse-Modellen.
+
     
-    Features:
-    - Auswahl aus verfügbaren NEST Synapse-Modellen
-    - Dynamische Parameter-Eingabe
-    - Kategorisierte Ansicht
-    - CopyModel-Unterstützung für Custom-Synapsen
-    """
-    
-    synapseCreated = pyqtSignal(str, dict)  # (model_name, params)
+    synapseCreated = pyqtSignal(str, dict) 
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.param_widgets: Dict[str, SynapseParamWidget] = {}
-        self.custom_synapses: Dict[str, Dict] = {}  # Gespeicherte Custom-Modelle
+        self.custom_synapses: Dict[str, Dict] = {}  
         self._init_ui()
         
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         
-        # === Header ===
         header = QLabel("⚡ Synapse Configuration")
         header.setStyleSheet("font-size: 14px; font-weight: bold; color: #2196F3;")
         main_layout.addWidget(header)
         
-        # === Model Selection ===
         sel_group = QGroupBox("Model Selection")
         sel_layout = QFormLayout(sel_group)
         
-        # Kategorie Filter
         self.category_combo = QComboBox()
         self.category_combo.addItems(["All", "basic", "plasticity", "stp", "electrical", "special"])
         self.category_combo.currentTextChanged.connect(self._filter_models)
         sel_layout.addRow("Category:", self.category_combo)
         
-        # Model Dropdown
         self.model_combo = QComboBox()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         sel_layout.addRow("Synapse Model:", self.model_combo)
         
-        # Description
         self.desc_label = QLabel("")
         self.desc_label.setWordWrap(True)
         self.desc_label.setStyleSheet("color: #888; font-style: italic; padding: 5px;")
@@ -511,18 +556,15 @@ class SynapseCreationWidget(QWidget):
         
         main_layout.addWidget(sel_group)
         
-        # === Base Parameters ===
         base_group = QGroupBox("Base Parameters")
         base_layout = QFormLayout(base_group)
         
-        # Weight
         self.weight_spin = QDoubleSpinBox()
         self.weight_spin.setRange(-100000, 100000)
         self.weight_spin.setValue(1.0)
         self.weight_spin.setDecimals(4)
         base_layout.addRow("Weight:", self.weight_spin)
         
-        # Delay
         self.delay_spin = QDoubleSpinBox()
         self.delay_spin.setRange(0.1, 10000)
         self.delay_spin.setValue(1.0)
@@ -530,14 +572,12 @@ class SynapseCreationWidget(QWidget):
         self.delay_spin.setSuffix(" ms")
         base_layout.addRow("Delay:", self.delay_spin)
         
-        # Delay Warning
         self.delay_warning = QLabel("")
         self.delay_warning.setStyleSheet("color: #FF9800; font-size: 10px;")
         base_layout.addRow(self.delay_warning)
         
         main_layout.addWidget(base_group)
         
-        # === Model-Specific Parameters ===
         params_group = QGroupBox("Model-Specific Parameters")
         self.params_scroll = QScrollArea()
         self.params_scroll.setWidgetResizable(True)
@@ -553,7 +593,6 @@ class SynapseCreationWidget(QWidget):
         params_group_layout.addWidget(self.params_scroll)
         main_layout.addWidget(params_group)
         
-        # === Custom Model (CopyModel) ===
         custom_group = QGroupBox("Custom Model (Optional)")
         custom_layout = QFormLayout(custom_group)
         
@@ -567,7 +606,6 @@ class SynapseCreationWidget(QWidget):
         
         main_layout.addWidget(custom_group)
         
-        # === Actions ===
         action_layout = QHBoxLayout()
         
         self.apply_btn = QPushButton("✓ Apply Synapse")
@@ -582,11 +620,12 @@ class SynapseCreationWidget(QWidget):
         main_layout.addLayout(action_layout)
         main_layout.addStretch()
         
-        # Initial population
         self._filter_models("All")
         
+
+
+
     def _filter_models(self, category: str):
-        """Filtert die Modell-Liste nach Kategorie."""
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         
@@ -598,17 +637,17 @@ class SynapseCreationWidget(QWidget):
         if self.model_combo.count() > 0:
             self._on_model_changed(self.model_combo.currentText())
     
+
+
+
     def _on_model_changed(self, model_name: str):
-        """Aktualisiert UI wenn Modell geändert wird."""
         if not model_name or model_name not in SYNAPSE_MODELS:
             return
             
         info = SYNAPSE_MODELS[model_name]
         
-        # Description
         self.desc_label.setText(info.get('description', ''))
         
-        # Delay Warning
         if info.get('no_delay', False):
             self.delay_spin.setEnabled(False)
             self.delay_warning.setText("⚠ This synapse type does not use delay!")
@@ -616,23 +655,19 @@ class SynapseCreationWidget(QWidget):
             self.delay_spin.setEnabled(True)
             self.delay_warning.setText("")
         
-        # Clear old params
         for widget in self.param_widgets.values():
             widget.deleteLater()
         self.param_widgets.clear()
         
-        # Add new params
         params = info.get('params', {})
         for param_name, param_info in params.items():
             widget = SynapseParamWidget(param_name, param_info)
             self.params_layout.addWidget(widget)
             self.param_widgets[param_name] = widget
         
-        # Add stretch at end
         self.params_layout.addStretch()
     
     def _reset_to_defaults(self):
-        """Setzt alle Parameter auf Standardwerte."""
         model = self.model_combo.currentText()
         if model in SYNAPSE_MODELS:
             info = SYNAPSE_MODELS[model]
@@ -646,7 +681,6 @@ class SynapseCreationWidget(QWidget):
         self.custom_name_input.clear()
     
     def _save_preset(self):
-        """Speichert aktuelle Konfiguration als Preset."""
         name = self.custom_name_input.text().strip()
         if not name:
             QMessageBox.warning(self, "Name Required", 
@@ -658,7 +692,6 @@ class SynapseCreationWidget(QWidget):
                                f"Synapse preset '{name}' saved!")
     
     def get_synapse_config(self) -> Dict[str, Any]:
-        """Gibt die komplette Synapse-Konfiguration zurück."""
         model = self.model_combo.currentText()
         info = SYNAPSE_MODELS.get(model, {})
         
@@ -677,10 +710,8 @@ class SynapseCreationWidget(QWidget):
         return config
     
     def set_synapse_config(self, config: Dict[str, Any]):
-        """Lädt eine Synapse-Konfiguration."""
         model = config.get('base_model', 'static_synapse')
         
-        # Find category
         if model in SYNAPSE_MODELS:
             cat = SYNAPSE_MODELS[model].get('category', 'All')
             self.category_combo.setCurrentText(cat)
@@ -700,7 +731,6 @@ class SynapseCreationWidget(QWidget):
                 self.param_widgets[name].set_value(value)
     
     def _emit_synapse(self):
-        """Emittiert das synapseCreated Signal."""
         config = self.get_synapse_config()
         name = config['custom_name'] or config['base_model']
         self.synapseCreated.emit(name, config)
@@ -939,12 +969,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal
 class NodeParametersWidget(QWidget):
+
     paramsChanged = pyqtSignal(dict)
 
     def __init__(self, node_data=None):
         super().__init__()
         self.node_data = node_data if node_data else {}
-        self.widgets = {}
+        self.widgets = {}         
+        self.tool_panels = {}    
         self.auto_save = True
         self.num_populations = 0
         self.init_ui()
@@ -960,106 +992,244 @@ class NodeParametersWidget(QWidget):
         self.content_layout = QVBoxLayout(content)
         scroll.setWidget(content)
         layout.addWidget(scroll)
-        
-        # --- 1. SECTION: TYPE SELECTOR ---
-        self.add_section("Node Type")
+
+        self.add_section("🔧 Node Type")
         self.tool_combo = QComboBox()
-        # NODE_TOOLS muss oben in WidgetLib definiert sein (siehe vorherigen Schritt)
         for key, info in NODE_TOOLS.items():
             self.tool_combo.addItem(info["label"], key)
         self.tool_combo.currentIndexChanged.connect(self.on_tool_changed)
         self.content_layout.addWidget(self.tool_combo)
         self.widgets['tool_type'] = {'type': 'combo', 'widget': self.tool_combo}
         
-        # --- 2. SECTION: BASIC INFO ---
+
         self.add_section("Basic Info")
         self.add_text_field("name", "Name")
         self.add_int_field("id", "ID", min_val=0)
         
-        # --- 3. SECTION: POSITION ---
-        self.add_section("Position")
-        self.add_vector3_field("center_of_mass", "Center")
+
+        self.add_section("Position & Transform")
+        self.add_vector3_field("center_of_mass", "Center (X,Y,Z)")
+        self.add_vector3_field("displacement", "Displacement")
+        self.add_float_field("displacement_factor", "Disp. Factor", 0.0, 100.0)
+        self.add_float_field("rot_theta", "Rotation θ (X-Axis)", -360, 360)
+        self.add_float_field("rot_phi", "Rotation φ (Y-Axis)", -360, 360)
+        self.add_float_field("stretch_x", "Scale X", 0.1, 100.0)
+        self.add_float_field("stretch_y", "Scale Y", 0.1, 100.0)
+        self.add_float_field("stretch_z", "Scale Z", 0.1, 100.0)
         
-        # --- 4. SECTION: GEOMETRY PARAMS (Dynamisch) ---
-        self.geo_group = QWidget()
-        self.geo_layout = QVBoxLayout(self.geo_group)
-        self.content_layout.addWidget(self.geo_group)
+
+        self.add_section("Tool Parameters")
+        self.create_tool_stack()
         
-        # Alle möglichen Felder erstellen (versteckt)
-        self.create_all_param_fields()
-        
-        # --- 5. SECTION: PROBABILITY VECTOR (WICHTIG: HIER WIEDER EINGEFÜGT) ---
+
         self.add_section("Probability Vector (Population Weights)")
         self.probability_container = QWidget()
         self.probability_layout = QVBoxLayout(self.probability_container)
         self.content_layout.addWidget(self.probability_container)
         
-        # --- FINISH ---
-        self.on_tool_changed() # Initialen Status setzen
+
+        self.on_tool_changed() 
         self.content_layout.addStretch()
-        
-    def create_all_param_fields(self):
-        """Erstellt alle Felder für alle Tools (versteckt oder sichtbar)."""
-        
-        # --- SECTION: TRANSFORMATIONS (Immer da, aber hier definiert) ---
-        # Diese Sektion fehlte vorher im UI-Setup!
-        self.add_vector3_field("displacement", "Displacement", parent=self.geo_layout)
-        self.add_float_field("displacement_factor", "Disp. Factor", 0.0, 100.0, parent=self.geo_layout)
-        
-        self.add_float_field("rot_theta", "Rot X (Theta)", -360, 360, parent=self.geo_layout)
-        self.add_float_field("rot_phi", "Rot Y (Phi)", -360, 360, parent=self.geo_layout)
-        
-        self.add_float_field("stretch_x", "Scale X", 0.1, 100.0, parent=self.geo_layout)
-        self.add_float_field("stretch_y", "Scale Y", 0.1, 100.0, parent=self.geo_layout)
-        self.add_float_field("stretch_z", "Scale Z", 0.1, 100.0, parent=self.geo_layout)
 
-        # --- WFC Params ---
-        self.add_vector3_int_field("grid_size", "Grid Size", parent=self.geo_layout)
-        self.add_float_field("sparsity_factor", "Sparsity", 0, 1, parent=self.geo_layout)
-        self.add_int_field("sparse_holes", "Holes", parent=self.geo_layout)
-        self.add_int_field("num_steps", "Steps", parent=self.geo_layout)
+
+    def _add_model_selector(self, layout, key="tool_neuron_model", label="Neuron Model"):
+        row = QHBoxLayout()
+        lbl = QLabel(f"{label}:")
+        lbl.setMinimumWidth(150)
+        lbl.setStyleSheet("font-weight: bold;")
         
-        # --- Shape Params ---
-        self.add_int_field("n_neurons", "Num Neurons", min_val=1, max_val=100000, parent=self.geo_layout)
-        self.add_float_field("radius", "Radius", min_val=0.1, parent=self.geo_layout)
-        self.add_float_field("radius_top", "Radius Top", min_val=0.0, parent=self.geo_layout)
-        self.add_float_field("radius_bottom", "Radius Bottom", min_val=0.0, parent=self.geo_layout)
-        self.add_float_field("height", "Height", min_val=0.1, parent=self.geo_layout)
-        self.add_int_field("grid_side_length", "Side Length", min_val=1, parent=self.geo_layout)
+        combo = QComboBox()
+        priority = ['iaf_psc_alpha', 'iaf_cond_exp', 'aeif_cond_alpha', 'hh_psc_alpha']
+        sorted_models = sorted([m for m in successful_neuron_models if m not in priority])
+        combo.addItems(priority + sorted_models)
+        
+        combo.currentTextChanged.connect(self.on_change)
+        
+        row.addWidget(lbl)
+        row.addWidget(combo)
+        layout.addLayout(row)
+        
+        self.widgets[key] = {'type': 'combo_text', 'widget': combo, 'row_layout': row}
 
-        # --- Circuit Params (CCW) ---
-        self.add_float_field("k", "Inhibition (k)", min_val=0.0, max_val=1000.0, parent=self.geo_layout)
-        self.add_bool_field("bidirectional", "Bidirectional", parent=self.geo_layout)
+    def create_tool_stack(self):
 
+        self.tool_stack = QStackedWidget()
+        self.content_layout.addWidget(self.tool_stack)
+
+        panel_custom = self._create_panel_custom()
+        self.tool_stack.addWidget(panel_custom)
+        self.tool_panels['custom'] = 0
+        
+
+        panel_ccw = self._create_panel_ccw()
+        self.tool_stack.addWidget(panel_ccw)
+        self.tool_panels['CCW'] = 1
+        
+
+        panel_blob = self._create_panel_blob()
+        self.tool_stack.addWidget(panel_blob)
+        self.tool_panels['Blob'] = 2
+        
+
+        panel_cone = self._create_panel_cone()
+        self.tool_stack.addWidget(panel_cone)
+        self.tool_panels['Cone'] = 3
+        
+
+        panel_grid = self._create_panel_grid()
+        self.tool_stack.addWidget(panel_grid)
+        self.tool_panels['Grid'] = 4
+
+
+
+    def _create_panel_custom(self):
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        
+        # Header
+        header = QLabel("Wave Function Collapse + Flow Field")
+        header.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 12px;")
+        layout.addWidget(header)
+        
+        desc = QLabel("Generates Cluster via WFC,moves them through their vectorfields.")
+        desc.setStyleSheet("color: #888; font-size: 10px; margin-bottom: 10px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+        
+        self._add_field_to_layout(layout, "grid_size", "Grid Size (X,Y,Z)", field_type="vector3_int")
+        self._add_field_to_layout(layout, "sparsity_factor", "Sparsity Factor", field_type="float", 
+                                  min_val=0.0, max_val=1.0, default=0.9)
+        self._add_field_to_layout(layout, "sparse_holes", "Sparse Holes", field_type="int", 
+                                  min_val=0, max_val=100, default=0)
+        self._add_field_to_layout(layout, "num_steps", "Flow Steps", field_type="int", 
+                                  min_val=1, max_val=100, default=8)
+        self._add_field_to_layout(layout, "dt", "Time Step (dt)", field_type="float", 
+                                  min_val=0.001, max_val=1.0, default=0.01)
+        
+        layout.addStretch()
+        return panel
+
+    def _create_panel_ccw(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        header = QLabel("CCW Ring Attractor")
+        header.setStyleSheet("color: #FF9800; font-weight: bold; font-size: 12px;")
+        layout.addWidget(header)
+        
+        self._add_model_selector(layout, "tool_neuron_model", "Neuron Model")
+        
+        self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=3, max_val=100000, default=100)
+        self._add_field_to_layout(layout, "radius", "Ring Radius", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
+        self._add_field_to_layout(layout, "k", "Inhibition Strength (k)", field_type="float", min_val=0.0, max_val=1000.0, default=10.0)
+        self._add_field_to_layout(layout, "bidirectional", "Bidirectional Connections", field_type="bool", default=False)
+        layout.addStretch()
+        return panel
+
+    def _create_panel_blob(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        header = QLabel(" Random Blob (Sphere)")
+        header.setStyleSheet("color: #9C27B0; font-weight: bold; font-size: 12px;")
+        layout.addWidget(header)
+        
+        self._add_model_selector(layout, "tool_neuron_model", "Neuron Model") 
+        
+        self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=1, max_val=100000, default=100)
+        self._add_field_to_layout(layout, "radius", "Sphere Radius", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
+        layout.addStretch()
+        return panel
+
+    def _create_panel_cone(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        header = QLabel("Cone / Cortical Column")
+        header.setStyleSheet("color: #E91E63; font-weight: bold; font-size: 12px;")
+        layout.addWidget(header)
+        
+        self._add_model_selector(layout, "tool_neuron_model", "Neuron Model")
+        
+        self._add_field_to_layout(layout, "n_neurons", "Number of Neurons", field_type="int", min_val=1, max_val=100000, default=500)
+        self._add_field_to_layout(layout, "radius_bottom", "Bottom Radius (Base)", field_type="float", min_val=0.1, max_val=1000.0, default=5.0)
+        self._add_field_to_layout(layout, "radius_top", "Top Radius (Apex)", field_type="float", min_val=0.0, max_val=1000.0, default=1.0)
+        self._add_field_to_layout(layout, "height", "Height", field_type="float", min_val=0.1, max_val=1000.0, default=10.0)
+        layout.addStretch()
+        return panel
+
+    def _create_panel_grid(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        header = QLabel("▦ 2D Grid Layer")
+        header.setStyleSheet("color: #00BCD4; font-weight: bold; font-size: 12px;")
+        layout.addWidget(header)
+        
+        self._add_model_selector(layout, "tool_neuron_model", "Neuron Model")
+        
+        self._add_field_to_layout(layout, "grid_side_length", "Grid Side Length", field_type="int", min_val=1, max_val=1000, default=10)
+        layout.addStretch()
+        return panel
+
+
+    def _add_field_to_layout(self, layout, key, label, field_type="float", 
+                             min_val=None, max_val=None, default=None):
+ 
+        row = QHBoxLayout()
+        
+        lbl = QLabel(f"{label}:")
+        lbl.setMinimumWidth(150)
+        lbl.setStyleSheet("font-weight: bold;")
+        row.addWidget(lbl)
+        
+        if field_type == "int":
+            widget = QSpinBox()
+            widget.setRange(min_val or 0, max_val or 100000)
+            widget.setValue(default or 0)
+            widget.valueChanged.connect(self.on_change)
+            row.addWidget(widget)
+            self.widgets[key] = {'type': 'int', 'widget': widget, 'row_layout': row}
+            
+        elif field_type == "float":
+            widget = QDoubleSpinBox()
+            widget.setRange(min_val or -1000.0, max_val or 1000.0)
+            widget.setDecimals(4)
+            widget.setValue(default or 0.0)
+            widget.valueChanged.connect(self.on_change)
+            row.addWidget(widget)
+            self.widgets[key] = {'type': 'float', 'widget': widget, 'row_layout': row}
+            
+        elif field_type == "bool":
+            widget = QCheckBox()
+            widget.setChecked(default or False)
+            widget.stateChanged.connect(self.on_change)
+            row.addWidget(widget)
+            row.addStretch()
+            self.widgets[key] = {'type': 'bool', 'widget': widget, 'row_layout': row}
+            
+        elif field_type == "vector3_int":
+            widgets = []
+            for prefix in ["X:", "Y:", "Z:"]:
+                spin = QSpinBox()
+                spin.setRange(1, 1000)
+                spin.setPrefix(prefix + " ")
+                spin.setValue(default or 10)
+                spin.valueChanged.connect(self.on_change)
+                widgets.append(spin)
+                row.addWidget(spin)
+            self.widgets[key] = {'type': 'vector3_int', 'widgets': widgets, 'row_layout': row}
+        
+        layout.addLayout(row)
 
     def on_tool_changed(self):
-        """Zeigt nur die Felder an, die zum gewählten Tool gehören + Standard-Felder."""
+
         tool_id = self.tool_combo.currentData()
-        required_params = NODE_TOOLS.get(tool_id, {}).get("params", [])
-        
-        # Diese Felder bleiben IMMER sichtbar, egal welches Tool
-        always_visible = [
-            'name', 'id', 'center_of_mass', 'tool_type', 'probability_vector',
-            # Transformationen:
-            'displacement', 'displacement_factor', 
-            'rot_theta', 'rot_phi', 
-            'stretch_x', 'stretch_y', 'stretch_z'
-        ]
-        
-        for key, info in self.widgets.items():
-            widget_row = info.get('row_layout')
-            if widget_row:
-                # Zeigen, wenn in der Whitelist ODER spezifisch für das Tool gefordert
-                should_show = (key in always_visible) or (key in required_params)
-                _set_visible(widget_row, should_show)
-        
-        self.on_change() # Trigger save
+        panel_index = self.tool_panels.get(tool_id, 0)
+        self.tool_stack.setCurrentIndex(panel_index)
+        self.on_change()  # Parameter-Update triggern
 
     def add_section(self, title):
         label = QLabel(title)
         label.setStyleSheet("font-weight: bold; font-size: 13px; color: #2196F3; margin-top: 10px; border-bottom: 2px solid #2196F3; padding-bottom: 5px;")
         self.content_layout.addWidget(label)
-    # --- HIER DIE KORRIGIERTEN METHODEN EINFÜGEN ---
 
     def add_text_field(self, key, label, parent=None):
         target_layout = parent if parent else self.content_layout
@@ -1072,7 +1242,6 @@ class NodeParametersWidget(QWidget):
         row.addWidget(lbl)
         row.addWidget(edit)
         target_layout.addLayout(row)
-        # Wichtig: row_layout speichern für Sichtbarkeit
         self.widgets[key] = {'type': 'text', 'widget': edit, 'row_layout': row}
 
     def add_int_field(self, key, label, min_val=0, max_val=10000, parent=None):
@@ -1209,13 +1378,14 @@ class NodeParametersWidget(QWidget):
     
     def get_current_params(self):
         result = {}
-        
         for key, info in self.widgets.items():
             wtype = info['type']
             
-            # Zugriff erfolgt jetzt typsicher
             if wtype == 'text':
                 result[key] = info['widget'].text()
+            elif wtype == 'combo_text': 
+                result[key] = info['widget'].currentText()
+            
             elif wtype == 'int':
                 result[key] = info['widget'].value()
             elif wtype == 'float':
@@ -1225,17 +1395,15 @@ class NodeParametersWidget(QWidget):
             elif wtype == 'combo':
                 result[key] = info['widget'].currentData()
             elif wtype == 'vector3':
-                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
+                result[key] = [s.value() for s in info['widgets']]
             elif wtype == 'vector3_int':
-                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
+                result[key] = [s.value() for s in info['widgets']]
             elif wtype == 'prob_list':
-                result[key] = [s.value() for s in info['widgets']] # Nutzt 'widgets'
+                result[key] = [s.value() for s in info['widgets']]
         
-        # Center of Mass Logik
         if 'center_of_mass' in result:
             result['m'] = result['center_of_mass'].copy()
         
-        # Scaling defaults
         sx = result.get('stretch_x', 1.0)
         sy = result.get('stretch_y', 1.0)
         sz = result.get('stretch_z', 1.0)
@@ -1245,9 +1413,8 @@ class NodeParametersWidget(QWidget):
             [0.0, sy, 0.0],
             [0.0, 0.0, sz]
         ]
-        
         return result
-    
+
     def load_data(self, data):
         self.auto_save = False
         self.node_data = data
@@ -1255,11 +1422,13 @@ class NodeParametersWidget(QWidget):
         for key, info in self.widgets.items():
             if key not in data:
                 continue
-            
             value = data[key]
             wtype = info['type']
             
-            if wtype == 'text':
+            if wtype == 'combo_text': 
+                idx = info['widget'].findText(str(value))
+                if idx >= 0: info['widget'].setCurrentIndex(idx)
+            elif wtype == 'text':
                 info['widget'].setText(str(value))
             elif wtype == 'int':
                 info['widget'].setValue(int(value))
@@ -1284,35 +1453,15 @@ class NodeParametersWidget(QWidget):
                             info['widgets'][i].blockSignals(True)
                             info['widgets'][i].setValue(float(v))
                             info['widgets'][i].blockSignals(False)
-
-        # Matrix Handling
+                            
         if 'transform_matrix' in data:
-            mat = data['transform_matrix']
-            try:
-                if len(mat) >= 3 and len(mat[0]) >= 1 and len(mat[1]) >= 2 and len(mat[2]) >= 3:
-                    sx = float(mat[0][0])
-                    sy = float(mat[1][1])
-                    sz = float(mat[2][2])
-                    
-                    if 'stretch_x' in self.widgets:
-                        self.widgets['stretch_x']['widget'].setValue(sx)
-                    if 'stretch_y' in self.widgets:
-                        self.widgets['stretch_y']['widget'].setValue(sy)
-                    if 'stretch_z' in self.widgets:
-                        self.widgets['stretch_z']['widget'].setValue(sz)
-            except Exception as e:
-                print(f"Error parsing transform_matrix: {e}")
-
-        # Sicherstellen, dass Skalierung nicht 0 ist
-        for stretch_key in ['stretch_x', 'stretch_y', 'stretch_z']:
-            if stretch_key in self.widgets and self.widgets[stretch_key]['widget'].value() == 0.0: 
-                 self.widgets[stretch_key]['widget'].setValue(1.0)
-
+             pass
+             
         self.auto_save = True
 
 
 
-# Helper Funktion um Layouts zu verstecken (muss in die Klasse oder global)
+
 def _set_visible(layout, visible):
     for i in range(layout.count()):
         item = layout.itemAt(i)
@@ -1322,9 +1471,6 @@ def _set_visible(layout, visible):
             _set_visible(item.layout(), visible)
 
 class PolynomialTrioWidget(QGroupBox):
-    """
-    Includes conversion logic between JSON encoded format and UI format.
-    """
     def __init__(self, title):
         super().__init__(title)
         self.setStyleSheet("""
@@ -1565,7 +1711,6 @@ class PolynomialManagerWidget(QWidget):
         for i, pop in enumerate(population_list):
             pop_name = f"POPULATION {i} ({pop.get('model', 'unknown')})"
             
-            # Hier nutzen wir das neue TrioWidget
             trio = PolynomialTrioWidget(pop_name)
             
             if 'polynomials' in pop and pop['polynomials']:
@@ -1624,17 +1769,13 @@ class GraphNameColorWidget(QWidget):
 
 ################################################################################
 class GraphOverviewWidget(QWidget):
-    """
-    Hierarchische Übersicht aller Graphen.
-    Angepasstes High-Contrast Theme.
-    Standardmäßig sind alle Items (Graphen, Nodes, Populations) aufgeklappt.
-    """
-    
-    # Signals
+
     node_selected = pyqtSignal(int, int)
     population_selected = pyqtSignal(int, int, int)
     connection_selected = pyqtSignal(dict)
     requestConnectionCreation = pyqtSignal(int, int, int) # graph_id, node_id, pop_id    # Farben (High Contrast)
+    requestConnectionDeletion = pyqtSignal(dict)  
+
     COLOR_GRAPH_BG = "#000000"      
     COLOR_GRAPH_FG = "#87CEEB"      
     COLOR_NODE_BG = "#8B0000"       
@@ -1655,28 +1796,24 @@ class GraphOverviewWidget(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
         
-        # === HEADER ===
         header = QHBoxLayout()
         title = QLabel("📊 Graph Overview")
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: #333;")
         header.addWidget(title)
         header.addStretch()
         
-        # Buttons für Expand/Collapse
         self.refresh_btn = QPushButton("🔄")
         self.refresh_btn.setFixedSize(28, 28)
         self.refresh_btn.setToolTip("Refresh List")
         self.refresh_btn.clicked.connect(self.update_tree)
         header.addWidget(self.refresh_btn)
         
-        # Button: Alles aufklappen
         self.expand_btn = QPushButton("⊕")
         self.expand_btn.setFixedSize(28, 28)
         self.expand_btn.setToolTip("Expand All (Alles aufklappen)")
         self.expand_btn.clicked.connect(self._expand_all)
         header.addWidget(self.expand_btn)
         
-        # Button: Alles einklappen
         self.collapse_btn = QPushButton("⊖")
         self.collapse_btn.setFixedSize(28, 28)
         self.collapse_btn.setToolTip("Collapse All (Alles einklappen)")
@@ -1685,7 +1822,6 @@ class GraphOverviewWidget(QWidget):
         
         layout.addLayout(header)
         
-        # === TREE WIDGET ===
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Element", "Details"])
         self.tree.setColumnWidth(0, 240)
@@ -1694,101 +1830,115 @@ class GraphOverviewWidget(QWidget):
         self.tree.setAnimated(True)
         self.tree.setIndentation(20)
         
-        # WICHTIG: Items können per Klick auf den Pfeil expandiert/kollabiert werden
         self.tree.setItemsExpandable(True) 
         
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         
-        # Styling
         self.tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #1e1e1e;
                 color: #e0e0e0;
-                border: 1px solid #444444;
+                border: 1px solid #444444; 
                 border-radius: 4px;
                 font-family: 'Segoe UI', 'Arial', sans-serif;
                 font-size: 12px;
+                outline: 0; 
             }
+            
             QTreeWidget::item {
-                padding: 4px 2px;
-                border-bottom: 1px solid #333333;
-                min-height: 24px;
+                padding: 6px 4px;
+                border-bottom: 1px solid #2a2a2a;
+                margin: 0px;
             }
+            
             QTreeWidget::item:selected {
                 background-color: #264f78;
                 color: #ffffff;
+                border: none;
             }
+            
             QTreeWidget::item:hover {
                 background-color: #2d2d2d;
             }
+
+            
+            QHeaderView {
+                background-color: #333333;
+                border: none;
+                margin: 0px;
+                padding: 0px;
+            }
+            
             QHeaderView::section {
                 background-color: #333333;
                 color: #ffffff;
                 padding: 6px;
                 border: none;
                 border-bottom: 2px solid #555555;
+                border-right: 1px solid #444444; 
                 font-weight: bold;
+                margin: 0px;
             }
-            /* Pfeil-Styling für auf/zuklappen */
-            QTreeView::branch:has-children:!has-siblings:closed,
-            QTreeView::branch:closed:has-children:has-siblings {
-                border-image: none;
-                image: url(none); /* Qt Standard Pfeile nutzen oder custom icons hier setzen */
+            
+            QTableCornerButton::section {
+                background-color: #333333;
+                border: none;
+            }
+            
+            QScrollBar:vertical {
+                border: none;
+                background: #2b2b2b;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #555;
+                min-height: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
+        
+        self.tree.setFrameShape(QFrame.Shape.NoFrame)  
+        self.tree.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False) 
+        
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.tree)
         
-        # === STATUS ===
         self.status_label = QLabel("No graphs")
         self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 3px;") 
         layout.addWidget(self.status_label)
 
     def _show_context_menu(self, position):
-        """Zeigt Kontextmenü bei Rechtsklick auf ein Item."""
         item = self.tree.itemAt(position)
-        if not item:
-            return
+        if not item: return
 
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data:
-            return
+        if not data: return
 
         item_type = data.get('type')
+        menu = QMenu(self)
 
-        # Wir erlauben das Menü für Nodes UND Populationen
         if item_type in ['node', 'population']:
-            graph_id = data['graph_id']
-            node_id = data['node_id']
+            pass
 
-            # Wenn Node geklickt -> Pop -1 (oder 0), wenn Pop geklickt -> echte ID
-            pop_id = data.get('pop_id', 0) 
+        elif item_type == 'connection':
+            conn_data = data.get('connection')
+            conn_name = conn_data.get('name', 'Connection')
+            
+            action_del = QAction(f"🗑️ Delete '{conn_name}'", self)
+            action_del.triggered.connect(lambda: self.requestConnectionDeletion.emit(conn_data))
+            menu.addAction(action_del)
 
-            menu = QMenu(self)
-            menu.setStyleSheet("""
-                QMenu { background-color: #2b2b2b; border: 1px solid #555; color: white; }
-                QMenu::item:selected { background-color: #2196F3; }
-            """)
-
-            # Text anpassen je nach Typ
-            target_name = f"Pop {pop_id}" if item_type == 'population' else "Node (Pop 0)"
-
-            action_add = QAction(f"Create connection from ({target_name}) to ...", self)
-
-            # Signal emitten mit 3 Argumenten
-            action_add.triggered.connect(
-                lambda: self.requestConnectionCreation.emit(graph_id, node_id, pop_id)
-            )
-            menu.addAction(action_add)
-
-            menu.exec(self.tree.viewport().mapToGlobal(position))
+        menu.exec(self.tree.viewport().mapToGlobal(position))
 
 
     def update_tree(self):
-        """Baut den Baum neu auf."""
         self.tree.clear()
         
         if not self.graph_list:
@@ -1800,7 +1950,6 @@ class GraphOverviewWidget(QWidget):
         total_conns = 0
         
         for graph in self.graph_list:
-            # === GRAPH ITEM ===
             graph_item = QTreeWidgetItem(self.tree)
             graph_name = getattr(graph, 'graph_name', f'Graph_{graph.graph_id}')
             graph_item.setText(0, f"📊 {graph_name}")
@@ -1813,21 +1962,17 @@ class GraphOverviewWidget(QWidget):
                 'graph_id': graph.graph_id
             })
             
-            # ✅ HIER: Graph standardmäßig aufklappen
             graph_item.setExpanded(True)
             
-            # === NODES ===
             for node in graph.node_list:
                 total_nodes += 1
                 node_item = self._create_node_item(graph, node, graph_item)
                 
-                # === POPULATIONS ===
                 populations = self._get_populations(node)
                 for pop_idx, pop_info in enumerate(populations):
                     total_pops += 1
                     pop_item = self._create_population_item(graph, node, pop_idx, pop_info, node_item)
                     
-                    # === CONNECTIONS (Kinder der Population) ===
                     connections = self._get_connections_for_pop(node, pop_idx)
                     for conn in connections:
                         total_conns += 1
@@ -1873,7 +2018,6 @@ class GraphOverviewWidget(QWidget):
             'node_id': node.id
         })
         
-        # ✅ HIER: Node standardmäßig aufklappen
         item.setExpanded(True)
         return item
     
@@ -1896,7 +2040,6 @@ class GraphOverviewWidget(QWidget):
             'info': pop_info
         })
         
-        # ✅ HIER: Population standardmäßig aufklappen (damit Connections sichtbar sind)
         item.setExpanded(True)
         
         return item
@@ -1992,13 +2135,10 @@ class GraphOverviewWidget(QWidget):
         return result
     
     def _expand_all(self):
-        """Expandiert ALLE Ebenen."""
         self.tree.expandAll()
     
     def _collapse_all(self):
-        """Kollabiert alle Ebenen, lässt aber die Graphen (Root Items) stehen."""
         self.tree.collapseAll()
-        # Top Level (Graphen) wieder aufmachen, sonst sieht man nichts
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setExpanded(True)
     
@@ -2016,8 +2156,6 @@ class GraphOverviewWidget(QWidget):
             self.connection_selected.emit(data['connection'])
     
     def _on_item_double_clicked(self, item, column):
-        # Doppelklick toggelt Expansion standardmäßig in QTreeWidget, 
-        # aber hier können wir zusätzliche Aktionen definieren
         pass
             
 ################################################################################
@@ -2075,7 +2213,6 @@ class PolynomialBuilderWidget(QWidget):
         
         self.layout.addLayout(header_layout)
         
-        # Container für Rows
         self.rows_layout = QVBoxLayout()
         self.layout.addLayout(self.rows_layout)
     
@@ -2084,7 +2221,6 @@ class PolynomialBuilderWidget(QWidget):
         if data:
             row.set_data(data)
         
-        # Connect delete button
         row.btn_del.clicked.connect(lambda: self.remove_term(row))
         
         self.rows_layout.addWidget(row)
@@ -2147,25 +2283,41 @@ class GraphCreatorWidget(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         
-        # HEADER
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("Graph Name:"))
         self.graph_name_input = QLineEdit()
         
-        # --- ÄNDERUNG START: Automatischen Namen setzen ---
-        # Wir greifen auf die globale Variable zu
         global next_graph_id 
         self.graph_name_input.setText(f"Graph_{next_graph_id}")
         self.graph_name_input.setPlaceholderText("e.g., Visual Cortex")
-        # --- ÄNDERUNG ENDE ---
         
         header_layout.addWidget(self.graph_name_input)
         main_layout.addLayout(header_layout)
+
+        noise_layout = QHBoxLayout()
+        noise_layout.setContentsMargins(0, 5, 0, 10)
         
-        #  MAIN CONTENT 
+        lbl_noise = QLabel("Polynomial Noise:")
+        lbl_noise.setToolTip("Determines how much new nodes deviate from Identity (f(x)=x).")
+        
+        self.noise_slider = QSlider(Qt.Orientation.Horizontal)
+        self.noise_slider.setRange(0, 200) # 0.0 bis 2.0
+        self.noise_slider.setValue(int(POLYNOM_NOISE_LEVEL * 100))
+        self.noise_slider.valueChanged.connect(self._update_noise_level)
+        
+        self.noise_value_lbl = QLabel(f"{POLYNOM_NOISE_LEVEL:.2f}")
+        self.noise_value_lbl.setFixedWidth(40)
+        self.noise_value_lbl.setStyleSheet("color: #00E5FF; font-weight: bold;")
+        
+        noise_layout.addWidget(lbl_noise)
+        noise_layout.addWidget(self.noise_slider)
+        noise_layout.addWidget(self.noise_value_lbl)
+        
+        main_layout.addLayout(noise_layout)
+        # ------------------------------------
+        
         content_layout = QHBoxLayout()
         
-        #  NODE COLUMN 
         node_col = QVBoxLayout()
         node_col.addWidget(QLabel("NODES", alignment=Qt.AlignmentFlag.AlignCenter))
         
@@ -2176,14 +2328,27 @@ class GraphCreatorWidget(QWidget):
         node_scroll.setWidget(self.node_list_widget)
         node_col.addWidget(node_scroll)
         
-        add_node_btn = QPushButton("+ Add Node")
-        add_node_btn.clicked.connect(self.add_node)
-        add_node_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        node_col.addWidget(add_node_btn)
+        btns_layout = QHBoxLayout()
         
+        self.btn_add_node = QPushButton("+ Add Node")
+        self.btn_add_node.clicked.connect(self.add_node)
+        self.btn_add_node.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        
+        self.btn_add_node.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_add_node.customContextMenuRequested.connect(self.show_add_node_menu)
+        self.btn_add_node.setToolTip("Left-Click: Add Empty Node\nRight-Click: Add Cortical Structure Preset")
+        
+        btns_layout.addWidget(self.btn_add_node)
+        
+        twin_btn = QPushButton("👥 Twin")
+        twin_btn.setToolTip("Clone selected node with same parameters at new position")
+        twin_btn.clicked.connect(self.create_twin_node)
+        twin_btn.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold;")
+        btns_layout.addWidget(twin_btn)
+        
+        node_col.addLayout(btns_layout)
         content_layout.addLayout(node_col, 2)
         
-        #  POPULATION COLUMN 
         pop_col = QVBoxLayout()
         pop_col.addWidget(QLabel("POPULATIONS", alignment=Qt.AlignmentFlag.AlignCenter))
         
@@ -2202,34 +2367,24 @@ class GraphCreatorWidget(QWidget):
         
         content_layout.addLayout(pop_col, 2)
         
-        #  EDITOR COLUMN 
         editor_col = QVBoxLayout()
-        
         self.editor_stack = QStackedWidget()
-        
         placeholder = QLabel("← Select a Node or Population", alignment=Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("font-size: 14px; color: #999;")
         self.editor_stack.addWidget(placeholder)
-        
         self.node_param_widget = NodeParametersWidget(node_parameters1.copy())
         self.node_param_widget.paramsChanged.connect(self.save_node_params)
         self.editor_stack.addWidget(self.node_param_widget)
-        
         self.pop_param_widget = NeuronParametersWidget()
         self.editor_stack.addWidget(self.pop_param_widget)
-        
         self.polynom_manager = PolynomialManagerWidget()
         self.editor_stack.addWidget(self.polynom_manager)
-        
         editor_col.addWidget(self.editor_stack)
-        
         content_layout.addLayout(editor_col, 6)
         
         main_layout.addLayout(content_layout)
         
-        #  BOTTOM BUTTONS 
         bottom_layout = QHBoxLayout()
-        
         polynom_btn = QPushButton("Edit Polynomial Flow Field")
         polynom_btn.clicked.connect(self.open_polynomial_editor)
         polynom_btn.setMinimumHeight(50)
@@ -2243,7 +2398,139 @@ class GraphCreatorWidget(QWidget):
         bottom_layout.addWidget(create_btn)
         
         main_layout.addLayout(bottom_layout)
-    
+
+
+
+    def show_add_node_menu(self, pos):
+        """Zeigt das Menü mit Cortex-Strukturen beim Rechtsklick an."""
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; border: 1px solid #555; }")
+        
+        header = QAction("Add Structure Patch:", self)
+        header.setEnabled(False)
+        menu.addAction(header)
+        menu.addSeparator()
+
+        region_data = {r_key: {} for r_key in region_names.values()}
+        for model, region_map in distributions.items():
+            for r_key, prob in region_map.items():
+                if prob > 0: region_data[r_key][model] = prob
+
+        for display_name, r_key in region_names.items():
+            if r_key not in region_data or not region_data[r_key]: continue
+            
+            models_probs = region_data[r_key]
+            model_list = list(models_probs.keys())
+            prob_list = list(models_probs.values())
+            
+            total = sum(prob_list)
+            if total > 0: prob_list = [p/total for p in prob_list]
+
+            action = QAction(display_name, self)
+            action.triggered.connect(lambda checked, n=display_name, m=model_list, p=prob_list: 
+                                   self.add_structure_node(n, m, p))
+            menu.addAction(action)
+
+        menu.exec(self.btn_add_node.mapToGlobal(pos))
+
+    def add_structure_node(self, name, models, probs):
+        
+        self.add_node()
+        
+        node_idx = len(self.node_list) - 1
+        node_data = self.node_list[node_idx]
+        
+        safe_name = name.replace(" ", "_").replace("/", "-")
+        node_data['params']['name'] = f"{safe_name}_{node_idx}"
+        node_data['params']['grid_size'] = [10, 10, 10] # Kleiner Patch wie gewünscht
+        node_data['params']['probability_vector'] = probs
+        node_data['params']['sparsity_factor'] = 0.85
+        
+        node_data['button'].setText(f"Node {node_idx + 1}: {node_data['params']['name']}")
+        
+        populations = []
+        for i, model in enumerate(models):
+            default_polynomials = {
+                'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
+                'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
+                'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
+            }
+            
+            populations.append({
+                'model': model,
+                'params': {}, 
+                'polynomials': default_polynomials
+            })
+            
+        node_data['populations'] = populations
+        
+        self.select_node(node_idx)
+        print(f"Added Structure Node: {name}")
+
+    def _update_noise_level(self, value):
+        global POLYNOM_NOISE_LEVEL
+        POLYNOM_NOISE_LEVEL = value / 100.0
+        self.noise_value_lbl.setText(f"{POLYNOM_NOISE_LEVEL:.2f}")
+
+    def create_twin_node(self):
+        if self.current_node_idx is None:
+            print("Please select a node to clone first.")
+            return
+            
+        self.save_node_params(self.node_param_widget.get_current_params())
+        self.save_current_population_params()
+        
+        source_node = self.node_list[self.current_node_idx]
+        current_pos = source_node['params'].get('center_of_mass', [0,0,0])
+        old_id = source_node['params'].get('id')
+        
+        dlg = PositionDialog(current_pos, self)
+        if dlg.exec():
+            new_pos = dlg.get_position()
+            
+            import copy
+            import time
+            new_node_data = copy.deepcopy(source_node)
+            
+            new_idx = len(self.node_list)
+            new_node_data['params']['id'] = new_idx
+            new_node_data['params']['name'] = f"{source_node['params']['name']}_Twin"
+            
+            new_node_data['params']['m'] = list(new_pos)
+            new_node_data['params']['center_of_mass'] = list(new_pos)
+            new_node_data['params']['old_center_of_mass'] = list(new_pos)
+            
+            source_conns = source_node['params'].get('connections', [])
+            twin_conns = []
+            
+            for conn in source_conns:
+                src_id = conn['source'].get('node_id')
+                tgt_id = conn['target'].get('node_id')
+                
+                if src_id == old_id and tgt_id == old_id:
+                    new_conn = copy.deepcopy(conn)
+                    
+                    new_conn['source']['node_id'] = new_idx
+                    new_conn['target']['node_id'] = new_idx
+                    
+                    new_conn['id'] = int(time.time() * 1000) + len(twin_conns)
+                    new_conn['name'] = f"{conn.get('name', 'conn')}_Twin"
+                    
+                    twin_conns.append(new_conn)
+            
+            new_node_data['params']['connections'] = twin_conns
+            print(f"  Twin inherited {len(twin_conns)} internal connections.")
+            
+            node_btn = QPushButton(f"Node {new_idx + 1}: {new_node_data['params']['name']}")
+            node_btn.setMinimumHeight(50)
+            node_btn.clicked.connect(lambda checked=False, idx=new_idx: self.select_node(idx))
+            self.node_list_layout.addWidget(node_btn)
+            new_node_data['button'] = node_btn
+            
+            self.node_list.append(new_node_data)
+            self.select_node(new_idx)
+            print(f"Twin created at {new_pos}")
+
     def add_population(self):
         if self.current_node_idx is None:
             return
@@ -2254,10 +2541,11 @@ class GraphCreatorWidget(QWidget):
         pop_idx = len(node['populations'])
         
         default_polynomials = {
-            'x': generate_random_polynomial(max_degree=2, num_terms=3),
-            'y': generate_random_polynomial(max_degree=2, num_terms=3),
-            'z': generate_random_polynomial(max_degree=2, num_terms=3)
+            'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
+            'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
+            'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
         }
+        # ----------------------------------------
         
         node['populations'].append({
             'model': 'iaf_psc_alpha',
@@ -2267,9 +2555,7 @@ class GraphCreatorWidget(QWidget):
         
         num_pops = len(node['populations'])
         self.node_param_widget.set_population_count(num_pops)
-        
         node['params']['probability_vector'] = [1.0/num_pops] * num_pops
-        
         self.node_param_widget.load_data(node['params'])
         
         self.update_population_list()
@@ -2322,7 +2608,6 @@ class GraphCreatorWidget(QWidget):
             print("ERROR: Add at least one node!")
             return
         
-        # --- Validierung ---
         for i, node in enumerate(self.node_list):
             tool_type = node['params'].get('tool_type', 'custom')
             
@@ -2367,12 +2652,17 @@ class GraphCreatorWidget(QWidget):
             
             # === LOGIK-WEICHE: TOOL VS CUSTOM ===
             if tool_type != 'custom' and not populations:
-                # AUTOMATISCHE KONFIGURATION FÜR TOOLS (z.B. CCW)
-                # Wir tun so, als gäbe es 1 Population, damit der Node gebaut wird.
+                # AUTOMATISCHE KONFIGURATION FÜR TOOLS (z.B. CCW, Blob)
                 print(f"Auto-configuring {tool_type} node structure...")
-                neuron_models = ['iaf_psc_alpha'] # Default Modell
+                
+                # --- ÄNDERUNG START ---
+                # Hole das Modell aus den Parametern, Fallback auf iaf_psc_alpha
+                selected_model = node['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+                neuron_models = [selected_model] 
+                # --- ÄNDERUNG ENDE ---
+                
                 types = [0]
-                encoded_polynoms_per_type = [[]] # Keine Flow-Fields für starre Strukturen nötig
+                encoded_polynoms_per_type = [[]] 
                 prob_vec = [1.0]
                 pop_nest_params = [{}]
             else:
@@ -2510,7 +2800,52 @@ class GraphCreatorWidget(QWidget):
         self.update_population_list()
         self.add_pop_btn.setEnabled(True)
 
-
+    def load_structure_preset(self, name, models, probs, grid_size=[10,10,10]):
+        """Lädt ein Struktur-Preset und bereitet den Node vor."""
+        print(f"Loading Structure Preset: {name}")
+        
+        # 1. Resetten
+        self.reset()
+        
+        # 2. Namen setzen
+        safe_name = name.replace(" ", "_").replace("/", "-")
+        self.graph_name_input.setText(f"Graph_{safe_name}")
+        
+        # 3. Node hinzufügen (Node 0)
+        self.add_node()
+        
+        # 4. Zugriff auf den neu erstellten Node
+        node = self.node_list[0]
+        
+        # 5. Parameter setzen
+        node['params']['name'] = f"{safe_name}_Node"
+        node['params']['grid_size'] = grid_size
+        node['params']['probability_vector'] = probs
+        
+        # WFC Parameter leicht anpassen für Strukturen
+        node['params']['sparsity_factor'] = 0.85 # Etwas dichter
+        node['params']['dt'] = 0.01
+        
+        # 6. Populationen erstellen
+        node['populations'] = []
+        
+        for i, model in enumerate(models):
+            # --- UPDATE ---
+            # Auch hier: Sanfte Abweichung statt totalem Chaos
+            default_polynomials = {
+                'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
+                'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
+                'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
+            }
+            # --------------
+            
+            node['populations'].append({
+                'model': model,
+                'params': {}, 
+                'polynomials': default_polynomials
+            })
+            
+        self.select_node(0)
     
     
     def save_node_params(self, params):
@@ -2692,11 +3027,25 @@ class EditGraphWidget(QWidget):
         
         node_buttons_layout = QHBoxLayout()
         
-        add_node_btn = QPushButton("+ Add")
-        add_node_btn.clicked.connect(self.add_node)
-        add_node_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        node_buttons_layout.addWidget(add_node_btn)
+        self.btn_add_node = QPushButton("+ Add")
+        self.btn_add_node.clicked.connect(self.add_node)
+        self.btn_add_node.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         
+        # Rechtsklick Menü
+        self.btn_add_node.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_add_node.customContextMenuRequested.connect(self.show_add_node_menu)
+        self.btn_add_node.setToolTip("Left-Click: Empty Node\nRight-Click: Structure Patch")
+
+        node_buttons_layout.addWidget(self.btn_add_node)
+        
+        # --- NEUER BUTTON ---
+        twin_btn = QPushButton("👥 Twin")
+        twin_btn.setToolTip("Clone selected node as a NEW node at new position")
+        twin_btn.clicked.connect(self.create_twin_node)
+        twin_btn.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold;")
+        node_buttons_layout.addWidget(twin_btn)
+        # --------------------
+
         self.remove_node_btn = QPushButton("🗑️ Remove")
         self.remove_node_btn.clicked.connect(self.remove_node)
         self.remove_node_btn.setEnabled(False)
@@ -2802,6 +3151,134 @@ class EditGraphWidget(QWidget):
             node_data = self.node_list[self.current_node_idx]
             if pop_id < len(node_data['populations']):
                 self.select_population(pop_id)
+    def delete_connection_by_data(self, conn_data):
+        """Löscht eine Verbindung basierend auf dem Dictionary und speichert."""
+        
+        src_gid = conn_data['source']['graph_id']
+        src_nid = conn_data['source']['node_id']
+        conn_id = conn_data.get('id')
+
+        # 1. Prüfen, ob wir im richtigen Graphen sind
+        if self.current_graph_id != src_gid:
+            # Wir laden den Graphen, falls er nicht aktiv ist
+            idx = self.graph_selector.findData(src_gid)
+            if idx >= 0:
+                self.graph_selector.setCurrentIndex(idx)
+            else:
+                print(f"Error: Graph {src_gid} not found for deletion.")
+                return
+
+        # 2. Node in der lokalen node_list finden
+        target_node_idx = None
+        for i, node in enumerate(self.node_list):
+            if node['params']['id'] == src_nid:
+                target_node_idx = i
+                break
+        
+        if target_node_idx is None:
+            print(f"Error: Source Node {src_nid} not found in current editor list.")
+            return
+
+        # 3. Verbindung aus der Parameter-Liste entfernen
+        node = self.node_list[target_node_idx]
+        connections = node['params'].get('connections', [])
+        
+        # Filtern: Behalte alle, die NICHT die ID haben
+        new_conns = [c for c in connections if c.get('id') != conn_id]
+        
+        if len(new_conns) == len(connections):
+            print("Warning: Connection ID not found in node parameters. Already deleted?")
+            return
+
+        # Update List
+        node['params']['connections'] = new_conns
+        
+        # 4. Auch aus 'original_node' entfernen (falls vorhanden), 
+        # damit die Änderung als "Structural Change" erkannt oder direkt übernommen wird
+        if node.get('original_node'):
+            orig = node['original_node']
+            if hasattr(orig, 'connections'):
+                # Filtern im Objekt
+                orig.connections = [c for c in orig.connections if c.get('id') != conn_id]
+
+        print(f"🗑️ Connection {conn_id} removed from Node {src_nid}. Saving...")
+        
+        # 5. Sofort speichern und neu laden (Triggered NEST Reset wenn nötig)
+        self.save_changes()
+
+    def show_add_node_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; border: 1px solid #555; }")
+        
+        header = QAction("🧠 Add Structure Patch:", self)
+        header.setEnabled(False)
+        menu.addAction(header)
+        menu.addSeparator()
+
+        # Daten aufbereiten (Identisch zu Creator)
+        region_data = {r_key: {} for r_key in region_names.values()}
+        for model, region_map in distributions.items():
+            for r_key, prob in region_map.items():
+                if prob > 0: region_data[r_key][model] = prob
+
+        for display_name, r_key in region_names.items():
+            if r_key not in region_data or not region_data[r_key]: continue
+            
+            models_probs = region_data[r_key]
+            model_list = list(models_probs.keys())
+            prob_list = list(models_probs.values())
+            total = sum(prob_list)
+            if total > 0: prob_list = [p/total for p in prob_list]
+
+            action = QAction(display_name, self)
+            action.triggered.connect(lambda checked, n=display_name, m=model_list, p=prob_list: 
+                                   self.add_structure_node(n, m, p))
+            menu.addAction(action)
+
+        menu.exec(self.btn_add_node.mapToGlobal(pos))
+
+    def add_structure_node(self, name, models, probs):
+        """Fügt Struktur im Editor hinzu."""
+        if self.current_graph is None: return
+
+        # 1. Basis-Node
+        self.add_node()
+        
+        # 2. Daten holen
+        node_idx = len(self.node_list) - 1
+        node_data = self.node_list[node_idx]
+        
+        # 3. Params
+        safe_name = name.replace(" ", "_").replace("/", "-")
+        node_data['params']['name'] = f"{safe_name}_{node_idx}"
+        node_data['params']['grid_size'] = [10, 10, 10]
+        node_data['params']['probability_vector'] = probs
+        node_data['params']['sparsity_factor'] = 0.85
+        
+        # UI Update
+        is_new = node_data.get('original_node') is None
+        suffix = " (NEW)" if is_new else ""
+        node_data['button'].setText(f"Node {node_idx + 1}{suffix}: {node_data['params']['name']}")
+        
+        # 4. Pops
+        populations = []
+        for i, model in enumerate(models):
+            default_polynomials = {
+                'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
+                'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
+                'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
+            }
+            populations.append({
+                'model': model,
+                'params': {}, 
+                'polynomials': default_polynomials
+            })
+            
+        node_data['populations'] = populations
+        
+        # 5. Refresh Params im UI Widget (da add_node evtl schon leere Daten geladen hat)
+        self.select_node(node_idx)
+        print(f"Added Structure Node to Editor: {name}")
 
     def load_connection_editor(self, connection_data):
         src_gid = connection_data['source']['graph_id']
@@ -3133,11 +3610,14 @@ class EditGraphWidget(QWidget):
         node = self.node_list[self.current_node_idx]
         pop_idx = len(node['populations'])
         
+        # --- HIER: Benutze ebenfalls den neuen Generator ---
+        # Greift auf die gleiche globale Variable zu, die im Creator-Slider gesetzt wird
         default_polynomials = {
-            'x': generate_random_polynomial(max_degree=2, num_terms=3),
-            'y': generate_random_polynomial(max_degree=2, num_terms=3),
-            'z': generate_random_polynomial(max_degree=2, num_terms=3)
+            'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
+            'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
+            'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
         }
+        # ---------------------------------------------------
         
         node['populations'].append({
             'model': 'iaf_psc_alpha',
@@ -3187,7 +3667,97 @@ class EditGraphWidget(QWidget):
             self.pop_param_widget.model_combo.setCurrentText(pop['model'])
         
         self.editor_stack.setCurrentIndex(2)
-    
+
+    def create_twin_node(self):
+        if self.current_node_idx is None:
+            return
+            
+        # 1. Save current state
+        self.save_node_params(self.node_param_widget.get_current_params())
+        self.save_current_population_params()
+        
+        # 2. Source Data
+        source_node = self.node_list[self.current_node_idx]
+        current_pos = source_node['params'].get('center_of_mass', [0,0,0])
+        old_id = source_node['params'].get('id')
+        
+        # 3. Dialog
+        dlg = PositionDialog(current_pos, self)
+        if dlg.exec():
+            new_pos = dlg.get_position()
+            
+            # 4. Copy
+            import copy
+            import time
+            new_node_data = copy.deepcopy(source_node)
+            
+            # 5. Adjustments
+            new_idx = len(self.node_list)
+            new_name = f"{source_node['params'].get('name', 'Node')}_Twin"
+            
+            new_node_data['params']['id'] = new_idx
+            new_node_data['params']['name'] = new_name
+            
+            # Position Update
+            new_node_data['params']['m'] = list(new_pos)
+            new_node_data['params']['center_of_mass'] = list(new_pos)
+            new_node_data['params']['old_center_of_mass'] = list(new_pos) 
+            
+            # WICHTIG: Als neuen Node markieren
+            new_node_data['original_node'] = None 
+            
+            # 6. Connections (Nur interne kopieren)
+            source_conns = source_node['params'].get('connections', [])
+            twin_conns = []
+            
+            # Wir suchen die höchste existierende Connection ID im ganzen Graphen, um Konflikte zu vermeiden
+            max_conn_id = 0
+            for node in self.node_list:
+                for c in node['params'].get('connections', []):
+                    if isinstance(c.get('id'), int):
+                        max_conn_id = max(max_conn_id, c.get('id'))
+            
+            for conn in source_conns:
+                src_id = conn['source'].get('node_id')
+                tgt_id = conn['target'].get('node_id')
+                
+                # CHECK: Interne Verbindung?
+                if src_id == old_id and tgt_id == old_id:
+                    new_conn = copy.deepcopy(conn)
+                    
+                    # IDs auf Twin biegen
+                    new_conn['source']['node_id'] = new_idx
+                    new_conn['target']['node_id'] = new_idx
+                    
+                    # Neue ID vergeben
+                    max_conn_id += 1
+                    new_conn['id'] = max_conn_id
+                    new_conn['name'] = f"{conn.get('name', 'conn')}_Twin"
+                    
+                    # Fehlerstatus zurücksetzen (falls das Original fehlerhaft war)
+                    if 'error' in new_conn:
+                        del new_conn['error']
+                        
+                    twin_conns.append(new_conn)
+            
+            new_node_data['params']['connections'] = twin_conns
+            
+            # 7. UI Button
+            node_btn = QPushButton(f"Node {new_idx + 1} (NEW TWIN)")
+            node_btn.setMinimumHeight(50)
+            node_btn.clicked.connect(lambda checked=False, idx=new_idx: self.select_node(idx))
+            self.node_list_layout.addWidget(node_btn)
+            new_node_data['button'] = node_btn
+            
+            self.node_list.append(new_node_data)
+            self.select_node(new_idx)
+            
+            print(f"Twin created in Editor with {len(twin_conns)} internal connections.")
+            QMessageBox.information(self, "Twin Created", 
+                                  f"Twin '{new_name}' added at {new_pos}.\n"
+                                  f"Inherited {len(twin_conns)} internal connections.\n"
+                                  "Don't forget to click 'SAVE CHANGES' to generate the neurons.")
+            
     def save_current_population_params(self):
         if self.current_node_idx is not None and self.current_pop_idx is not None:
             # Prüfe ob Index noch gültig ist
@@ -3242,11 +3812,16 @@ class EditGraphWidget(QWidget):
             print("ERROR: Graph name required!")
             return
         
-        # Validate
+        # --- VALIDATION UPDATE START ---
+        # Nur Custom-Nodes (WFC) benötigen zwingend manuelle Populationen.
+        # Tool-Nodes (Cone, CCW etc.) können automatisch generiert werden.
         for i, node in enumerate(self.node_list):
-            if not node['populations']:
-                print(f"ERROR: Node {i+1} has no populations!")
+            tool_type = node['params'].get('tool_type', 'custom')
+            if tool_type == 'custom' and not node['populations']:
+                print(f"ERROR: Node {i+1} (Custom) has no populations! Please add populations.")
                 return
+        # --- VALIDATION UPDATE END ---
+
         # Update graph name im Objekt
         new_name = self.graph_name_input.text()
         self.current_graph.graph_name = new_name
@@ -3262,9 +3837,7 @@ class EditGraphWidget(QWidget):
         
         print(f"\n=== Saving changes to Graph {self.current_graph_id} ===")
         
-        # Update graph name
         self.current_graph.graph_name = self.graph_name_input.text()
-        
         
         edited_analysis = [self._node_was_edited(n) for n in self.node_list]
         nodes_with_structural_changes = [
@@ -3281,6 +3854,7 @@ class EditGraphWidget(QWidget):
         self.current_graph._next_id = 0
         
         for node_idx, node_data in enumerate(self.node_list):
+            # Hier wird jetzt die robustere _build_node_params aufgerufen
             node_params = self._build_node_params(node_idx, node_data)
             original_node = node_data.get('original_node')
             
@@ -3297,14 +3871,13 @@ class EditGraphWidget(QWidget):
                     auto_build=False
                 )
             
-
             has_structural_change = node_idx in structural_change_indices
             
             original_has_points = False
             if original_node and hasattr(original_node, 'positions') and original_node.positions:
                 original_has_points = any(len(c) > 0 for c in original_node.positions if c is not None)
 
-
+            # Logik für Rebuild vs. Copy
             if has_structural_change or not original_has_points:
                 reason = "Structural change" if has_structural_change else "Original positions empty/invalid"
                 print(f"  Node {node_idx}: REBUILD ({reason})")
@@ -3314,6 +3887,7 @@ class EditGraphWidget(QWidget):
                     print(f"  ❌ Build failed for Node {node_idx}: {e}")
             
             elif original_node:
+                # Versuche Positionen zu übernehmen, wenn keine strukturelle Änderung vorliegt
                 old_com = np.array(original_node.center_of_mass)
                 new_com = np.array(node_params['center_of_mass'])
                 delta = new_com - old_com
@@ -3335,6 +3909,7 @@ class EditGraphWidget(QWidget):
             
             new_node.populate_node()
         
+        # Andere Graphen repopulaten (da NEST Reset)
         for graph in self.graph_list:
             if graph.graph_id == self.current_graph_id:
                 continue
@@ -3344,13 +3919,10 @@ class EditGraphWidget(QWidget):
         print(f"Graph '{self.current_graph.graph_name}' updated!")
         
         self.graphUpdated.emit(-1)
-        # --- ÄNDERUNG: ComboBox Text aktualisieren ohne Auswahl zu verlieren ---
-        # Wir aktualisieren den Text des aktuell ausgewählten Items
         idx = self.graph_selector.currentIndex()
         if idx >= 0:
             new_label = f"{new_name} (ID: {self.current_graph_id})"
             self.graph_selector.setItemText(idx, new_label)
-        #self.refresh_graph_list()
 
     def _node_was_edited(self, node_data):
 
@@ -3453,19 +4025,38 @@ class EditGraphWidget(QWidget):
 
     def _build_node_params(self, node_idx, node_data):
         populations = node_data['populations']
-        
-        neuron_models = [pop['model'] for pop in populations]
-        types = list(range(len(populations)))
-        
-        encoded_polynoms_per_type = []
-        for pop in populations:
-            poly_dict = pop.get('polynomials', None)
-            if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
-                encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
-            else:
-                encoded_polynoms_per_type.append([])
-        
-        prob_vec = node_data['params'].get('probability_vector', [])
+        tool_type = node_data['params'].get('tool_type', 'custom')
+
+        # --- AUTOMATIC CONFIGURATION LOGIC START ---
+        # Wenn es ein Tool ist und keine Populationen manuell angelegt wurden, 
+        # erstellen wir die Struktur automatisch (wie im Creator).
+        if tool_type != 'custom' and not populations:
+            selected_model = node_data['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+            neuron_models = [selected_model]
+            types = [0]
+            encoded_polynoms_per_type = [[]]
+            prob_vec = [1.0]
+            pop_nest_params = [{}]
+        else:
+            # Standard Logik für Custom/Existierende Populationen
+            neuron_models = [pop['model'] for pop in populations]
+            types = list(range(len(populations)))
+            
+            encoded_polynoms_per_type = []
+            for pop in populations:
+                poly_dict = pop.get('polynomials', None)
+                if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
+                    encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
+                else:
+                    encoded_polynoms_per_type.append([])
+            
+            prob_vec = node_data['params'].get('probability_vector', [])
+            if not prob_vec and len(populations) > 0:
+                prob_vec = [1.0/len(populations)] * len(populations)
+            
+            pop_nest_params = [pop.get('params', {}) for pop in populations]
+        # --- AUTOMATIC CONFIGURATION LOGIC END ---
+
         old_com = node_data['params'].get('old_center_of_mass', None)
         if old_com is None and node_data.get('original_node'):
             orig = node_data['original_node']
@@ -3474,22 +4065,33 @@ class EditGraphWidget(QWidget):
         
         if old_com is None:
             old_com = node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0])
-        if not prob_vec and len(populations) > 0:
-            prob_vec = [1.0/len(populations)] * len(populations)
+
         sx = node_data['params'].get('stretch_x', 1.0)
         sy = node_data['params'].get('stretch_y', 1.0)
         sz = node_data['params'].get('stretch_z', 1.0)
         
-        if old_com is None:
-            old_com = node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0])
-
-
         transform_matrix = [
             [sx, 0.0, 0.0],
             [0.0, sy, 0.0],
             [0.0, 0.0, sz]
         ]
+
         return {
+            # Core Params
+            'name': node_data['params'].get('name', f'Node_{node_idx}'),
+            'id': node_idx,
+            'graph_id': self.current_graph_id,
+            'tool_type': tool_type,
+            
+            # Structure (Autogenerated or Manual)
+            'neuron_models': neuron_models,
+            'types': types,
+            'distribution': prob_vec,
+            'probability_vector': prob_vec,
+            'encoded_polynoms_per_type': encoded_polynoms_per_type,
+            'population_nest_params': pop_nest_params,
+
+            # Geometry & Physics
             'grid_size': node_data['params'].get('grid_size', [10, 10, 10]),
             'm': node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
             'center_of_mass': node_data['params'].get('center_of_mass', [0.0, 0.0, 0.0]),
@@ -3498,30 +4100,32 @@ class EditGraphWidget(QWidget):
             'rot_theta': node_data['params'].get('rot_theta', 0.0),
             'rot_phi': node_data['params'].get('rot_phi', 0.0),
             'transform_matrix': transform_matrix,
+            'stretch_x': sx, 'stretch_y': sy, 'stretch_z': sz,
+            'old_center_of_mass': old_com,
+            
+            # Tool Specifics
+            'n_neurons': node_data['params'].get('n_neurons', 100),
+            'radius': node_data['params'].get('radius', 5.0),
+            'radius_top': node_data['params'].get('radius_top', 1.0),
+            'radius_bottom': node_data['params'].get('radius_bottom', 5.0),
+            'height': node_data['params'].get('height', 10.0),
+            'grid_side_length': node_data['params'].get('grid_side_length', 10),
+            'k': node_data['params'].get('k', 10.0),
+            'bidirectional': node_data['params'].get('bidirectional', False),
+
+            # WFC
             'dt': node_data['params'].get('dt', 0.01),
             'old': node_data['params'].get('old', True),
             'num_steps': node_data['params'].get('num_steps', 8),
             'sparse_holes': node_data['params'].get('sparse_holes', 0),
             'sparsity_factor': node_data['params'].get('sparsity_factor', 0.9),
-            'probability_vector': prob_vec,
-            'old_center_of_mass': old_com,
-            'stretch_x': sx,
-            'stretch_y': sy,
-            'stretch_z': sz,
-            'old_center_of_mass': old_com,
             'polynom_max_power': node_data['params'].get('polynom_max_power', 5),
-            'name': node_data['params'].get('name', f'Node_{node_idx}'),
-            'id': node_idx,
-            'neuron_models': neuron_models,
-            'types': types,
-            'distribution': prob_vec,
-            'encoded_polynoms_per_type': encoded_polynoms_per_type,
-            'graph_id': self.current_graph_id,
-            'population_nest_params': [pop.get('params', {}) for pop in populations],
+            
+            # Empty fields
             'conn_prob': [],
             'field': None,
             'coefficients': None,
-            'connections': []
+            'connections': [] # Connections werden in der Loop außen behandelt/bewahrt
         }
     
     def delete_graph(self):
@@ -6264,144 +6868,1101 @@ class ConnectionParamWidget(QWidget):
             
         print(f"Connection '{self.current_conn_data['name']}' updated in local memory.")
 
+class DeviceTargetSelector(QGroupBox):
+    """
+    Linker Bereich im Tool-Menü: Wählt aus, WO das Gerät angeschlossen wird.
+    """
+    def __init__(self, graph_list, parent=None):
+        super().__init__("Target Selection", parent)
+        self.graph_list = graph_list
+        self.setStyleSheet("QGroupBox { border: 1px solid #444; border-radius: 5px; margin-top: 10px; font-weight: bold; color: #ddd; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QFormLayout(self)
+        
+        self.combo_graph = QComboBox()
+        self.combo_node = QComboBox()
+        self.combo_pop = QComboBox()
+        
+        layout.addRow("Graph:", self.combo_graph)
+        layout.addRow("Node:", self.combo_node)
+        layout.addRow("Population:", self.combo_pop)
+        
+        self.combo_graph.currentIndexChanged.connect(self.on_graph_changed)
+        self.combo_node.currentIndexChanged.connect(self.on_node_changed)
+        
+        self.refresh()
+
+    def refresh(self):
+        self.combo_graph.blockSignals(True)
+        self.combo_graph.clear()
+        for graph in self.graph_list:
+            name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
+            self.combo_graph.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
+        self.combo_graph.blockSignals(False)
+        
+        if self.graph_list:
+            self.on_graph_changed()
+
+    def on_graph_changed(self):
+        self.combo_node.blockSignals(True)
+        self.combo_node.clear()
+        
+        graph_id = self.combo_graph.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        
+        if graph:
+            for node in graph.node_list:
+                self.combo_node.addItem(f"{node.name} (ID: {node.id})", node.id)
+        
+        self.combo_node.blockSignals(False)
+        self.on_node_changed()
+
+    def on_node_changed(self):
+        self.combo_pop.clear()
+        graph_id = self.combo_graph.currentData()
+        node_id = self.combo_node.currentData()
+        
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if graph:
+            node = next((n for n in graph.node_list if n.id == node_id), None)
+            if node and hasattr(node, 'population'):
+                for i, pop in enumerate(node.population):
+                    model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                    self.combo_pop.addItem(f"Pop {i}: {model}", i)
+
+    def get_selection(self):
+        return {
+            'graph_id': self.combo_graph.currentData(),
+            'node_id': self.combo_node.currentData(),
+            'pop_id': self.combo_pop.currentData()
+        }
+
+
+
+class DeviceConfigPage(QWidget):
+    """
+    Konfigurationsseite für ein spezifisches Gerät.
+    Generiert Parameter-Felder basierend auf dem Device-Typ und parst Eingaben.
+    """
+    deviceCreated = pyqtSignal(dict) # Sendet Daten zurück an ToolsWidget
+
+    def __init__(self, device_label, device_type, graph_list, parent=None):
+        super().__init__(parent)
+        self.device_type = device_type
+        self.device_label = device_label
+        self.graph_list = graph_list
+        self.param_widgets = {}
+        
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QHBoxLayout(self)
+        
+        # --- LINKE SEITE: Target Selector ---
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0,0,0,0)
+        
+        self.target_selector = DeviceTargetSelector(self.graph_list)
+        left_layout.addWidget(self.target_selector)
+        left_layout.addStretch()
+        
+        # --- RECHTE SEITE: Parameter ---
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+        
+        # Header
+        header = QLabel(f"Configure {self.device_label}")
+        header.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {self._get_color()};")
+        right_layout.addWidget(header)
+        
+        # Formular
+        form_group = QGroupBox("Device Parameters")
+        self.form_layout = QFormLayout(form_group)
+        
+        self._build_parameters()
+        
+        right_layout.addWidget(form_group)
+        right_layout.addStretch()
+        
+        # Create Button
+        self.btn_create = QPushButton(f"✚ Create {self.device_label}")
+        self.btn_create.setMinimumHeight(45)
+        self.btn_create.setStyleSheet(f"background-color: {self._get_color()}; color: white; font-weight: bold;")
+        self.btn_create.clicked.connect(self.create_device)
+        right_layout.addWidget(self.btn_create)
+        
+        main_layout.addWidget(left_container, 1)
+        main_layout.addWidget(right_container, 2)
+
+    def _get_color(self):
+        if "generator" in self.device_type: return "#FF9800" # Orange
+        if "recorder" in self.device_type or "meter" in self.device_type: return "#E91E63" # Pink
+        return "#999"
+
+    def _build_parameters(self):
+        """Erstellt Felder basierend auf NEST Dokumentation + Verbindungsparameter."""
+        
+        # --- A. DEVICE PARAMETERS ---
+        self.form_layout.addRow(QLabel("--- Device Settings ---"))
+        
+        # Standards für alle
+        self._add_param("start", 0.0, "Start Time (ms)")
+        self._add_param("stop", 10000.0, "Stop Time (ms)")
+        
+        if "poisson_generator" in self.device_type:
+            self._add_param("rate", 1000.0, "Rate (Hz)")
+            
+        elif "noise_generator" in self.device_type:
+            self._add_param("mean", 0.0, "Mean (pA)")
+            self._add_param("std", 200.0, "Std Dev (pA)")
+            self._add_param("dt", 1.0, "Time Step (ms)")
+            
+        elif "dc_generator" in self.device_type:
+            self._add_param("amplitude", 100.0, "Amplitude (pA)")
+            
+        elif "ac_generator" in self.device_type:
+            self._add_param("amplitude", 50.0, "Amplitude (pA)")
+            self._add_param("frequency", 10.0, "Frequency (Hz)")
+            self._add_param("phase", 0.0, "Phase (deg)")
+            self._add_param("offset", 0.0, "Offset (pA)")
+            
+        elif "step_current_generator" in self.device_type:
+            self._add_text_param("amplitude_times", "100.0, 300.0, 500.0", "Times (ms)")
+            self._add_text_param("amplitude_values", "100.0, 0.0, -50.0", "Currents (pA)")
+
+        elif "spike_generator" in self.device_type:
+             self._add_text_param("spike_times", "10.0, 20.5, 50.0", "Spike Times (ms)")
+             self._add_text_param("spike_multiplicities", "", "Multiplicities")
+
+        elif "recorder" in self.device_type:
+            self._add_text_param("label", "record", "File Label")
+            
+        elif "multimeter" in self.device_type:
+            self._add_param("interval", 1.0, "Recording Interval (ms)")
+            self._add_text_param("record_from", "V_m", "Record (e.g. V_m)")
+
+        elif "voltmeter" in self.device_type:
+            self._add_param("interval", 1.0, "Recording Interval (ms)")
+
+        # --- B. CONNECTION PARAMETERS (NEU) ---
+        self.form_layout.addRow(QLabel("--- Connection Settings ---"))
+        
+        # Standard-Gewicht höher setzen für Generatoren, damit man was sieht
+        default_weight = 10.0 if "generator" in self.device_type else 1.0
+        
+        self._add_param("conn_weight", default_weight, "Synapse Weight (pA)")
+        self._add_param("conn_delay", 1.0, "Synapse Delay (ms)")
+
+
+
+    def _add_param(self, key, default, label):
+        spin = QDoubleSpinBox()
+        spin.setRange(-1e6, 1e6)
+        spin.setDecimals(2)
+        spin.setValue(default)
+        self.form_layout.addRow(label, spin)
+        self.param_widgets[key] = spin
+
+    def _add_text_param(self, key, default, label):
+        le = QLineEdit(str(default))
+        self.form_layout.addRow(label, le)
+        self.param_widgets[key] = le
+
+    def _parse_list_input(self, text, dtype=float):
+        """Hilfsfunktion: String '1, 2, 3' -> Liste [1.0, 2.0, 3.0]"""
+        if not text.strip():
+            return []
+        try:
+            # Entferne Klammern falls User [1,2] eingibt
+            cleaned = text.replace('[', '').replace(']', '')
+            parts = cleaned.split(',')
+            return [dtype(p.strip()) for p in parts if p.strip()]
+        except Exception as e:
+            print(f"Parsing error for input '{text}': {e}")
+            return []
+
+    
+    def create_device(self):
+        target = self.target_selector.get_selection()
+        if target['graph_id'] is None or target['node_id'] is None or target['pop_id'] is None:
+            print("Error: No target selected!")
+            return
+            
+        # Parameter extrahieren und trennen
+        device_params = {}
+        conn_params = {}
+        
+        for key, widget in self.param_widgets.items():
+            val = None
+            
+            # Value holen
+            if isinstance(widget, QDoubleSpinBox):
+                val = widget.value()
+            elif isinstance(widget, QLineEdit):
+                text_val = widget.text()
+                # Listen Parsing
+                if key in ["amplitude_times", "amplitude_values", "spike_times"]:
+                    val = self._parse_list_input(text_val, dtype=float)
+                elif key == "spike_multiplicities":
+                    val = self._parse_list_input(text_val, dtype=int)
+                elif key == "record_from":
+                    cleaned = text_val.replace('[', '').replace(']', '').replace('"', '').replace("'", "")
+                    parts = [s.strip() for s in cleaned.split(',') if s.strip()]
+                    val = parts if parts else ["V_m"]
+                else:
+                    val = text_val
+            
+            # Sortieren: Ist es Connection-Parameter oder Device-Parameter?
+            if key.startswith("conn_"):
+                # "conn_weight" -> "weight"
+                clean_key = key.replace("conn_", "")
+                conn_params[clean_key] = val
+            else:
+                if val is not None: # Leere Strings ignorieren? Ggf. anpassen
+                    device_params[key] = val
+        
+        # Datenpaket schnüren
+        device_data = {
+            "model": self.device_type,
+            "target": target,
+            "params": device_params,      # Geht an nest.Create
+            "conn_params": conn_params    # Geht an nest.Connect
+        }
+        
+        self.deviceCreated.emit(device_data)
+
 
 
 class ToolsWidget(QWidget):
     def __init__(self):
         super().__init__()
+        self.graph_list = [] # Wird von CleanAlpha gesetzt/aktualisiert
+        self.button_map = {}
         self.init_ui()
         
+    def update_graphs(self, graph_list):
+        """Wird von CleanAlpha aufgerufen, wenn sich Graphen ändern."""
+        self.graph_list = graph_list
+        # Refresh aktiven Selector
+        current_widget = self.config_stack.currentWidget()
+        if isinstance(current_widget, DeviceConfigPage):
+            current_widget.target_selector.graph_list = graph_list
+            current_widget.target_selector.refresh()
+            
+    def init_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # === MENÜ ===
+        menu_container = QWidget()
+        menu_container.setFixedWidth(160)
+        menu_container.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
+        menu_layout = QVBoxLayout(menu_container)
+        
+        lbl_menu = QLabel("TOOLBOX")
+        lbl_menu.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_menu.setStyleSheet("color: #888; font-weight: bold; font-size: 10px; letter-spacing: 1px;")
+        menu_layout.addWidget(lbl_menu)
+        
+        self.devices = [
+            ("Spike Recorder", "spike_recorder", "#E91E63"),
+            ("Voltmeter", "voltmeter", "#E91E63"),
+            ("Multimeter", "multimeter", "#E91E63"),
+            None,
+            ("Poisson Gen", "poisson_generator", "#FF9800"),
+            ("Noise Gen", "noise_generator", "#FF9800"),
+            ("DC Gen", "dc_generator", "#FF9800"),
+            ("AC Gen", "ac_generator", "#FF9800"),
+            ("Step Current", "step_current_generator", "#FF9800"),
+            ("Spike Gen", "spike_generator", "#FF9800"),
+        ]
+        
+        self.config_stack = QStackedWidget()
+        
+        # Startseite
+        info_page = QLabel("Select a device from the left menu.")
+        info_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_page.setStyleSheet("color: #666;")
+        self.config_stack.addWidget(info_page)
+        
+        for item in self.devices:
+            if item is None:
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.HLine)
+                line.setStyleSheet("color: #444;")
+                menu_layout.addWidget(line)
+                continue
+                
+            label, model, color = item
+            
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    text-align: left; padding: 8px; border: none; background: transparent; color: #bbb; border-left: 3px solid transparent;
+                }}
+                QPushButton:checked {{ background: #333; color: white; border-left: 3px solid {color}; }}
+                QPushButton:hover {{ background: #2c2c2c; }}
+            """)
+            
+            # Page erstellen
+            # Wir übergeben self.graph_list (Referenz)
+            page = DeviceConfigPage(label, model, self.graph_list)
+            page.deviceCreated.connect(self.on_device_created)
+            
+            idx = self.config_stack.addWidget(page)
+            btn.clicked.connect(lambda checked, i=idx, b=btn: self.switch_tool(i, b))
+            self.button_map[btn] = idx
+            menu_layout.addWidget(btn)
+            
+        menu_layout.addStretch()
+        
+        main_layout.addWidget(menu_container)
+        main_layout.addWidget(self.config_stack)
+        
+    def switch_tool(self, index, clicked_btn):
+        for btn in self.button_map:
+            btn.setChecked(btn == clicked_btn)
+        self.config_stack.setCurrentIndex(index)
+        
+        # Refresh data on switch
+        widget = self.config_stack.widget(index)
+        if isinstance(widget, DeviceConfigPage):
+            widget.target_selector.graph_list = self.graph_list
+            widget.target_selector.refresh()
+
+    def on_device_created(self, data):
+        """
+        Logik zum Erstellen des Devices in NEST und Speichern im Graph-Objekt.
+        Nutzt jetzt User-definierte Gewichte.
+        """
+        print(f"\nCreating Device: {data['model']}")
+        
+        target = data['target']
+        graph_id = target['graph_id']
+        node_id = target['node_id']
+        pop_id = target['pop_id']
+        
+        # 1. Node finden
+        target_graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if not target_graph: return
+        target_node = next((n for n in target_graph.node_list if n.id == node_id), None)
+        if not target_node: return
+        
+        if not hasattr(target_node, 'devices'):
+            target_node.devices = []
+            
+        # 2. NEST Device erstellen
+        try:
+            device = nest.Create(data['model'], params=data['params'])
+            print(f"  ✓ NEST ID: {device}")
+            
+            # 3. Verbinden mit User-Parametern
+            pop_nest = target_node.population[pop_id]
+            
+            # Synapse Spec bauen
+            conn_params = data.get('conn_params', {})
+            syn_spec = {
+                'weight': float(conn_params.get('weight', 1.0)),
+                'delay': max(float(conn_params.get('delay', 1.0)), 0.1)
+            }
+            
+            if "generator" in data['model']:
+                nest.Connect(device, pop_nest, syn_spec=syn_spec)
+                print(f"  ✓ Connected Generator -> Population (W={syn_spec['weight']}, D={syn_spec['delay']})")
+            else:
+                # Recorder: Gewicht ist hier meist irrelevant, aber Delay zählt
+                nest.Connect(pop_nest, device, syn_spec=syn_spec)
+                print(f"  ✓ Connected Population -> Recorder (D={syn_spec['delay']})")
+                
+            # 4. Speichern im Datenmodell
+            device_record = {
+                "id": len(target_node.devices),
+                "model": data['model'],
+                "target_pop_id": pop_id,
+                "params": data['params'],
+                "conn_params": conn_params # Speichern für späteres Laden/Anzeigen
+            }
+            target_node.devices.append(device_record)
+            print(f"  ✓ Saved to Node Model (Total devices: {len(target_node.devices)})")
+            
+            # Feedback
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Success", f"{data['model']} created!\nWeight: {syn_spec['weight']}")
+            
+        except Exception as e:
+            print(f"Error creating device: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+
+class StructuresWidget(QWidget):
+    """
+    Zeigt Buttons für biologische Kortex-Regionen an.
+    Bei Klick wird ein Signal mit den Modellen und Verteilungen gesendet.
+    """
+    # Signal sendet: (Region Name, Liste der Modelle, Liste der Wahrscheinlichkeiten)
+    structureSelected = pyqtSignal(str, list, list)
+
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+
     def init_ui(self):
         layout = QVBoxLayout(self)
         
         # Header
-        header = QLabel("ADVANCED TOOLS")
-        header.setStyleSheet("font-weight: bold; font-size: 14px; color: #00BCD4; border-bottom: 2px solid #00BCD4; padding-bottom: 5px;")
-        layout.addWidget(header)
+        header_lbl = QLabel("🧠 CORTICAL STRUCTURES")
+        header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #E91E63; border-bottom: 2px solid #E91E63; padding-bottom: 5px;")
+        layout.addWidget(header_lbl)
         
-        info = QLabel("Additional tools and utilities will appear here.")
-        info.setStyleSheet("color: #888; font-style: italic;")
+        info = QLabel("Select a region to auto-generate a node patch (10x10x10)\nwith biological neuron distributions.")
+        info.setStyleSheet("color: #888; font-style: italic; margin-bottom: 10px;")
         layout.addWidget(info)
+
+        # Scroll Area für die Regionen
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none;")
         
-        layout.addStretch()
+        container = QWidget()
+        self.grid_layout = QGridLayout(container)
+        self.grid_layout.setSpacing(10)
+        
+        # --- DATEN AUS NEURON_TOOLBOX LADEN ---
+        # Wir müssen die Daten transponieren: Von Model->Region zu Region->ModelList
+        
+        # 1. Dictionary vorbereiten: RegionKey -> {Model: Prob}
+        region_data = {r_key: {} for r_key in region_names.values()}
+        
+        for model, region_map in distributions.items():
+            for r_key, prob in region_map.items():
+                if prob > 0:
+                    region_data[r_key][model] = prob
+
+        # 2. Buttons erstellen
+        row, col = 0, 0
+        for display_name, r_key in region_names.items():
+            if r_key not in region_data or not region_data[r_key]:
+                continue
+            
+            # Modelle und Probs extrahieren
+            models_probs = region_data[r_key]
+            model_list = list(models_probs.keys())
+            prob_list = list(models_probs.values())
+            
+            # Normalisieren auf 1.0
+            total = sum(prob_list)
+            if total > 0:
+                prob_list = [p/total for p in prob_list]
+            
+            # Button erstellen
+            btn = QPushButton(display_name)
+            btn.setMinimumHeight(60)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #37474F;
+                    color: white;
+                    font-weight: bold;
+                    border: 1px solid #455A64;
+                    border-radius: 5px;
+                    font-size: 12px;
+                    text-align: left;
+                    padding-left: 10px;
+                }
+                QPushButton:hover {
+                    background-color: #E91E63;
+                    border: 1px solid #F48FB1;
+                }
+            """)
+            
+            # Tooltip bauen
+            tooltip_txt = f"<b>{display_name}</b><br>Contains:<br>"
+            for m, p in zip(model_list, prob_list):
+                tooltip_txt += f"• {m}: {p*100:.1f}%<br>"
+            btn.setToolTip(tooltip_txt)
+            
+            # Signal verbinden (Nutze Default-Args um Closure-Problem zu vermeiden)
+            btn.clicked.connect(lambda checked, n=display_name, m=model_list, p=prob_list: 
+                              self.structureSelected.emit(n, m, p))
+            
+            self.grid_layout.addWidget(btn, row, col)
+            
+            col += 1
+            if col > 1: # 2 Spalten
+                col = 0
+                row += 1
+        
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+
+
+
+
+
+
 
 
 class FlowFieldWidget(QWidget):
     """
-    Visualisiert die Vektorfelder (Flow Fields) an den Positionen der Neuronen.
-    Zeigt Pfeile, die in die Richtung zeigen, in die die Neuronen 'fließen' würden.
+    Visualisiert die Vektorfelder (Flow Fields) NUR für den aktuell ausgewählten Node.
+    Performance-Optimiert: Berechnet Glyphen nur on-demand für einen Node.
     """
     def __init__(self, graph_list, parent=None):
         super().__init__(parent)
         self.graph_list = graph_list
+        self.target_graph_id = None
+        self.target_node_id = None
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
         # PyVista Setup
         self.plotter = QtInteractor(self)
         self.plotter.set_background("black")
-        self.plotter.add_axes() # Orientation widget
+        self.plotter.add_axes() 
         
         self.layout.addWidget(self.plotter)
         
+        # Info Text Actor
+        self.text_actor = vtk.vtkTextActor()
+        self.text_actor.GetTextProperty().SetFontSize(14)
+        self.text_actor.GetTextProperty().SetColor(1.0, 1.0, 1.0)
+        self.text_actor.SetPosition(10, 10)
+        self.plotter.renderer.AddViewProp(self.text_actor)
+        
         self.build_scene()
+
+    def set_target_node(self, graph_id, node_id):
+        """Setzt den Fokus auf einen spezifischen Node und rendert neu."""
+        if self.target_graph_id == graph_id and self.target_node_id == node_id:
+            return # Keine Änderung
+            
+        self.target_graph_id = graph_id
+        self.target_node_id = node_id
+        
+        # Nur neu bauen, wenn wir sichtbar sind, sonst reicht das Setzen der IDs
+        if self.isVisible():
+            self.build_scene()
 
     def build_scene(self):
         self.plotter.clear()
+        self.plotter.renderer.AddViewProp(self.text_actor) 
         
         if not self.graph_list:
+            self.text_actor.SetInput("No graphs available.")
+            self.plotter.render()
             return
 
-        for graph in self.graph_list:
-            for node in graph.node_list:
-                # Skip empty nodes
-                if not hasattr(node, 'positions') or not node.positions:
-                    continue
+        if self.target_graph_id is None or self.target_node_id is None:
+            self.text_actor.SetInput("Select a node in 'Graph Overview' to inspect Flow Field.")
+            self.plotter.render()
+            return
 
-                # 1. Parameter und Generator holen
-                params = node.parameters
-                encoded_per_type = params.get("encoded_polynoms_per_type", [])
-                
-                # Default power 5 if not specified
-                poly_gen = PolynomGenerator(n=params.get('polynom_max_power', 5))
+        # Finde Graph und Node
+        target_graph = next((g for g in self.graph_list if g.graph_id == self.target_graph_id), None)
+        if not target_graph:
+            self.text_actor.SetInput(f"Graph {self.target_graph_id} not found.")
+            self.plotter.render()
+            return
+            
+        target_node = next((n for n in target_graph.node_list if n.id == self.target_node_id), None)
+        if not target_node:
+            self.text_actor.SetInput(f"Node {self.target_node_id} not found in Graph.")
+            self.plotter.render()
+            return
 
-                for pop_idx, positions in enumerate(node.positions):
-                    if positions is None or len(positions) == 0:
-                        continue
-                    
-                    # 2. Decode flow functions
-                    f1, f2, f3 = None, None, None
-                    
-                    if pop_idx < len(encoded_per_type):
-                        try:
-                            funcs = poly_gen.decode_multiple(encoded_per_type[pop_idx])
-                            if len(funcs) == 3:
-                                f1, f2, f3 = funcs
-                        except Exception as e:
-                            print(f"Error decoding polynomials for Node {node.id} Pop {pop_idx}: {e}")
-                    
-                    if f1 is None: 
-                        continue 
+        self.text_actor.SetInput(f"Flow Field: {target_node.name} (Graph {target_graph.graph_id})")
 
-                    # 3. Vektoren berechnen
-                    x = positions[:, 0]
-                    y = positions[:, 1]
-                    z = positions[:, 2]
-                    
-                    u = f1(x, y, z)
-                    v = f2(x, y, z)
-                    w = f3(x, y, z)
-                    
-                    vectors = np.column_stack((u, v, w))
-                    
-                    # --- NEUE LOGIK: Clamping & Normalisierung ---
-                    
-                    # A. Magnitude (Länge) berechnen
-                    magnitudes = np.linalg.norm(vectors, axis=1)
-                    
-                    # B. Division durch Null verhindern
-                    safe_mags = np.where(magnitudes == 0, 1, magnitudes)
-                    
-                    # C. Einheitsvektoren (Nur Richtung, Länge immer 1.0)
-                    # Wir skalieren die Vektoren manuell auf Länge 1
-                    unit_vectors = vectors / safe_mags[:, None]
-                    
-                    # D. Visuelle Skalierung (Geometry)
-                    # Begrenze die Länge der Pfeile auf maximal 1.5
-                    # Kleine Kräfte bleiben klein, riesige Kräfte werden bei 1.5 abgeschnitten
-                    geom_scale = np.clip(magnitudes, 0, 1.5)
-                    
-                    # 4. PyVista PolyData erstellen
-                    pdata = pv.PolyData(positions)
-                    pdata['vectors'] = unit_vectors  # Richtung
-                    pdata['mag'] = magnitudes        # Farbe (Echte Stärke)
-                    pdata['scale'] = geom_scale      # Größe (Visuell begrenzt)
-                    
-                    # 5. Glyphs (Pfeile) erzeugen
-                    # orient='vectors': Nutzt die Einheitsvektoren für die Ausrichtung
-                    # scale='scale': Nutzt unser geclamptes Array für die Länge
-                    # factor=1.0: Basis-Multiplikator
-                    arrows = pdata.glyph(orient='vectors', scale='scale', factor=1.0)
-                    
-                    # 6. Plotten
-                    # cmap='jet': Standard Heatmap (Blau=Niedrig -> Rot=Hoch)
-                    # clim: Setzt Farbbereich (optional, hier automatisch)
-                    self.plotter.add_mesh(
-                        arrows, 
-                        scalars='mag', 
-                        cmap='jet', 
-                        opacity=0.9,
-                        scalar_bar_args={'title': 'Flow Magnitude', 'color': 'white'}
-                    )
-                    
-                    # Optional: Kleine Punkte am Ursprung (in Weiß/Grau), zur Orientierung
-                    self.plotter.add_mesh(
-                        pv.PolyData(positions), 
-                        color="#333333", 
-                        point_size=3, 
-                        opacity=0.5,
-                        render_points_as_spheres=True
-                    )
+        if not hasattr(target_node, 'positions') or not target_node.positions:
+            return
+
+        params = target_node.parameters
+        encoded_per_type = params.get("encoded_polynoms_per_type", [])
+        poly_gen = PolynomGenerator(n=params.get('polynom_max_power', 5))
+
+        # --- FIX: Legende nur einmal anzeigen ---
+        show_legend = True 
+
+        for pop_idx, positions in enumerate(target_node.positions):
+            if positions is None or len(positions) == 0:
+                continue
+            
+            f1, f2, f3 = None, None, None
+            if pop_idx < len(encoded_per_type):
+                try:
+                    funcs = poly_gen.decode_multiple(encoded_per_type[pop_idx])
+                    if len(funcs) == 3:
+                        f1, f2, f3 = funcs
+                except Exception as e:
+                    print(f"Error decoding polys: {e}")
+            
+            if f1 is None: continue 
+
+            x = positions[:, 0]
+            y = positions[:, 1]
+            z = positions[:, 2]
+            
+            u = f1(x, y, z)
+            v = f2(x, y, z)
+            w = f3(x, y, z)
+            
+            vectors = np.column_stack((u, v, w))
+            magnitudes = np.linalg.norm(vectors, axis=1)
+            safe_mags = np.where(magnitudes == 0, 1, magnitudes)
+            unit_vectors = vectors / safe_mags[:, None]
+            geom_scale = np.clip(magnitudes, 0, 2.0)
+            
+            pdata = pv.PolyData(positions)
+            pdata['vectors'] = unit_vectors
+            pdata['mag'] = magnitudes
+            pdata['scale'] = geom_scale
+            
+            arrows = pdata.glyph(orient='vectors', scale='scale', factor=0.8)
+            
+            # Hier wenden wir den Fix an: show_scalar_bar nur wenn show_legend True ist
+            self.plotter.add_mesh(
+                arrows, 
+                scalars='mag', 
+                cmap='jet', 
+                opacity=0.9,
+                show_scalar_bar=show_legend,  # <--- WICHTIG
+                scalar_bar_args={'title': 'Flow Magnitude', 'color': 'white'}
+            )
+            
+            # Nach dem ersten Hinzufügen deaktivieren wir weitere Legenden
+            show_legend = False 
+            
+            self.plotter.add_mesh(
+                pv.PolyData(positions), 
+                color="#444444", 
+                point_size=4, 
+                render_points_as_spheres=True
+            )
 
         self.plotter.reset_camera()
         self.plotter.update()
+
+class SimulationDashboardWidget(QWidget):
+    """
+    Zentrale Steuereinheit für die Simulation.
+    Zeigt Statistiken, Pie-Charts und Konfigurationen vor dem Start.
+    """
+    requestStartSimulation = pyqtSignal(float) # sendet duration
+    requestOpenSpectator = pyqtSignal()
+    requestShowResults = pyqtSignal()
+
+    def __init__(self, graph_list):
+        super().__init__()
+        self.graph_list = graph_list
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # --- HEADER ---
+        header = QLabel("SIMULATION DASHBOARD")
+        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #FF9800; letter-spacing: 2px;")
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(header)
+
+        # --- CONTENT AREA (Grid) ---
+        content_layout = QHBoxLayout()
+        
+        # LINKS: Konfiguration & Stats
+        left_col = QVBoxLayout()
+        
+        # 1. Config Group
+        config_group = QGroupBox("⚙️ Configuration")
+        config_layout = QFormLayout(config_group)
+        
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setRange(0.1, 1000000.0)
+        self.duration_spin.setValue(1000.0)
+        self.duration_spin.setSuffix(" ms")
+        self.duration_spin.setStyleSheet("font-size: 14px; padding: 5px;")
+        
+        self.input_placeholder = QLineEdit("No external input file selected")
+        self.input_placeholder.setReadOnly(True)
+        self.input_placeholder.setStyleSheet("color: #888; font-style: italic;")
+        
+        config_layout.addRow("Simulation Duration:", self.duration_spin)
+        config_layout.addRow("External Input:", self.input_placeholder)
+        
+        left_col.addWidget(config_group)
+        
+        # 2. Stats Group
+        stats_group = QGroupBox("📊 Network Summary")
+        self.stats_layout = QFormLayout(stats_group)
+        self.lbl_nodes = QLabel("0")
+        self.lbl_pops = QLabel("0")
+        self.lbl_neurons = QLabel("0")
+        self.lbl_conns = QLabel("0")
+        self.lbl_devices = QLabel("0")
+        
+        # Style für Zahlen
+        number_style = "color: #00E5FF; font-weight: bold; font-size: 12px;"
+        self.lbl_nodes.setStyleSheet(number_style)
+        self.lbl_pops.setStyleSheet(number_style)
+        self.lbl_neurons.setStyleSheet(number_style)
+        self.lbl_conns.setStyleSheet(number_style)
+        self.lbl_devices.setStyleSheet(number_style)
+
+        self.stats_layout.addRow("Total Nodes:", self.lbl_nodes)
+        self.stats_layout.addRow("Populations:", self.lbl_pops)
+        self.stats_layout.addRow("Total Neurons:", self.lbl_neurons)
+        self.stats_layout.addRow("Connections:", self.lbl_conns)
+        self.stats_layout.addRow("Devices:", self.lbl_devices)
+        
+        left_col.addWidget(stats_group)
+        left_col.addStretch()
+        
+        content_layout.addLayout(left_col, 1)
+
+        # RECHTS: Pie Chart
+        right_col = QVBoxLayout()
+        chart_group = QGroupBox("Neuron Distribution")
+        chart_layout = QVBoxLayout(chart_group)
+        
+        self.figure = Figure(figsize=(4, 4), facecolor='#2b2b2b')
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setStyleSheet("background-color: #2b2b2b;")
+        chart_layout.addWidget(self.canvas)
+        
+        right_col.addWidget(chart_group)
+        content_layout.addLayout(right_col, 1)
+
+        main_layout.addLayout(content_layout)
+
+        # --- ACTIONS AREA ---
+        action_container = QWidget()
+        action_layout = QVBoxLayout(action_container)
+        action_layout.setSpacing(10)
+        
+        # Start Button
+        self.btn_start = QPushButton("▶ START SIMULATION")
+        self.btn_start.setMinimumHeight(60)
+        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 18px; 
+                border-radius: 8px;
+                border-bottom: 4px solid #2E7D32;
+            }
+            QPushButton:hover { background-color: #66BB6A; margin-top: 2px; border-bottom: 2px solid #2E7D32; }
+            QPushButton:pressed { background-color: #2E7D32; margin-top: 4px; border-bottom: none; }
+        """)
+        self.btn_start.clicked.connect(self._on_start_clicked)
+        
+        # Live Spectator
+        self.btn_spectator = QPushButton("👁️ Open Live Spectator")
+        self.btn_spectator.setMinimumHeight(40)
+        self.btn_spectator.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3; color: white; font-weight: bold; font-size: 14px; border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #42A5F5; }
+        """)
+        self.btn_spectator.clicked.connect(self.requestOpenSpectator.emit)
+
+        # Results (Disabled)
+        self.btn_results = QPushButton("📊 Results (No Data)")
+        self.btn_results.setMinimumHeight(40)
+        self.btn_results.setEnabled(False)
+        self.btn_results.setStyleSheet("""
+            QPushButton {
+                background-color: #444; color: #888; font-weight: bold; border-radius: 5px; border: 1px solid #555;
+            }
+            QPushButton:enabled {
+                background-color: #9C27B0; color: white;
+            }
+        """)
+        self.btn_results.clicked.connect(self.requestShowResults.emit)
+
+        action_layout.addWidget(self.btn_start)
+        action_layout.addWidget(self.btn_spectator)
+        action_layout.addWidget(self.btn_results)
+        
+        main_layout.addWidget(action_container)
+
+    def _on_start_clicked(self):
+        duration = self.duration_spin.value()
+        self.requestStartSimulation.emit(duration)
+
+    def refresh_data(self):
+        """Berechnet Statistiken neu und zeichnet das Pie Chart."""
+        total_nodes = 0
+        total_pops = 0
+        total_neurons = 0
+        total_conns = 0
+        total_devices = 0
+        
+        model_counts = {}
+
+        for graph in self.graph_list:
+            total_nodes += len(graph.node_list)
+            
+            for node in graph.node_list:
+                # Connections
+                if hasattr(node, 'connections'):
+                    total_conns += len(node.connections)
+                
+                # Devices
+                if hasattr(node, 'devices'):
+                    total_devices += len(node.devices)
+                
+                # Populations & Neurons
+                if hasattr(node, 'population') and node.population:
+                    for i, nest_pop in enumerate(node.population):
+                        if nest_pop:
+                            count = len(nest_pop)
+                            total_neurons += count
+                            total_pops += 1
+                            
+                            # Model name
+                            model_name = "unknown"
+                            if hasattr(node, 'neuron_models') and i < len(node.neuron_models):
+                                model_name = node.neuron_models[i]
+                            
+                            model_counts[model_name] = model_counts.get(model_name, 0) + count
+
+        # Update Labels
+        self.lbl_nodes.setText(str(total_nodes))
+        self.lbl_pops.setText(str(total_pops))
+        self.lbl_neurons.setText(str(total_neurons))
+        self.lbl_conns.setText(str(total_conns))
+        self.lbl_devices.setText(str(total_devices))
+        
+        # Update Chart
+        self._plot_pie_chart(model_counts)
+
+    def _plot_pie_chart(self, counts):
+        self.figure.clear()
+        
+        if not counts:
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "No Data", ha='center', va='center', color='white')
+            ax.axis('off')
+            self.canvas.draw()
+            return
+
+        labels = list(counts.keys())
+        sizes = list(counts.values())
+        
+        # Farben holen
+        colors = [neuron_colors.get(l, "#888888") for l in labels]
+        
+        ax = self.figure.add_subplot(111)
+        wedges, texts, autotexts = ax.pie(
+            sizes, 
+            labels=labels, 
+            autopct='%1.1f%%',
+            startangle=90,
+            colors=colors,
+            textprops=dict(color="white")
+        )
+        
+        # Style Anpassungen für Dark Mode
+        for text in texts:
+            text.set_color("#cccccc")
+            text.set_fontsize(9)
+        for autotext in autotexts:
+            autotext.set_color("black") 
+            autotext.set_weight("bold")
+            
+        self.figure.patch.set_facecolor('#2b2b2b') # Hintergrund des Plots
+        
+        self.canvas.draw()
+
+class LiveSpectatorWindow(QMainWindow):
+    def __init__(self, graph_list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Spectator (PyQtGraph)")
+        self.resize(1000, 800)
+        self.graph_list = graph_list
+        
+        self.sim_running = False
+        self.current_time = 0.0
+        self.update_interval = 25.0  # ms pro Schritt
+        self.timer_interval = 20     # ms (50 FPS target)
+        
+        self.all_positions = None
+        self.neuron_colors = None
+        self.neuron_activity = None
+        self.gid_to_idx = {}
+        self.global_recorder = None
+        
+        self.init_ui()
+        self.build_scene_data()
+
+    def init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        
+        # 1. View
+        self.view = gl.GLViewWidget()
+        self.view.opts['distance'] = 60
+        self.view.setBackgroundColor('#111111') # Soft Black
+        layout.addWidget(self.view, 1)
+        
+        # 2. Controls
+        controls = QHBoxLayout()
+        
+        self.btn_play = QPushButton("▶ START")
+        self.btn_play.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
+        self.btn_play.clicked.connect(self.toggle_simulation)
+        controls.addWidget(self.btn_play)
+        
+        self.lbl_stats = QLabel("Waiting...")
+        self.lbl_stats.setStyleSheet("color: #00E5FF; font-weight: bold; font-size: 14px; margin-left: 20px;")
+        controls.addWidget(self.lbl_stats)
+        
+        controls.addStretch()
+        layout.addLayout(controls)
+        
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.simulation_step)
+
+    def build_scene_data(self):
+        print("Building Spectator Scene...")
+        self.view.clear()
+        
+        pos_list = []
+        gids_list = []
+        
+        for graph in self.graph_list:
+            for node in graph.node_list:
+                if hasattr(node, 'population') and node.population:
+                    for i, pop in enumerate(node.population):
+                        if pop:
+                            if hasattr(node, 'positions') and i < len(node.positions):
+                                coords = node.positions[i]
+                                try:
+                                    status = nest.GetStatus(pop, 'global_id')
+                                    if isinstance(status, tuple): gids = status
+                                    else: gids = list(status)
+                                    
+                                    if len(coords) == len(gids):
+                                        pos_list.append(coords)
+                                        gids_list.extend(gids)
+                                    else:
+                                        min_len = min(len(coords), len(gids))
+                                        pos_list.append(coords[:min_len])
+                                        gids_list.extend(gids[:min_len])
+                                        
+                                except Exception as e:
+                                    print(f"Warning skipping pop {i}: {e}")
+
+        if not pos_list:
+            if hasattr(self, 'lbl_stats'):
+                self.lbl_stats.setText("No neurons found.")
+            return
+
+        self.all_positions = np.vstack(pos_list)
+        num_neurons = len(self.all_positions)
+        
+        self.gid_to_idx = {gid: i for i, gid in enumerate(gids_list)}
+        
+        try:
+            if self.global_recorder is None:
+                self.global_recorder = nest.Create("spike_recorder")
+                nest.Connect(list(self.gid_to_idx.keys()), self.global_recorder)
+                print(f"Spectator connected to {num_neurons} neurons.")
+        except Exception as e:
+            print(f"Recorder Error: {e}")
+        
+        self.neuron_colors = np.zeros((num_neurons, 4), dtype=np.float32)
+        self.neuron_colors[:, 0] = 0.0 
+        self.neuron_colors[:, 1] = 0.2
+        self.neuron_colors[:, 2] = 0.8
+        self.neuron_colors[:, 3] = 0.6 
+        
+        self.neuron_activity = np.zeros(num_neurons, dtype=np.float32)
+
+        self.scatter = gl.GLScatterPlotItem(
+            pos=self.all_positions,
+            color=self.neuron_colors,
+            size=5, 
+            pxMode=True 
+        )
+        
+
+        self.scatter.setGLOptions('translucent') 
+        
+        self.view.addItem(self.scatter)
+
+    def toggle_simulation(self):
+        if self.sim_running:
+            self.sim_running = False
+            self.btn_play.setText("▶ RESUME")
+            self.btn_play.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
+            self.timer.stop()
+        else:
+            self.sim_running = True
+            self.btn_play.setText("⏸ PAUSE")
+            self.btn_play.setStyleSheet("background-color: #FF9800; font-weight: bold; padding: 10px;")
+            self.timer.start(self.timer_interval)
+
+    def simulation_step(self):
+        if not self.sim_running: return
+        
+        try:
+            # 1. NEST simulieren
+            nest.Simulate(self.update_interval)
+            self.current_time += self.update_interval
+            
+            # 2. Spikes holen
+            events = nest.GetStatus(self.global_recorder, "events")[0]
+            senders = events["senders"]
+            
+            # WICHTIG: Recorder leeren für nächsten Step!
+            nest.SetStatus(self.global_recorder, {'n_events': 0})
+            
+            # 3. Aktivität berechnen
+            # Decay (Abklingen alter Aktivität)
+            self.neuron_activity *= 0.85 
+            
+            spike_count = len(senders)
+            if spike_count > 0:
+                # Map GIDs to Indices
+                indices = [self.gid_to_idx[gid] for gid in senders if gid in self.gid_to_idx]
+                if indices:
+                    # Setze Aktivität auf 1.0 (Feuern)
+                    self.neuron_activity[indices] = 1.0
+            
+            # 4. Farben updaten (Vektorisiert)
+            # Inaktiv (Blau) -> Aktiv (Weiß/Gelb)
+            # R: 0 -> 1
+            self.neuron_colors[:, 0] = self.neuron_activity
+            # G: 0.2 -> 1.0
+            self.neuron_colors[:, 1] = 0.2 + (self.neuron_activity * 0.8)
+            # B: 0.8 -> 0.2
+            self.neuron_colors[:, 2] = 0.8 - (self.neuron_activity * 0.6)
+            # A: 0.4 -> 1.0
+            self.neuron_colors[:, 3] = 0.4 + (self.neuron_activity * 0.6)
+            
+            self.scatter.setData(color=self.neuron_colors)
+            
+            # 5. Stats anzeigen
+            self.lbl_stats.setText(f"T: {self.current_time:.0f}ms | Spikes: {spike_count}")
+            
+        except Exception as e:
+            print(f"Live Sim Error: {e}")
+            self.stop_simulation()
+
+    def closeEvent(self, event):
+        self.sim_running = False
+        self.timer.stop()
+        event.accept()
