@@ -3282,87 +3282,124 @@ class Node:
         self.parameters['m'] = target_pos.tolist()
         print(f"   ✓ Build complete. Pos: {self.center_of_mass}")
 
+
     def populate_node(self):
         """
-        Erstellt die NEST-Neuronen.
-        Holt Parameter dynamisch aus self.parameters basierend auf dem Tool-Typ.
+        Erstellt die NEST-Neuronen und führt anschließend Validierungs-Checks durch.
         """
+        print(f"\n🚀 Populating Node {self.id} ({self.name})...")
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
         
-        # 1. Validierung
+        # 1. Validierung: Positionen prüfen
         if not self.positions or all(len(p) == 0 for p in self.positions):
-            # ... (Placeholder Code wie gehabt) ...
-            print(f"⚠ Node {self.id}: No positions. Creating placeholder.")
-            # (gekürzt der Übersicht halber, hier den alten Placeholder code lassen)
+            print(f"  ⚠️ Node {self.id}: Keine Positionen vorhanden. Erstelle Placeholder.")
             try:
                 placeholder_pos = [self.center_of_mass] if hasattr(self, 'center_of_mass') else [[0.,0.,0.]]
                 self.population = [nest.Create("iaf_psc_alpha", 1, positions=nest.spatial.free(placeholder_pos))]
+                self.verify_and_report() # Check auch für Placeholder
                 return
-            except:
+            except Exception as e:
+                print(f"  ❌ Fehler beim Placeholder-Erstellen: {e}")
                 self.population = []
                 return
 
-        # 2. TOOL-LOGIK: CCW Ring
-        if tool_type == 'CCW':
-            print(f"   [Tool] Populating CCW Ring(s) for Node {self.id}")
-            self.population = []
-            self.recorder_list = []
-            
-            current_models = params.get("neuron_models", ["iaf_psc_alpha"])
-            
-            # --- HIER HOLEN WIR DIE NEUEN PARAMETER AUS DEM DICT ---
-            # Standardwerte (Defaults), falls im GUI nichts gesetzt wurde
-            k_val = float(params.get('k', 10.0))
-            bidir = bool(params.get('bidirectional', False))
-            
-            for i, pos_cluster in enumerate(self.positions):
-                if len(pos_cluster) == 0: 
-                    self.population.append(None)
-                    continue
-                
-                model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                
-                try:
-                    # Übergabe an create_CCW mit den Parametern aus dem GUI
-                    ccw_pop = create_CCW(
-                        positions=pos_cluster,
-                        model=model,
-                        plot=False,
-                        k=k_val,                # <--- Dynamisch
-                        bidirectional=bidir     # <--- Dynamisch
-                    )
-                    self.population.append(ccw_pop)
-                    
-                    # Recorder anhängen
-                    rec_data = CCW_spike_recorder(ccw_pop)
-                    self.recorder_list.append(rec_data)
-                    
-                    print(f"     + Created CCW Ring {i}: {len(ccw_pop)} neurons (k={k_val}, bi={bidir})")
-                    
-                except Exception as e:
-                    print(f"     ✗ Failed to create CCW Ring {i}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.population.append(None)
-            
-            return # Stop hier für CCW
-
-        # 3. STANDARD-LOGIK (Custom / Andere Shapes ohne spezielle Verschaltung)
         current_models = params.get("neuron_models", ["iaf_psc_alpha"])
-        current_nest_params = params.get("population_nest_params", [])
+        
+        # --- Population Creation Logic ---
+        # Wir nutzen eine temporäre Variable 'created_pops', um den Flow zu vereinheitlichen
+        
+        created_pops = []
+        
+        try:
+            if tool_type == 'CCW':
+                print(f"   🛠️ Tool: CCW Ring")
+                k_val = float(params.get('k', 10.0))
+                bidir = bool(params.get('bidirectional', False))
+                
+                for i, pos_cluster in enumerate(self.positions):
+                    if len(pos_cluster) == 0: 
+                        created_pops.append(None)
+                        continue
+                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                    pop = create_CCW(positions=pos_cluster, model=model, plot=False, k=k_val, bidirectional=bidir)
+                    created_pops.append(pop)
+                    self.recorder_list.append(CCW_spike_recorder(pop))
 
-        if len(current_models) < len(self.positions):
-            last_model = current_models[-1] if current_models else "iaf_psc_alpha"
-            current_models.extend([last_model] * (len(self.positions) - len(current_models)))
+            elif tool_type == 'Cone':
+                print(f"   🛠️ Tool: Cone")
+                for i, pos_cluster in enumerate(self.positions):
+                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                    pop = connect_cone(cone_points=pos_cluster, k=params.get('k', 10.0), model=model)
+                    created_pops.append(pop)
 
-        self.population = clusters_to_neurons(
-            self.positions, 
-            current_models,
-            current_nest_params,
-            set_positions=True 
-        )
-        print(f"   ✓ Node {self.id} populated in NEST (Standard Mode).")
+            elif tool_type == 'Blob':
+                print(f"   🛠️ Tool: Blob")
+                for i, pos_cluster in enumerate(self.positions):
+                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                    pop = create_blob_population(
+                        positions=pos_cluster, 
+                        neuron_type=model,
+                        conn_ex={'rule': 'pairwise_bernoulli', 'p': 0.1},
+                        conn_in={'rule': 'pairwise_bernoulli', 'p': 0.1}
+                    )
+                    created_pops.append(pop)
+
+            else: # Custom / Grid
+                print(f"   🛠️ Mode: Standard/WFC")
+                current_nest_params = params.get("population_nest_params", [])
+                if len(current_models) < len(self.positions):
+                    last = current_models[-1] if current_models else "iaf_psc_alpha"
+                    current_models.extend([last] * (len(self.positions) - len(current_models)))
+                
+                created_pops = clusters_to_neurons(
+                    self.positions, 
+                    current_models, 
+                    current_nest_params, 
+                    set_positions=True
+                )
+
+            self.population = created_pops
+            
+            # --- ZENTRALER AUFRUF DER VERIFIZIERUNG ---
+            self.verify_and_report()
+
+        except Exception as e:
+            print(f"  ❌ CRITICAL ERROR in populate_node: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+    def verify_and_report(self, verbose=False):
+        """
+        Führt Checks durch. Standardmäßig leise, außer bei Fehlern.
+        """
+        all_checks_passed = True
+        if not self.population:
+            return
+
+        for i, pop in enumerate(self.population):
+            if pop is None:
+                print(f"  ❌ Node {self.id} Pop {i}: Creation failed")
+                all_checks_passed = False
+                continue
+            
+            # Nur bei explizitem Verbose-Modus oder Fehlern printen
+            try:
+                positions = nest.GetPosition(pop)
+                if len(positions) != len(pop):
+                    print(f"  ❌ Node {self.id} Pop {i}: Spatial mismatch ({len(positions)} vs {len(pop)})")
+                    all_checks_passed = False
+                elif verbose:
+                    print(f"  ✅ Node {self.id} Pop {i}: OK ({len(pop)} neurons)")
+            except Exception as e:
+                print(f"  ⚠️ Node {self.id} Pop {i}: Check warning: {e}")
+
+        # Nur printen wenn was schief ging
+        if not all_checks_passed:
+            print(f"🏁 Node {self.id} Status: Issues found.")
+    
+    
 
     def add_connection(self, target_node, conn_params):
         self.connections.append({'target': target_node, 'params': conn_params})
