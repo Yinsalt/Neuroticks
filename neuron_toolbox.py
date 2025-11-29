@@ -2617,10 +2617,15 @@ def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_posit
         try:
             if set_positions:
                 cluster_list = cluster.tolist() if isinstance(cluster, np.ndarray) else cluster
-                
+                positions=[]
+                if len(cluster) == 1:
+                    # Dummy Extent für Einzel-Neuronen
+                    positions = nest.spatial.free(pos=cluster_list, extent=[1.0, 1.0, 1.0])
+                else:
+                    positions = nest.spatial.free(pos=cluster_list)
                 pop = nest.Create(
                     model,
-                    positions=nest.spatial.free(pos=cluster_list),
+                    positions=positions,
                     params=validated_params 
                 )
                 
@@ -3451,139 +3456,98 @@ def plot_graph_3d(graph,
     ax.legend()
     plt.show()
 def get_raw_shape_points(tool_type, params):
-    n = params.get('n_neurons', 100)
+    """
+    Erzeugt Punktwolken für geometrische Tools am Ursprung.
+    """
+    n = int(params.get('n_neurons', 100))
     
     if tool_type == 'CCW':
-        r = params.get('radius', 5.0)
-        # circle3d am Ursprung (m=0), Rotation machen wir später global via transform_points
+        r = float(params.get('radius', 5.0))
+        # circle3d aus neuron_toolbox nutzen
         return circle3d(n=n, r=r, m=np.zeros(3), plot=False)
         
     elif tool_type == 'Blob':
-        r = params.get('radius', 5.0)
+        r = float(params.get('radius', 5.0))
         return blob_positions(n=n, m=np.zeros(3), r=r, plot=False)
         
     elif tool_type == 'Cone':
         return create_cone(
             m=np.zeros(3),
             n=n,
-            inner_radius=params.get('radius_top', 1.0),
-            outer_radius=params.get('radius_bottom', 5.0),
-            height=params.get('height', 10.0),
+            inner_radius=float(params.get('radius_top', 1.0)),
+            outer_radius=float(params.get('radius_bottom', 5.0)),
+            height=float(params.get('height', 10.0)),
             plot=False
         )
         
     elif tool_type == 'Grid':
-        gsl = params.get('grid_side_length', 10)
-        # create_Grid gibt eine Liste von Layern zurück, wir nehmen hier den ersten (flach)
+        gsl = int(params.get('grid_side_length', 10))
+        # create_Grid gibt Liste von Layern zurück, wir nehmen Layer 0
         layers = create_Grid(m=np.zeros(3), grid_size_list=[gsl], plot=False)
-        return layers[0]
+        return layers[0] if layers else np.array([])
     
     return np.array([])
 
 class Node:
-    def __init__(self,
-             function_generator=None,
-             parameters=None,
-             other=None):
-
-
+    def __init__(self, function_generator=None, parameters=None, other=None):
         self.results = {}
-
-        
         self.parent = other if other else None
         self.prev = []
         
+        # Default Params init... (wie gehabt)
         default_params = {
-            "polynom_max_power": 5,
-            "neuron_models":["iaf_psc_alpha"],
-            "encoded_polynoms": [],
-            "m": [0.0, 0.0, 0.0],
-            "id": None,
-            "graph_id":0,
-            "name": None,
-            "types": [0],
-            "conn_prob": [],
-            "distribution": [1.0],
-            "center_of_mass": np.array([0.0, 0.0, 0.0]),
-            "old_center_of_mass": None, 
-            "displacement": np.array([0.0, 0.0, 0.0]),
-            "displacement_factor": 1.0,
-            "field": None,
-            "coefficients": None,
-            "tool_type": "custom",
-            "population_nest_params": [],
+            "polynom_max_power": 5, "neuron_models":["iaf_psc_alpha"], "encoded_polynoms": [],
+            "m": [0.0, 0.0, 0.0], "id": -1, "graph_id":0, "name": "Node", "types": [0],
+            "auto_spike_recorder": False, "auto_multimeter": False, # <--- Defaults
             "devices": []
         }
+        self.parameters = parameters if parameters else default_params.copy()
+        # Sicherstellen, dass Defaults da sind
+        if 'auto_spike_recorder' not in self.parameters: self.parameters['auto_spike_recorder'] = False
+        if 'auto_multimeter' not in self.parameters: self.parameters['auto_multimeter'] = False
         
-        self.connections = parameters.get('connections', []) if parameters else []
-        self.devices = []
-        if parameters:
-            self.parameters = parameters
-            self.devices = parameters.get("devices", [])
-            self.polynom_max_power = parameters.get("polynom_max_power", 5)
-            self.polynom_parameters = parameters.get("encoded_polynoms", [])
-            
-            self.center_of_mass = np.array(parameters.get("m", [0.0, 0.0, 0.0]), dtype=float)
-            
-            if parameters.get("old_center_of_mass") is not None:
-                self.old_center_of_mass = np.array(parameters["old_center_of_mass"], dtype=float)
-            else:
-                self.old_center_of_mass = self.center_of_mass.copy()
-                
-            self.id = parameters.get("id", -1)
-            self.name = parameters.get("name", f"Node:{self.id}")
-            self.types = parameters.get("types", [])
-            self.graph_id = parameters.get("graph_id", 0)
-            self.neuron_models = parameters.get("neuron_models", ["iaf_psc_alpha"])
-            self.population_nest_params = parameters.get("population_nest_params", [])
-        else:
-            self.parameters = default_params.copy()
-            self.devices = []
-            self.center_of_mass = np.array([0.0, 0.0, 0.0])
-            self.old_center_of_mass = np.array([0.0, 0.0, 0.0])
-            self.id = -1
-            self.name = f"Node:{self.id}"
-            self.types = default_params["types"]
-            self.neuron_models = ["iaf_psc_alpha"]
-            self.population_nest_params = []
+        self.connections = self.parameters.get('connections', [])
+        self.devices = self.parameters.get("devices", [])
+        
+        self.center_of_mass = np.array(self.parameters.get("m", [0,0,0]), dtype=float)
+        self.old_center_of_mass = self.center_of_mass.copy()
+        self.id = self.parameters.get("id", -1)
+        self.name = self.parameters.get("name", f"Node:{self.id}")
+        self.types = self.parameters.get("types", [])
+        self.graph_id = self.parameters.get("graph_id", 0)
+        self.neuron_models = self.parameters.get("neuron_models", ["iaf_psc_alpha"])
+        self.population_nest_params = self.parameters.get("population_nest_params", [])
 
-        self.old_positions = []
-        self.difference_then_now = np.array([0.0, 0.0, 0.0])
-        if other is not None:
+        self.next = []
+        if other: 
             self.prev.append(other)
             other.next.append(self)
-        self.next = []
+            
         self.function_generator = None
-        self.check_function_generator(function_generator, n=self.polynom_max_power)
-        self.visited = 0
-        self.field_offset = None
+        self.check_function_generator(function_generator, self.parameters.get("polynom_max_power", 5))
         self.positions = []
         self.population = []
         self.nest_connections = []
         self.nest_references = {}
 
-    def set_graph_id(self, graph_id=0):
-        self.parameters["graph_id"] = graph_id
-        self.graph_id = graph_id
-
+    def set_graph_id(self, graph_id=0): self.parameters["graph_id"] = graph_id; self.graph_id = graph_id
     def check_function_generator(self, func_gen=None, n=5):
-        if func_gen is not None:
-            self.function_generator = func_gen
-            self.coefficients = func_gen.coefficients.copy()
-        else:
-            actual_n = self.polynom_max_power if self.polynom_max_power is not None else 5
-            self.function_generator = PolynomGenerator(n=actual_n)
-            # Coefficients logic omitted for brevity as it's not the cause of position error
-            self.coefficients = self.function_generator.coefficients.copy()
+        if func_gen: self.function_generator = func_gen; self.coefficients = func_gen.coefficients.copy()
+        else: self.function_generator = PolynomGenerator(n=n); self.coefficients = self.function_generator.coefficients.copy()
 
     def build(self):
-
+        """
+        Generiert die räumlichen Positionen (self.positions) basierend auf den Parametern.
+        Unterstützt WFC (Custom) und geometrische Tools (Cone, CCW, Blob, Grid).
+        """
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
         
+        # Zielposition (Center of Mass)
         target_pos = np.array(params.get('m', [0.0, 0.0, 0.0]), dtype=float)
-        
         print(f"   [Build] Node {self.id}: Target Pos = {target_pos}")
+        
+        # Transformationen
         rot_theta = float(params.get('rot_theta', 0.0))
         rot_phi = float(params.get('rot_phi', 0.0))
         
@@ -3593,47 +3557,64 @@ class Node:
         transform_matrix = np.diag([sx, sy, sz])
         self.parameters['transform_matrix'] = transform_matrix.tolist()
 
+        # --- A. CUSTOM (Wave Function Collapse & Flow Fields) ---
         if tool_type == 'custom':
-            origin_pos = target_pos.copy()
+            # Wir starten am Ursprung (oder direkt am Target, aber WFC macht das intern)
+            # Wichtig: cluster_and_flow erwartet `m` als finalen Ort
             
             types = params.get('types', [0])
             num_types = len(types)
             grid_size = tuple(params.get('grid_size', [10, 10, 10]))
             
+            # Polynome dekodieren
             encoded_per_type = params.get("encoded_polynoms_per_type", None)
             if encoded_per_type:
                 if len(encoded_per_type) != num_types:
+                    # Fallback falls Config nicht matcht
                     encoded_per_type = encoded_per_type[:num_types]
+                
                 flow_functions = []
                 for type_polynoms in encoded_per_type:
-                    decoded = self.function_generator.decode_multiple(type_polynoms)
-                    flow_functions.append(tuple(decoded))
+                    try:
+                        decoded = self.function_generator.decode_multiple(type_polynoms)
+                        flow_functions.append(tuple(decoded))
+                    except Exception as e:
+                        print(f"    ⚠ Polynomial decode error: {e}. Using identity.")
+                        flow_functions.append((lambda x,y,z: x, lambda x,y,z: y, lambda x,y,z: z))
             else:
+                # Identity Flow
                 flow_functions = [(lambda x,y,z: x, lambda x,y,z: y, lambda x,y,z: z) for _ in range(num_types)]
             
+            # WFC Parameter
             wave_params = params.get('wave_params', {
                 'sparse_holes': params.get('sparse_holes', 0),
                 'sparsity_factor': params.get('sparsity_factor', 0.9),
                 'probability_vector': params.get('probability_vector', [1.0]*num_types)
             })
 
-            self.positions = cluster_and_flow(
-                grid_size=grid_size,
-                m=origin_pos, 
-                rot_theta=rot_theta,
-                rot_phi=rot_phi,
-                transform_matrix=transform_matrix,
-                wave_params=wave_params,
-                types=types,
-                flow_functions=flow_functions,
-                dt=params.get('dt', 0.01),
-                old=params.get('old', True),
-                num_steps=params.get('num_steps', 8),
-                plot_clusters=False,
-                title=params.get('title', "node")
-            )
-            
+            # Generierung
+            try:
+                self.positions = cluster_and_flow(
+                    grid_size=grid_size,
+                    m=target_pos, # Hier Target übergeben
+                    rot_theta=rot_theta,
+                    rot_phi=rot_phi,
+                    transform_matrix=transform_matrix,
+                    wave_params=wave_params,
+                    types=types,
+                    flow_functions=flow_functions,
+                    dt=params.get('dt', 0.01),
+                    old=params.get('old', True),
+                    num_steps=params.get('num_steps', 8),
+                    plot_clusters=False,
+                    title=params.get('title', "node")
+                )
+            except Exception as e:
+                print(f"    ⚠ WFC Generation Failed: {e}. Creating fallback blob.")
+                # Fallback: Kleiner Blob
+                self.positions = [blob_positions(n=100, m=target_pos, r=2.0, plot=False) for _ in types]
 
+            # Zentrierungs-Korrektur (da WFC manchmal driftet)
             all_points = [p for p in self.positions if p is not None and len(p) > 0]
             if all_points:
                 combined = np.vstack(all_points)
@@ -3646,45 +3627,58 @@ class Node:
                         (cluster + delta) if cluster is not None and len(cluster) > 0 else cluster 
                         for cluster in self.positions
                     ]
-                    new_combined = np.vstack([p for p in self.positions if p is not None and len(p) > 0])
-                    print(f"   ✓ New Center of Mass: {np.mean(new_combined, axis=0)}")
+                    # Debug Check
+                    # new_combined = np.vstack([p for p in self.positions if p is not None and len(p) > 0])
+                    # print(f"   ✓ New Center of Mass: {np.mean(new_combined, axis=0)}")
 
+        # --- B. GEOMETRIC TOOLS (Cone, Blob, Grid, CCW) ---
         else:
-            # Tool Logic
             print(f"   [Build] Node {self.id}: Tool '{tool_type}'")
+            
+            # Tools haben meist nur EINE Population (Type 0), oder wir replizieren es.
+            # Wenn 'types' mehrere Einträge hat, erzeugen wir für jeden Typ dieselbe Form (übereinanderliegend).
             types = params.get('types', [0])
             num_types = len(types)
             self.positions = []
             
             for i in range(num_types):
+                # Holen der Rohdaten (am Ursprung)
+                # get_raw_shape_points muss in WidgetLib verfügbar sein (Helper function)
                 raw_points = get_raw_shape_points(tool_type, params)
+                
                 if len(raw_points) == 0:
+                    print(f"    ⚠ Tool {tool_type} generated 0 points.")
                     self.positions.append(np.array([]))
                     continue
 
+                # Transformation anwenden (Rotation, Scale, Move to Target)
+                # transform_points ist in neuron_toolbox
                 final_points = transform_points(
                     raw_points,
-                    m=target_pos, 
+                    m=target_pos, # Verschiebung zum Ziel
                     rot_theta=rot_theta,
                     rot_phi=rot_phi,
-                    transform_matrix=transform_matrix,
+                    transform_matrix=transform_matrix, # Scaling
                     plot=False
                 )
                 self.positions.append(final_points)
             
+            # Zentrierung auch hier prüfen (Tools sind meist zentriert, aber Rotation kann schieben)
             all_points = [p for p in self.positions if p is not None and len(p) > 0]
             if all_points:
                 combined = np.vstack(all_points)
                 actual_com = np.mean(combined, axis=0)
                 delta = target_pos - actual_com
                 
-                if np.linalg.norm(delta) > 1e-6:
+                # Toleranz etwas höher bei Tools
+                if np.linalg.norm(delta) > 1e-3:
                     print(f"   [Build] Tool centering correction: {delta}")
                     self.positions = [
                         (cluster + delta) if cluster is not None and len(cluster) > 0 else cluster 
                         for cluster in self.positions
                     ]
 
+        # Metadaten update
         self.center_of_mass = target_pos
         self.parameters['m'] = target_pos.tolist()
         self.parameters['center_of_mass'] = target_pos.tolist()
@@ -3697,148 +3691,115 @@ class Node:
         
         pop_nest_params = params.get("population_nest_params", [])
         neuron_params = pop_nest_params[0] if pop_nest_params else {}
-
         current_models = params.get("neuron_models", ["iaf_psc_alpha"])
+        
+        # Erstellen der Populationen (wie gehabt)
         created_pops = []
         
-        # Gemeinsame Parameter extrahieren
-        # k: Inhibitions-Faktor (Vektor-Modus) oder Nachbar-Anzahl (Index-Modus)
-        k_val = float(params.get('k', 10.0)) 
-        
-        # Checkbox 'old' wird als Switch für Index-Mode vs. Vektorfeld genutzt
-        use_index = params.get('old', False) 
-        
-        # Zentrum und Rotation für die interne Berechnung
+        # Geometrie & Verbindungsparameter
+        k_val = float(params.get('k', 10.0))
+        use_index = params.get('old', False)
         center_pos = np.array(params.get('m', [0,0,0]))
-        rot_theta = float(params.get('rot_theta', 0.0))
-        rot_phi = float(params.get('rot_phi', 0.0))
-        bidir = bool(params.get('bidirectional', False))
-
-        # Gewichte (Fallback auf 30.0/1.0, falls im UI nicht gesetzt)
-        w_ex = float(params.get('ccw_weight_ex', 30.0))
-        d_ex = float(params.get('ccw_delay_ex', 1.0))
-
+        
         try:
+            # --- Population Creation Logic (CCW, Cone, Blob, Custom) ---
             if tool_type == 'CCW':
-                syn_mod = params.get('ccw_syn_model', 'static_synapse')
-                
-                # Wir iterieren über self.positions nur um die Anzahl der Populationen zu matchen,
-                # die Punkte selbst generiert create_CCW neu.
                 for i, _ in enumerate(self.positions):
-                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                    
+                    mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
                     pop = create_CCW(
-                        model=model,
-                        neuron_params=neuron_params,
-                        syn_model=syn_mod,
-                        
-                        # Connection Params
-                        weight_ex=w_ex,
-                        delay_ex=d_ex,
+                        model=mod, neuron_params=neuron_params,
+                        weight_ex=float(params.get('ccw_weight_ex', 30.0)),
+                        delay_ex=float(params.get('ccw_delay_ex', 1.0)),
                         k=k_val,
-                        
-                        # Geometrie Parameter
                         n_neurons=int(params.get('n_neurons', 100)),
                         radius=float(params.get('radius', 5.0)),
                         center=center_pos,
-                        rot_theta=rot_theta,
-                        rot_phi=rot_phi,
-                        
-                        # Modus
-                        bidirectional=bidir,
+                        rot_theta=float(params.get('rot_theta', 0.0)),
+                        rot_phi=float(params.get('rot_phi', 0.0)),
+                        bidirectional=bool(params.get('bidirectional', False)),
                         use_index_based=use_index
                     )
                     created_pops.append(pop)
-
             elif tool_type == 'Cone':
-                # Cone verwendet ähnliche Logik wie CCW
                 for i, _ in enumerate(self.positions):
-                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                    
+                    mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
                     pop = connect_cone(
-                        model=model,
-                        neuron_params=neuron_params,
-                        
-                        # Connection Params
-                        weight_ex=w_ex,
+                        model=mod, neuron_params=neuron_params,
+                        weight_ex=float(params.get('ccw_weight_ex', 30.0)),
                         k=k_val,
-                        
-                        # Geometrie Parameter
                         n_neurons=int(params.get('n_neurons', 100)),
                         radius_top=float(params.get('radius_top', 1.0)),
                         radius_bottom=float(params.get('radius_bottom', 5.0)),
                         height=float(params.get('height', 10.0)),
                         center=center_pos,
-                        rot_theta=rot_theta,
-                        rot_phi=rot_phi,
-                        
-                        # Modus
-                        bidirectional=bidir,
+                        rot_theta=float(params.get('rot_theta', 0.0)),
+                        rot_phi=float(params.get('rot_phi', 0.0)),
+                        bidirectional=bool(params.get('bidirectional', False)),
                         use_index_based=use_index
                     )
                     created_pops.append(pop)
-
             elif tool_type == 'Blob':
                 for i, pos_cluster in enumerate(self.positions):
-                    model = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                    # Blob nutzt weiterhin die vorberechneten Cluster aus self.positions
-                    pop = create_blob_population(
-                        positions=pos_cluster, 
-                        neuron_type=model,
-                        neuron_params=neuron_params
-                    )
+                    mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                    pop = create_blob_population(pos_cluster, neuron_type=mod, neuron_params=neuron_params)
                     created_pops.append(pop)
-
             else:
-                # Custom / Grid Logic
-                current_nest_params = params.get("population_nest_params", [])
+                # Custom
                 if len(current_models) < len(self.positions):
                     last = current_models[-1] if current_models else "iaf_psc_alpha"
                     current_models.extend([last] * (len(self.positions) - len(current_models)))
-                
-                created_pops = clusters_to_neurons(
-                    self.positions, 
-                    current_models, 
-                    current_nest_params, 
-                    set_positions=True
-                )
+                created_pops = clusters_to_neurons(self.positions, current_models, pop_nest_params, set_positions=True)
 
             self.population = created_pops
-            
-            # --- Device Instanziierung (Code unverändert) ---
-            if 'devices' in self.parameters and self.parameters['devices']:
-                print(f"Restoring {len(self.parameters['devices'])} devices from parameters...")
-                self.devices = [] 
-                
-                for dev_config in self.parameters['devices']:
-                    try:
-                        model = dev_config['model']
-                        d_params = dev_config.get('params', {})
-                        nest_device = nest.Create(model, params=d_params)
-                        dev_config['runtime_gid'] = nest_device 
-                        self.devices.append(dev_config)
-                        
-                        pop_idx = dev_config.get('target_pop_id', 0)
-                        if self.population and pop_idx < len(self.population) and self.population[pop_idx]:
-                            target_pop = self.population[pop_idx]
-                            c_params = dev_config.get('conn_params', {})
-                            syn_spec = {
-                                'weight': float(c_params.get('weight', 1.0)),
-                                'delay': max(float(c_params.get('delay', 1.0)), 0.1)
-                            }
-                            if "generator" in model:
-                                nest.Connect(nest_device, target_pop, syn_spec=syn_spec)
-                            else: 
-                                nest.Connect(target_pop, nest_device, syn_spec=syn_spec)
-                    except Exception as e:
-                        print(f"Failed to restore device {dev_config.get('model')}: {e}")
 
+            # --- NEW: AUTO-INSTRUMENTATION LOGIC ---
+            auto_spikes = params.get('auto_spike_recorder', False)
+            auto_volt = params.get('auto_multimeter', False)
+            
+            if auto_spikes or auto_volt:
+                if 'devices' not in self.parameters: self.parameters['devices'] = []
+                
+                for pop_idx, pop in enumerate(self.population):
+                    if pop is None: continue
+                    
+                    # Check Model Type (No Rate Models!)
+                    model = current_models[pop_idx] if pop_idx < len(current_models) else "unknown"
+                    is_spiking = model not in ['siegert_neuron', 'mcculloch_pitts_neuron', 'rate_neuron_ipn', 'rate_neuron_opn']
+                    
+                    if auto_spikes and is_spiking:
+                        # Check duplicates
+                        has_rec = any(d.get('model') == 'spike_recorder' and d.get('target_pop_id') == pop_idx for d in self.parameters['devices'])
+                        if not has_rec:
+                            print(f"  + Auto-Adding Spike Recorder to Pop {pop_idx}")
+                            self.parameters['devices'].append({
+                                "id": len(self.parameters['devices']),
+                                "model": "spike_recorder",
+                                "target_pop_id": pop_idx,
+                                "params": {"label": f"auto_spikes_p{pop_idx}"},
+                                "conn_params": {"weight": 1.0, "delay": 1.0},
+                                "runtime_gid": None
+                            })
+                    
+                    if auto_volt:
+                        has_multi = any(d.get('model') == 'multimeter' and d.get('target_pop_id') == pop_idx for d in self.parameters['devices'])
+                        if not has_multi:
+                            print(f"  + Auto-Adding Multimeter to Pop {pop_idx}")
+                            self.parameters['devices'].append({
+                                "id": len(self.parameters['devices']),
+                                "model": "multimeter",
+                                "target_pop_id": pop_idx,
+                                "params": {"interval": 1.0, "record_from": ["V_m"]},
+                                "conn_params": {"weight": 1.0, "delay": 1.0},
+                                "runtime_gid": None
+                            })
+            # ----------------------------------------
+
+            self.instantiate_devices()
             self.verify_and_report()
 
         except Exception as e:
             print(f" CRITICAL ERROR in populate_node: {e}")
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
 
 
 
@@ -3847,97 +3808,60 @@ class Node:
             print(f" CRITICAL ERROR in populate_node: {e}")
             import traceback
             traceback.print_exc()
-    def add_neighbor(self, other_node):
-        """Registriert eine topologische Verbindung (Next/Prev)."""
-        if other_node is None: return
-
-        if other_node not in self.next:
-            self.next.append(other_node)
-        
-        if self not in other_node.prev:
-            other_node.prev.append(self)
+    def add_neighbor(self, other): 
+        if other and other not in self.next: self.next.append(other)
+        if other and self not in other.prev: other.prev.append(self)
 
 
-    def remove_neighbor_if_isolated(self, other_node):
-        """
-        Entfernt die topologische Verbindung NUR DANN, wenn 
-        keine logischen Verbindungen (Synapsen) mehr existieren.
-        """
-        if other_node is None: return
-
-        # Prüfen, ob noch irgendeine Verbindung zu other_node existiert
-        target_gid = other_node.graph_id
-        target_nid = other_node.id
-        is_still_connected = False
-
-        for conn in self.connections:
-            tgt = conn.get('target', {})
-            if (tgt.get('graph_id') == target_gid and 
-                tgt.get('node_id') == target_nid):
-                is_still_connected = True
-                break
-        
-        # Wenn keine Verbindungen mehr da sind -> Topologie trennen
-        if not is_still_connected:
-            if other_node in self.next:
-                self.next.remove(other_node)
-            if self in other_node.prev:
-                other_node.prev.remove(self)
-            print(f"Topology: Link severed between Node {self.id} -> Node {other_node.id}")
+    def remove_neighbor_if_isolated(self, other):
+        if not other: return
+        connected = False
+        for c in self.connections:
+            t = c.get('target',{})
+            if t.get('graph_id')==other.graph_id and t.get('node_id')==other.id: connected=True; break
+        if not connected:
+            if other in self.next: self.next.remove(other)
+            if self in other.prev: other.prev.remove(self)
 
     def remove(self):
-        """
-        Klinkt den Node komplett aus der Topologie aus.
-        Wird beim Löschen des Nodes aufgerufen.
-        """
-        # Sich selbst aus den 'next'-Listen der Eltern entfernen
-        for p in self.prev:
-            if self in p.next:
-                p.next.remove(self)
-        
-        # Sich selbst aus den 'prev'-Listen der Kinder entfernen
-        for n in self.next:
-            if self in n.prev:
-                n.prev.remove(self)
-        
-        self.prev = []
-        self.next = []
-        print(f"Topology: Node {self.id} unhooked from graph structure.")
+        for p in self.prev: 
+            if self in p.next: p.next.remove(self)
+        for n in self.next: 
+            if self in n.prev: n.prev.remove(self)
+        self.prev=[]; self.next=[]
 
         
     def instantiate_devices(self):
-        if not hasattr(self, 'devices') or not self.devices: return
+        if not hasattr(self, 'devices') or not self.devices: 
+            # Sync with params
+            if 'devices' in self.parameters: self.devices = self.parameters['devices']
+            else: return
+            
         print(f" Instantiating {len(self.devices)} devices for Node {self.id}")
         for dev_conf in self.devices:
             try:
-                model_name = dev_conf['model']
-                device_params = dev_conf.get('params', {})
-                nest_device = nest.Create(model_name, params=device_params)
-                dev_conf['runtime_gid'] = nest_device 
+                model = dev_conf['model']
+                d_params = dev_conf.get('params', {})
+                nest_dev = nest.Create(model, params=d_params)
+                dev_conf['runtime_gid'] = nest_dev
                 
-                pop_idx = dev_conf.get('target_pop_id', 0)
-                if not self.population or pop_idx >= len(self.population): continue
-                target_pop = self.population[pop_idx]
-                
-                conn_params = dev_conf.get('conn_params', {})
-                weight = float(conn_params.get('weight', 1.0))
-                delay = max(float(conn_params.get('delay', 1.0)), 0.1)
-                syn_spec = {'weight': weight, 'delay': delay, 'synapse_model': 'static_synapse'}
-                
-                if "generator" in model_name or "stimulator" in model_name:
-                    nest.Connect(nest_device, target_pop, syn_spec=syn_spec)
-                else:
-                    nest.Connect(target_pop, nest_device, syn_spec=syn_spec)
-            except Exception as e:
-                print(f"Error creating device {dev_conf.get('model')}: {e}")
+                idx = dev_conf.get('target_pop_id', 0)
+                if idx < len(self.population) and self.population[idx]:
+                    target = self.population[idx]
+                    cp = dev_conf.get('conn_params', {})
+                    w = float(cp.get('weight', 1.0))
+                    d = max(float(cp.get('delay', 1.0)), 0.1)
+                    syn = {'weight': w, 'delay': d}
+                    
+                    if "generator" in model: nest.Connect(nest_dev, target, syn_spec=syn)
+                    else: nest.Connect(target, nest_dev, syn_spec=syn)
+            except Exception as e: print(f"Error creating device {dev_conf.get('model')}: {e}")
 
     def verify_and_report(self, verbose=False):
         if not self.population: return
         for i, pop in enumerate(self.population):
-            if pop is None:
-                print(f"Node {self.id} Pop {i}: Creation failed")
-            elif verbose:
-                print(f"Node {self.id} Pop {i}: OK")
+            if pop is None: print(f"Node {self.id} Pop {i}: Creation failed")
+            elif verbose: print(f"Node {self.id} Pop {i}: OK")
 
 def generate_node_parameters_list(n_nodes=5, 
                                    n_types=5, 
