@@ -9,11 +9,12 @@ import pyqtgraph.dockarea as dock
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt
 import numpy as np
+import time
 import vtk
 import pyvista as pv
 from pyvistaqt import QtInteractor
 from neuron_toolbox import *
-
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from WidgetLib import *
 from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder,BlinkingNetworkWidget,FlowFieldWidget,StructuresWidget
 import re
@@ -383,9 +384,12 @@ class MainWindow(QMainWindow):
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-
+        settings_menu = menubar.addMenu("⚙️ Settings")
         nest_menu = menubar.addMenu("⚙️ NEST Settings")
-        
+        self.action_auto_save = QAction("Auto-Save Live History on Reset", self)
+        self.action_auto_save.setCheckable(True)
+        self.action_auto_save.setChecked(True) # Standardmäßig an
+        settings_menu.addAction(self.action_auto_save)
         self.plasticity_action = QAction("🧠 Structural Plasticity", self)
         self.plasticity_action.setCheckable(True)
         self.plasticity_action.setChecked(self.structural_plasticity_enabled)
@@ -637,8 +641,10 @@ class MainWindow(QMainWindow):
                 
                 self.update_visualizations()
                 self.graph_overview.update_tree()
+
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.restore_injectors()
             
-            print("Reset complete!\n")
             self.status_bar.show_success("NEST Reset complete!")
     
 
@@ -716,6 +722,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
+        # --- SWITCH BAR ---
         switch_bar = QWidget()
         switch_bar.setStyleSheet("background-color: #1a1a1a; border-bottom: 2px solid #333;")
         switch_bar.setFixedHeight(50) 
@@ -767,22 +774,39 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(switch_bar)
         
+        # --- STACK ---
         self.main_stack = QStackedWidget()
         self.main_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) 
         
         self.editor_widget = self._create_editor_widget()
         self.main_stack.addWidget(self.editor_widget)
-        
+
+        # --- SIMULATION VIEW SETUP ---
         self.simulation_view = SimulationViewWidget(graph_list, self)
-        self.main_stack.addWidget(self.simulation_view)
         
+        # FIX: Korrekte Signalnamen verwenden (sigPauseSimulation, sigStopSimulation)
+        self.simulation_view.sigPauseSimulation.connect(lambda: self.collect_simulation_results(duration=0))
+        self.simulation_view.sigStopSimulation.connect(lambda: self.collect_simulation_results(duration=0))
+        
+        self.main_stack.addWidget(self.simulation_view)
+        self.live_dashboard = LiveDataDashboard(graph_list, self)
+        self.live_dashboard.sigStartLive.connect(self.start_continuous_simulation)
+        self.live_dashboard.sigPauseLive.connect(self.pause_simulation)
+        
+        # WICHTIG: Neuer Reset Slot
+        self.live_dashboard.sigResetLive.connect(self.reset_from_live_dashboard)
+        
+        self.main_stack.addWidget(self.live_dashboard)
         self.data_view = self._create_data_view()
         self.main_stack.addWidget(self.data_view)
         
         main_layout.addWidget(self.main_stack)
         
         self.update_visualizations()
-    
+        
+        # Initialisiert den Timer und verbindet die Steuersignale (Start/Step)
+        self.init_simulation_timer()
+
     def _create_data_view(self):
         self.data_dashboard = AnalysisDashboard(graph_list) 
         return self.data_dashboard
@@ -790,26 +814,20 @@ class MainWindow(QMainWindow):
     def _switch_main_view(self, index):
         old_index = self.main_stack.currentIndex()
         
+        # Index 1 ist der Simulation View
         if old_index == 1:
-            print("Switched away from Simulation: Forcing GL Cleanup...")
-            self.simulation_view.sim_running = False
-            self.simulation_view.timer.stop()
-            
+            print("Verlasse Simulation View -> Cleanup GL...")
             if hasattr(self.simulation_view, 'cleanup_gl_context'):
                 self.simulation_view.cleanup_gl_context()
             
-            QApplication.processEvents()
-        
         self.main_stack.setCurrentIndex(index)
         
+        # Buttons Styling update...
         for i, btn in enumerate(self.view_buttons):
             if i == index:
                 btn.setStyleSheet(self.view_switch_style_active)
             else:
                 btn.setStyleSheet(self.view_switch_style_inactive)
-        
-        if index == 1:
-            self.simulation_view.on_activated()
     
     
 
@@ -949,7 +967,10 @@ class MainWindow(QMainWindow):
         self.vis_stack.addWidget(self.blink_widget)        
         self.vis_stack.addWidget(self.flow_widget)  
         self.sim_dashboard = SimulationDashboardWidget(graph_list)
-        self.sim_dashboard.requestStartSimulation.connect(self.run_nest_simulation)
+        # HEADLESS SIGNALE VERBINDEN
+        self.sim_dashboard.requestStartSimulation.connect(self.start_headless_simulation)
+        self.sim_dashboard.requestStopSimulation.connect(self.stop_headless_simulation)
+        self.sim_dashboard.requestResetKernel.connect(self.manual_nest_reset)
         
         self.vis_stack.addWidget(self.sim_dashboard)       
         self.vis_stack.addWidget(Color("darkorange"))      
@@ -972,7 +993,187 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.vis_stack, 9)
         
         return layout
+    def start_headless_simulation(self, duration):
+        """
+        Startet die Simulation ohne grafische Updates.
+        Sperrt den SimulationView Tab.
+        """
+        print(f"\n>>> STARTING HEADLESS SIMULATION ({duration} ms) <<<")
+        
+        # 1. UI Sperren & Feedback
+        self.sim_dashboard.set_ui_locked(True)
+        self.simulation_view.setEnabled(False) # Simulation Tab ausgrauen
+        self.btn_view_simulation.setEnabled(False) # Tab Wechsel verhindern
+        
+        self.status_bar.set_status("HEADLESS SIMULATION RUNNING...", color="#E65100")
+        self.status_bar.set_progress(0)
+        
+        # 2. Parameter vorbereiten
+        self.headless_target_time = duration
+        self.headless_current_time = 0.0
+        
+        # Wir müssen Recorder sicherstellen, sonst gibt es keine Ergebnisse
+        self._ensure_spike_recorders()
+        
+        # NEST Zeit holen (falls schon vorher lief)
+        try:
+            kernel_time = nest.GetKernelStatus().get('time', 0.0)
+            self.headless_target_time += kernel_time # Relative Dauer addieren
+        except: pass
+
+        # 3. Timer starten (Chunked Simulation, damit GUI nicht einfriert)
+        # Wir simulieren in 50ms Blöcken, damit der Stop-Button reagiert
+        self.headless_step_size = 50.0 
+        self.headless_timer = QTimer()
+        self.headless_timer.timeout.connect(self.headless_loop_step)
+        self.headless_timer.start(0) # Sofort feuern
+
+    def headless_loop_step(self):
+        try:
+            # 1. Simulieren
+            nest.Simulate(self.headless_step_size)
+            
+            # 2. Zeit prüfen
+            current_time = nest.GetKernelStatus().get('time', 0.0)
+            
+            # 3. Progress Update
+            # (Berechnung relativ zum Start schwer, hier einfach visual feedback)
+            # Wir lassen den Balken einfach pulsieren oder laufen
+            prog = int((current_time % 1000) / 10) 
+            self.status_bar.set_progress(prog)
+            
+            # 4. Abbruchbedingung
+            if current_time >= self.headless_target_time:
+                self.finish_headless_simulation()
+                
+        except Exception as e:
+            self.headless_timer.stop()
+            self.stop_headless_simulation(error_msg=str(e))
+
+    def stop_headless_simulation(self, error_msg=None):
+        """Manueller Stop oder Fehler."""
+        if hasattr(self, 'headless_timer'):
+            self.headless_timer.stop()
+            
+        print(">>> Headless Simulation Stopped.")
+        
+        if error_msg:
+            self.status_bar.show_error(f"Headless Error: {error_msg}")
+            QMessageBox.critical(self, "Simulation Error", error_msg)
+        else:
+            self.status_bar.set_status("Simulation stopped by user.", "#D32F2F")
+            
+        self._restore_ui_after_headless()
+        # Daten sammeln bis hierhin
+        self.collect_simulation_results(0)
+
+    def finish_headless_simulation(self):
+        """Reguläres Ende."""
+        self.headless_timer.stop()
+        print(">>> Headless Simulation Finished.")
+        self.status_bar.show_success("Headless Simulation Complete!")
+        
+        self.collect_simulation_results(0)
+        self._restore_ui_after_headless()
+
+    def _restore_ui_after_headless(self):
+        """Stellt UI-Zustand wieder her."""
+        self.sim_dashboard.set_ui_locked(False)
+        self.simulation_view.setEnabled(True) # Simulation Tab wieder aktiv
+        self.btn_view_simulation.setEnabled(True)
+        self.status_bar.set_progress(100)
+
     
+
+
+
+    def reset_from_live_dashboard(self, keep_data):
+        print("Live Dashboard Reset triggered.")
+        self.sim_timer.stop()
+        
+        # Save History (wenn gewünscht)
+        if self.action_auto_save.isChecked():
+            self.archive_live_data()
+            
+        # Reset aufrufen
+        self.reset_and_restart()
+
+
+
+    def archive_live_data(self):
+        """Speichert aktuelle Live-Daten in eine JSON Datei."""
+        print("Archiving Live Data history...")
+        try:
+            data = self.live_dashboard.get_all_data()
+            if not data:
+                print("No data to save.")
+                return
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"history_live_{timestamp}.json"
+            
+            # Ordner erstellen
+            Path("sim_history").mkdir(exist_ok=True)
+            filepath = Path("sim_history") / filename
+            
+            with open(filepath, 'w') as f:
+                json.dump(data, f, cls=NumpyEncoder, indent=2)
+                
+            self.status_bar.show_success(f"History saved: {filename}")
+            print(f"Saved history to {filepath}")
+            
+        except Exception as e:
+            print(f"Error archiving data: {e}")
+            self.status_bar.show_error(f"Save Error: {e}")
+
+    # Update in 'on_sim_timer_timeout':
+    def on_sim_timer_timeout(self):
+        try:
+            # 1. Zeit prüfen (nur bei Continuous Modus relevant)
+            if self.sim_mode == 'continuous' and self.sim_target_time > 0:
+                try:
+                    current_time = nest.GetKernelStatus().get('time', 0.0)
+                    if current_time >= self.sim_target_time:
+                        self.pause_simulation()
+                        self.status_bar.show_success(f"Finished (Time: {current_time}ms)")
+                        if hasattr(self, 'simulation_view'):
+                            self.simulation_view.action_stop()
+                        return
+                except: pass
+
+            # 2. NEST Simulieren (ein Zeitschritt)
+            nest.Simulate(self.sim_step_size)
+            
+            # 3. Daten verteilen (3D & 2D)
+            self._distribute_simulation_data()
+            
+            # 4. GUI lebendig halten (wichtig bei hoher Last)
+            QApplication.processEvents()
+            
+        except Exception as e:
+            # Bei Fehler: Timer stoppen
+            self.sim_timer.stop()
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.is_paused = True
+            
+            error_msg = str(e)
+            
+            # --- FIX: InvalidNodeCollection stummschalten ---
+            # Das passiert erwartungsgemäß, wenn während der Simulation ein Reset gedrückt wird.
+            if "InvalidNodeCollection" in error_msg:
+                return # Silent exit, kein Popup
+            # ------------------------------------------------
+            
+            print(f"CRITICAL SIM ERROR: {error_msg}")
+            
+            if "NumericalInstability" in error_msg:
+                self.status_bar.show_error("Numerical Instability! Reset required.")
+                QMessageBox.critical(self, "Crash", "Simulation crashed (Numerical Instability).\nPlease RESET.")
+            elif "Prepare called twice" in error_msg:
+                self.status_bar.show_error("Kernel corrupted. Reset required.")
+            else:
+                self.status_bar.show_error(f"Sim Error: {e}")
+        
     def _switch_view(self, index, sim_mode=False):
         """Switches view and controls simulation state."""
         
@@ -1067,14 +1268,30 @@ class MainWindow(QMainWindow):
         self.structures_widget.structureSelected.connect(self.on_structure_selected)
         self.tool_stack.addWidget(self.structures_widget)
         
-        # Index 4: Tools
+        # Index 4: Tools (Hier müssen wir sicherstellen, dass wir an das Signal kommen)
         self.tools_widget = ToolsWidget()
         self.tools_widget.update_graphs(graph_list)
+        
+        # WICHTIG: deviceUpdated mit MainWindow verbinden für Update-Logik
+        # HINWEIS: deviceCreated ist bereits in ToolsWidget.init_ui() verbunden!
+        for i in range(self.tools_widget.config_stack.count()):
+            widget = self.tools_widget.config_stack.widget(i)
+            if isinstance(widget, DeviceConfigPage):
+                # NUR deviceUpdated hier verbinden (deviceCreated läuft über ToolsWidget)
+                widget.deviceUpdated.connect(self.handle_device_update)
+
         self.tool_stack.addWidget(self.tools_widget)        
         self.status_bar = StatusBarWidget()
         
         layout.addWidget(self.tool_stack, 9)
         layout.addWidget(self.status_bar, 1)
+        
+        # Signale verbinden
+        self.graph_overview.node_selected.connect(self._on_overview_node_selected)
+        # ... andere Signale ...
+        
+        # NEU: Wenn man im Tree auf ein Device klickt
+        self.graph_overview.device_selected.connect(self.on_device_tree_click)
         
         self.graph_overview.node_selected.connect(self._on_overview_node_selected)
         self.graph_overview.population_selected.connect(self._on_overview_pop_selected)
@@ -1083,7 +1300,89 @@ class MainWindow(QMainWindow):
         self.graph_overview.requestConnectionDeletion.connect(self.delete_connection_wrapper)
         return layout
     
+    def on_device_tree_click(self, device_data):
+        # 1. Zum Tools Tab wechseln
+        self.tool_stack.setCurrentIndex(4) 
+        # 2. Editor öffnen
+        self.tools_widget.open_device_editor(device_data)
+        self.status_bar.set_status(f"Editing Device: {device_data.get('model')}", "#FF9800")
 
+    def handle_device_update(self, old_data, new_data):
+        """
+        Löscht das alte Device, resettet NEST und erstellt das neue Device.
+        """
+        print("\n=== UPDATING DEVICE ===")
+        
+        # --- FIX: Simulation stoppen bevor wir resetten! ---
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.stop()
+        self.live_recorders = [] # Referenzen auf alte GIDs löschen
+        # ---------------------------------------------------
+
+        self.status_bar.set_status("Updating Device & Resetting Kernel...", "#FF5722")
+        QApplication.processEvents()
+
+        # 1. Target Infos holen
+        target = old_data.get('target', {})
+        gid = target.get('graph_id')
+        nid = target.get('node_id')
+        
+        old_id = old_data.get('id')
+        if old_id is None:
+            print("Error: Old device has no ID. Cannot update.")
+            return
+        
+        found_and_deleted = False
+        
+        # 2. Graph und Node finden & Device löschen
+        target_graph = next((g for g in graph_list if g.graph_id == gid), None)
+        
+        if target_graph:
+            node = target_graph.get_node(nid)
+            if node:
+                def filter_devs(dev_list, target_id):
+                    return [d for d in dev_list if str(d.get('id')) != str(target_id)]
+
+                if hasattr(node, 'devices'):
+                    len_before = len(node.devices)
+                    node.devices = filter_devs(node.devices, old_id)
+                    if len(node.devices) < len_before:
+                        print(f"  ✓ Deleted device {old_id} from node.devices")
+                        found_and_deleted = True
+
+                if hasattr(node, 'parameters') and 'devices' in node.parameters:
+                    len_before = len(node.parameters['devices'])
+                    node.parameters['devices'] = filter_devs(node.parameters['devices'], old_id)
+                    if len(node.parameters['devices']) < len_before:
+                        print(f"  ✓ Deleted device {old_id} from node.parameters['devices']")
+                        found_and_deleted = True
+        
+        # 3. NEST Reset
+        nest.ResetKernel()
+        if self.structural_plasticity_enabled:
+            nest.EnableStructuralPlasticity()
+            
+        print("Kernel Reset complete.")
+        
+        # 4. Welt neu aufbauen
+        for graph in graph_list:
+            for node in graph.node_list:
+                if not hasattr(node, 'positions') or not node.positions:
+                    node.build()
+                elif all(len(p) == 0 for p in node.positions if p is not None):
+                    node.build()
+                node.populate_node() 
+        
+        # 5. Das NEUE Device erstellen
+        global _nest_simulation_has_run
+        _nest_simulation_has_run = False
+        
+        self.tools_widget.on_device_created(new_data)
+        
+        # 6. GUI Refresh
+        self.update_visualizations()
+        self.graph_overview.update_tree()
+        self.status_bar.show_success("Device updated successfully!")
 
 
     def delete_connection_wrapper(self, conn_data):
@@ -1223,176 +1522,173 @@ class MainWindow(QMainWindow):
         except:
             pass
 
-
-
-        
     def create_bottom_right(self):
         main_container = QWidget()
         main_container.setStyleSheet("background-color: #232323; border-left: 1px solid #444;")
         
+        # Layout des Containers
         main_layout = QHBoxLayout(main_container)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(25) 
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15) 
 
-        style_nav = """
+        # --- CSS STYLES ---
+        # Basis-Stil für alle großen Buttons (füllend, dunkel)
+        base_btn_style = """
             QPushButton {
-                background-color: #263238; color: #B0BEC5;
-                border: 1px solid #37474F; font-weight: bold;
-                border-radius: 4px; padding: 12px; text-align: left; padding-left: 15px;
+                background-color: #2b2b2b;
+                color: #B0BEC5;
+                border: 1px solid #37474F;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 13px;
+                text-align: center;
+                margin: 2px;
             }
-            QPushButton:hover { background-color: #37474F; color: white; border-left: 3px solid #26A69A; }
-            QPushButton:pressed { background-color: #102027; }
+            QPushButton:hover {
+                background-color: #37474F;
+                color: white;
+            }
+            QPushButton:pressed {
+                background-color: #102027;
+            }
         """
 
-        style_maint = """
+        # Stil für den AKTIVEN Button (Neon-Blau, leuchtend)
+        active_btn_style = """
+            QPushButton {
+                background-color: #1c242b;
+                color: #00E5FF;
+                border: 2px solid #00E5FF; /* Neon Rand */
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 13px;
+                text-align: center;
+                margin: 2px;
+            }
+        """
+
+        # Akzent-Stile für Aktionen (Col 2 & 3)
+        action_btn_style = """
             QPushButton {
                 background-color: #3E2723; color: #D7CCC8;
-                border: 1px solid #4E342E; font-weight: bold;
-                border-radius: 4px; padding: 10px;
+                border: 1px solid #5D4037; border-radius: 6px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #4E342E; color: white; border: 1px solid #8D6E63; }
-            QPushButton:pressed { background-color: #1B0000; }
+            QPushButton:hover { background-color: #4E342E; border: 1px solid #8D6E63; color: white; }
         """
         
-        style_settings = """
+        io_btn_style = """
             QPushButton {
-                background-color: #455A64; color: white; font-weight: bold; 
-                padding: 10px; border-radius: 4px; border: 1px solid #546E7A;
+                background-color: #263238; color: #ECEFF1;
+                border: 1px solid #455A64; border-radius: 6px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #546E7A; }
-        """
-
-        style_gold = """
-            QPushButton {
-                background-color: #FF6F00; color: #212121;
-                border: none; font-weight: bold; border-radius: 4px; padding: 12px;
-            }
-            QPushButton:hover { background-color: #FF8F00; color: black; }
-            QPushButton:pressed { background-color: #E65100; }
-        """
-        
-        style_red = """
-            QPushButton {
-                background-color: #B71C1C; color: white;
-                border: none; font-weight: bold; border-radius: 4px; padding: 12px;
-            }
-            QPushButton:hover { background-color: #C62828; }
-            QPushButton:pressed { background-color: #7F0000; }
-        """
-        
-        style_io = """
-            QPushButton {
-                background-color: #424242; color: #E0E0E0;
-                border: 1px solid #616161; font-weight: bold;
-                border-radius: 4px; padding: 8px;
-            }
-            QPushButton:hover { background-color: #616161; color: white; border: 1px solid #9E9E9E; }
+            QPushButton:hover { background-color: #37474F; border: 1px solid #607D8B; color: white; }
         """
 
         def create_header(text):
             lbl = QLabel(text)
-            lbl.setStyleSheet("color: #757575; font-weight: bold; font-size: 10px; letter-spacing: 1px; margin-bottom: 5px;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color: #757575; font-weight: bold; font-size: 11px; letter-spacing: 2px; margin-bottom: 5px;")
+            lbl.setFixedHeight(20)
             return lbl
 
+        # ==========================================
+        # COLUMN 1: NAVIGATION (Full Height)
+        # ==========================================
         col1_layout = QVBoxLayout()
-        col1_layout.setSpacing(8)
-        col1_layout.addStretch() 
+        col1_layout.setSpacing(5)
+        col1_layout.addWidget(create_header("NAVIGATION"))
         
-        col1_layout.addWidget(create_header("WORKFLOW TOOLS"))
+        # Liste der Navigations-Buttons
+        self.nav_btns = []
         
-        btn_create = QPushButton("1. Graph Creator")
-        btn_editor = QPushButton("2. Graph Editor")
-        btn_conns = QPushButton("3. Connection Manager")
-        btn_struct = QPushButton("4. Structure Templates")
-        btn_tools = QPushButton("5. Device Toolbox")
-        
-        btn_create.clicked.connect(lambda: self.tool_stack.setCurrentIndex(0))
-        btn_editor.clicked.connect(lambda: self.tool_stack.setCurrentIndex(1))
-        btn_conns.clicked.connect(lambda: self.tool_stack.setCurrentIndex(2))
-        btn_struct.clicked.connect(lambda: self.tool_stack.setCurrentIndex(3))
-        btn_tools.clicked.connect(lambda: self.tool_stack.setCurrentIndex(4))
-        
-        for b in [btn_create, btn_editor, btn_conns, btn_struct, btn_tools]:
-            b.setStyleSheet(style_nav)
-            col1_layout.addWidget(b)
-            
-        col1_layout.addStretch()
+        # Definition der Tabs
+        nav_items = [
+            ("Network Builder", 0),
+            ("Graph Inspector", 1),
+            ("Connectivity", 2),
+            ("Structure Lib", 3),
+            ("Instrumentation", 4)
+        ]
 
+        def on_nav_click(target_idx, clicked_btn):
+            # 1. Stack umschalten
+            self.tool_stack.setCurrentIndex(target_idx)
+            
+            # 2. Styles updaten (Neon-Effekt umschalten)
+            for btn in self.nav_btns:
+                if btn == clicked_btn:
+                    btn.setStyleSheet(active_btn_style)
+                else:
+                    btn.setStyleSheet(base_btn_style)
+
+        for label, idx in nav_items:
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) # Füllt den Raum
+            
+            # Standardmäßig inaktiv
+            btn.setStyleSheet(base_btn_style)
+            
+            # Klick-Verbindung (Lambda fixiert idx und btn)
+            btn.clicked.connect(lambda checked, i=idx, b=btn: on_nav_click(i, b))
+            
+            self.nav_btns.append(btn)
+            col1_layout.addWidget(btn)
+
+        # Den ersten Button initial als aktiv markieren
+        if self.nav_btns:
+            self.nav_btns[0].setStyleSheet(active_btn_style)
+
+        # ==========================================
+        # COLUMN 2: KERNEL OPERATIONS
+        # ==========================================
         col2_layout = QVBoxLayout()
-        col2_layout.setSpacing(8)
-        col2_layout.addStretch()
+        col2_layout.setSpacing(5)
+        col2_layout.addWidget(create_header("KERNEL"))
         
-        col2_layout.addWidget(create_header("KERNEL & NETWORK"))
+        ops_items = [
+            ("Import Sub-Graph", self.merge_graphs_dialog),
+            ("Refresh Connectivity", self.reconnect_network),
+            ("Reinstantiate Network", self.rebuild_all_graphs)
+        ]
         
-        btn_merge = QPushButton("Merge Graph File")
-        btn_reconnect = QPushButton("Quick Reconnect")
-        btn_rebuild = QPushButton("Full Rebuild")
-        
-        for b in [btn_merge, btn_reconnect, btn_rebuild]:
-            b.setStyleSheet(style_maint)
-            col2_layout.addWidget(b)
-            
-        col2_layout.addSpacing(15)
-        
-        btn_settings = QPushButton("Global Settings")
-        btn_settings.setStyleSheet(style_settings)
-        btn_settings.clicked.connect(lambda: self.status_bar.set_status("Global Settings clicked (Coming Soon)", "#FF9800"))
-        col2_layout.addWidget(btn_settings)
-        
-        btn_merge.clicked.connect(self.merge_graphs_dialog)
-        btn_reconnect.clicked.connect(self.reconnect_network)
-        btn_rebuild.clicked.connect(self.rebuild_all_graphs)
+        for label, func in ops_items:
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            btn.setStyleSheet(action_btn_style)
+            btn.clicked.connect(func)
+            col2_layout.addWidget(btn)
 
-        col2_layout.addStretch()
-
+        # ==========================================
+        # COLUMN 3: PROJECT I/O
+        # ==========================================
         col3_layout = QVBoxLayout()
-        col3_layout.setSpacing(10)
-        col3_layout.addStretch()
+        col3_layout.setSpacing(5)
+        col3_layout.addWidget(create_header("PROJECT"))
         
-        col3_layout.addWidget(create_header("PROJECT DATA"))
-        io_layout = QHBoxLayout()
-        io_layout.setSpacing(10)
+        io_items = [
+            ("Save Project", self.save_all_graphs_dialog),
+            ("Load Project", self.load_all_graphs_dialog)
+        ]
         
-        btn_save = QPushButton("Save")
-        btn_load = QPushButton("Load")
-        btn_save.setStyleSheet(style_io)
-        btn_load.setStyleSheet(style_io)
-        
-        btn_save.clicked.connect(self.save_all_graphs_dialog)
-        btn_load.clicked.connect(self.load_all_graphs_dialog)
-        
-        io_layout.addWidget(btn_save)
-        io_layout.addWidget(btn_load)
-        col3_layout.addLayout(io_layout)
-        
-        col3_layout.addSpacing(20)
-        col3_layout.addWidget(create_header("SIMULATION CONTROL"))
-        
-        btn_sim_start = QPushButton("START SIMULATION")
-        btn_sim_start.setStyleSheet(style_gold)
-        btn_sim_start.clicked.connect(self.start_simulation)
-        
-        btn_sim_stop = QPushButton("STOP")
-        btn_sim_stop.setStyleSheet(style_red)
-        btn_sim_stop.clicked.connect(self.stop_simulation)
-        
-        col3_layout.addWidget(btn_sim_start)
-        col3_layout.addWidget(btn_sim_stop)
-        
-        col3_layout.addStretch()
+        for label, func in io_items:
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            btn.setStyleSheet(io_btn_style)
+            btn.clicked.connect(func)
+            col3_layout.addWidget(btn)
 
-
+        # --- Layout Assembly ---
+        # Verteilung: Col 1 ist am wichtigsten (Nav), daher etwas breiter
         main_layout.addLayout(col1_layout, 4)
         main_layout.addLayout(col2_layout, 3)
-        main_layout.addLayout(col3_layout, 3)
-        
+        main_layout.addLayout(col3_layout, 2)
 
         wrapper_layout = QHBoxLayout() 
         wrapper_layout.setContentsMargins(0,0,0,0)
         wrapper_layout.addWidget(main_container)
         
         return wrapper_layout
-    
+
     def reconnect_network(self):
 
         if not graph_list:
@@ -1434,6 +1730,10 @@ class MainWindow(QMainWindow):
             self.update_visualizations()
             self.connection_tool.refresh()
             
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.restore_injectors() # Generatoren wiederherstellen
+            # ------------------
+
             if hasattr(self, 'blink_widget'):
                 self.blink_widget.build_scene()
 
@@ -1701,35 +2001,241 @@ class MainWindow(QMainWindow):
 
         self._switch_main_view(1)
 
-    def run_nest_simulation(self, duration):
 
-        print(f"\n>>> STARTING SIMULATION (Duration: {duration} ms) <<<")
-        self.status_bar.set_status("Running Simulation...", color="#FF9800")
-        self.status_bar.set_progress(0) # Indeterminate
-        QApplication.processEvents()
+    def run_nest_simulation(self, duration):
+        print(f"\n>>> STARTING LIVE SIMULATION (Duration: {duration} ms) <<<")
+        self.status_bar.set_status("Simulation running...", color="#FF9800")
         
-        start_time = time.time()
+        # 1. Sicherstellen, dass alle Popualtionen Spike Recorder haben
+        # Das ist entscheidend für die Visualisierung!
+        self._ensure_spike_recorders()
+        
+        # 2. Simulation Step-by-Step
+        step_size = 25.0 # ms (40 FPS)
+        current_time = 0.0
+        
+        # Umschalten auf Simulation Tab, damit man was sieht
+        self._switch_main_view(1) 
         
         try:
-            # 1. Simulation
-            nest.Simulate(duration)
-            
-            elapsed = time.time() - start_time
-            print(f">>> SIMULATION FINISHED in {elapsed:.2f}s <<<")
-            
-            self.status_bar.show_success(f"Simulation completed in {elapsed:.2f}s!")
-            
+            while current_time < duration:
+                # NEST simulieren
+                nest.Simulate(step_size)
+                current_time += step_size
+                
+                # Spikes einsammeln und visualisieren
+                
+                # GUI Update erzwingen
+                QApplication.processEvents()
+                
+                # Progress Update
+                prog = int((current_time / duration) * 100)
+                self.status_bar.set_progress(prog)
+                
+                # Abbrechen falls User Stop gedrückt hat (Check im Widget)
+                if hasattr(self.simulation_view, 'is_paused') and self.simulation_view.is_paused:
+                    break
 
+            # Abschluss
+            self.collect_simulation_results(duration)
+            self.status_bar.show_success("Simulation finished.")
             self.sim_dashboard.btn_results.setEnabled(True)
-            self.sim_dashboard.btn_results.setText("Show Results")
-
             
         except Exception as e:
-            self.status_bar.show_error(f"Simulation failed: {e}")
-            print(f"Simulation Error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.status_bar.show_error(f"Simulation Error: {e}")
+            print(f"Error: {e}")
+            import traceback; traceback.print_exc()
 
+    def _ensure_spike_recorders(self):
+        """Verbindet temporäre Spike Recorder mit allen Neuronen für die Live-View."""
+        self.live_recorders = []
+        for graph in graph_list:
+            for node in graph.node_list:
+                if hasattr(node, 'population'):
+                    for pop in node.population:
+                        if pop:
+                            rec = nest.Create("spike_recorder")
+                            nest.Connect(pop, rec)
+                            self.live_recorders.append(rec)
+
+
+
+    # === SIMULATION CONTROL LOOP ===
+
+    def init_simulation_timer(self):
+        self.sim_timer = QTimer()
+        self.sim_timer.timeout.connect(self.on_sim_timer_timeout)
+        
+        # Modus-Flag: 'continuous' oder 'step'
+        self.sim_mode = 'continuous' 
+        self.sim_target_time = 0.0
+        
+        if hasattr(self, 'simulation_view'):
+            self.simulation_view.sigStartContinuous.connect(self.start_continuous_simulation)
+            self.simulation_view.sigStepSimulation.connect(self.step_simulation)
+            self.simulation_view.sigPauseSimulation.connect(self.pause_simulation)
+            self.simulation_view.sigStopSimulation.connect(self.stop_simulation)
+            self.simulation_view.sigResetSimulation.connect(self.reset_and_restart)
+
+    def start_continuous_simulation(self, step_size, max_duration):
+        print(f"Starting Continuous Run (Step: {step_size}ms, Target: {max_duration}ms)")
+        self.sim_mode = 'continuous'
+        self.sim_step_size = step_size
+        self.sim_target_time = max_duration
+        
+        self.sim_timer.setSingleShot(False) # Timer läuft endlos
+        
+        # Prüfen ob wir schon am Ende sind (falls nicht resetet wurde)
+        try:
+            curr = nest.GetKernelStatus().get('time', 0.0)
+            if self.sim_target_time > 0 and curr >= self.sim_target_time:
+                print("Target time reached. Please Reset.")
+                self.status_bar.show_error("Target time reached. Please Reset.")
+                return
+        except: pass
+
+        self._ensure_spike_recorders()
+        self.sim_timer.start(0) # 0ms = so schnell wie möglich
+
+    def step_simulation(self, step_size):
+        print(f"Executing Single Step ({step_size}ms)")
+        self.sim_mode = 'step'
+        self.sim_step_size = step_size
+        
+        self.sim_timer.setSingleShot(True) # Timer feuert nur EINMAL
+        self._ensure_spike_recorders()
+        self.sim_timer.start(0)
+
+    def pause_simulation(self):
+        print("Simulation Paused")
+        self.sim_timer.stop()
+        self.status_bar.set_status("Paused", "#FBC02D")
+
+    def stop_simulation(self):
+        print("Simulation Stopped")
+        self.sim_timer.stop()
+        self.collect_simulation_results(0)
+        self.status_bar.set_status("Stopped", "#D32F2F")
+
+    def reset_and_restart(self, duration=None):
+        """
+        Kompletter Reset des Kernels und Neuaufbau.
+        Argument 'duration' ist optional und wird ignoriert (kein Auto-Start mehr).
+        """
+        print("\n=== RESETTING SIMULATION ===")
+        self.sim_timer.stop()
+        
+        try:
+            self.status_bar.set_status("Resetting Kernel & Network...", "#E65100")
+            QApplication.processEvents()
+            
+            # 1. Visualisierung stoppen
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.stop_rendering_safe()
+
+            # 2. NEST Reset
+            nest.ResetKernel()
+            if self.structural_plasticity_enabled:
+                nest.EnableStructuralPlasticity()
+            
+            # 3. Netz neu bauen
+            for graph in graph_list:
+                for node in graph.node_list:
+                    if not hasattr(node, 'positions') or not node.positions:
+                        node.build()
+                    node.populate_node()
+            
+            # 4. Verbindungen
+            graphs_dict = {g.graph_id: g for g in graph_list}
+            create_nest_connections_from_stored(graphs_dict, verbose=False)
+            
+            # 5. Visualisierung updaten
+            if self.main_stack.currentIndex() == 1 and hasattr(self, 'simulation_view'):
+                self.simulation_view.load_scene() 
+                self.simulation_view.restore_injectors()
+            
+            # 6. Recorder
+            self.live_recorders = [] 
+            self._ensure_spike_recorders()
+            
+            # 7. Live Dashboard Rescan
+            if hasattr(self, 'live_dashboard'):
+                QTimer.singleShot(200, self.live_dashboard.scan_for_devices)
+
+            self.status_bar.show_success("Reset Done. Ready.")
+            print("=== RESET COMPLETE: READY ===")
+            
+        except Exception as e:
+            self.status_bar.show_error(f"Reset Failed: {e}")
+            print(f"Reset Error: {e}")
+            import traceback; traceback.print_exc()
+
+
+
+    def on_sim_timer_timeout(self):
+        try:
+            # 1. Zeit prüfen (bei Continuous)
+            if self.sim_mode == 'continuous' and self.sim_target_time > 0:
+                try:
+                    current_time = nest.GetKernelStatus().get('time', 0.0)
+                    if current_time >= self.sim_target_time:
+                        self.pause_simulation()
+                        self.status_bar.show_success(f"Finished (Time: {current_time}ms)")
+                        if hasattr(self, 'simulation_view'):
+                            self.simulation_view.action_stop()
+                        return
+                except: pass
+
+            # 2. NEST Simulieren
+            nest.Simulate(self.sim_step_size)
+            
+            self._distribute_simulation_data()
+            
+            QApplication.processEvents()
+
+        except Exception as e:
+            self.sim_timer.stop()
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.is_paused = True
+            
+            error_msg = str(e)
+            
+            # --- FIX: InvalidNodeCollection stummschalten ---
+            # Das passiert, wenn ein Reset durchgeführt wurde, während der Timer noch lief.
+            if "InvalidNodeCollection" in error_msg:
+                print("Simulation loop stopped due to Kernel Reset (InvalidNodeCollection). This is expected.")
+                self.live_recorders = [] # Liste bereinigen
+                return # Silent exit, kein Popup für den User
+            # ------------------------------------------------
+            
+            print(f"CRITICAL SIM ERROR: {error_msg}")
+            
+            if "NumericalInstability" in error_msg:
+                self.status_bar.show_error("Numerical Instability! Reset required.")
+                QMessageBox.critical(self, "Crash", "Simulation crashed (Numerical Instability).\nPlease RESET.")
+            elif "Prepare called twice" in error_msg:
+                self.status_bar.show_error("Kernel corrupted. Reset required.")
+            else:
+                self.status_bar.show_error(f"Sim Error: {e}")
+                
+    def _distribute_simulation_data(self):
+        # 1. 3D View (Temp Recorder)
+        if hasattr(self, 'live_recorders'):
+            all_spikes = []
+            for rec in self.live_recorders:
+                try:
+                    ev = nest.GetStatus(rec, 'events')[0]
+                    if len(ev['times']) > 0:
+                        all_spikes.extend(ev['senders'])
+                        nest.SetStatus(rec, {'n_events': 0})
+                except: pass
+            
+            if all_spikes and hasattr(self, 'simulation_view'):
+                self.simulation_view.feed_spikes(all_spikes)
+
+        # 2. Live Dashboard (User Recorder)
+        if hasattr(self, 'live_dashboard'):
+            self.live_dashboard.update_plots()
     
     def rebuild_all_graphs(
             self,  
@@ -1839,7 +2345,12 @@ class MainWindow(QMainWindow):
                 self.status_bar.show_success(f"Rebuild complete! ({stats['populations_created']} pops created)")
             
             self.update_visualizations()
-            
+            self.update_visualizations()
+        
+        # --- NEUER HOOK ---
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.restore_injectors()
+        # ------------------
             return stats
     
     def start_simulation(self):###########################################################
@@ -2330,6 +2841,79 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Merge Error", str(e))
+    def collect_simulation_results(self, duration):
+        """
+        Sammelt Daten aus allen Recordern, speichert sie in history und LEERT die Recorder.
+        """
+        print(f"\n>>> COLLECTING & FLUSHING DATA <<<")
+        timestamp = datetime.now().isoformat()
+        
+        has_data = False
+        
+        for graph in graph_list:
+            for node in graph.node_list:
+                if "history" not in node.results:
+                    node.results["history"] = []
+                
+                # Container für diesen Snapshot
+                run_data = {
+                    "timestamp": timestamp,
+                    "devices": {}
+                }
+                
+                if not hasattr(node, 'devices') or not node.devices:
+                    continue
+
+                for dev in node.devices:
+                    gid = dev.get('runtime_gid') 
+                    dev_id = dev.get('id')       
+                    model = dev.get('model', '')
+                    
+                    if gid is None: continue
+                    
+                    # Nur Recorder interessieren uns hier für Daten
+                    if "recorder" in model or "meter" in model:
+                        try:
+                            # 1. Daten holen
+                            status = nest.GetStatus(gid)[0]
+                            events = status.get('events', {})
+                            
+                            # Prüfen ob Daten da sind
+                            n_events = status.get('n_events', 0)
+                            if n_events == 0:
+                                continue
+                                
+                            # 2. Daten bereinigen (numpy -> list)
+                            cleaned_events = {}
+                            for k, v in events.items():
+                                if isinstance(v, np.ndarray):
+                                    cleaned_events[k] = v.tolist()
+                                else:
+                                    cleaned_events[k] = v
+                            
+                            # 3. Speichern
+                            run_data["devices"][dev_id] = {
+                                "model": model,
+                                "type": "recorder",
+                                "data": cleaned_events
+                            }
+                            has_data = True
+                            
+                            # 4. PUFFER LEEREN (WICHTIG!)
+                            nest.SetStatus(gid, {'n_events': 0})
+                            print(f"  -> {model} (ID {dev_id}): Collected & Flushed {n_events} events.")
+                            
+                        except Exception as e:
+                            print(f"Error collecting {model}: {e}")
+
+                if run_data["devices"]:
+                    node.results["history"].append(run_data)
+        
+        if has_data:
+            print(">>> Data collection complete.")
+            # Statusbar update
+            if hasattr(self, 'status_bar'):
+                self.status_bar.show_success("Simulation data collected & flushed.")
 
 
 
