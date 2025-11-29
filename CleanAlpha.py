@@ -16,7 +16,7 @@ from pyvistaqt import QtInteractor
 from neuron_toolbox import *
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from WidgetLib import *
-from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder,BlinkingNetworkWidget,FlowFieldWidget,StructuresWidget
+from WidgetLib import _clean_params, _serialize_connections, NumpyEncoder, BlinkingNetworkWidget, FlowFieldWidget, StructuresWidget, LiveConnectionController
 import re
 import shutil
 from datetime import datetime
@@ -352,7 +352,8 @@ class MainWindow(QMainWindow):
         self.resize(1920, 1080)
         self.active_graphs = {}
         self.structural_plasticity_enabled = True 
-        
+        self.hidden_nodes = set() # Set of (graph_id, node_id)
+        self.hidden_graphs = set() # Set of graph_id
         self.create_menubar()
         self.setup_ui()
         self.graph_builder.polynom_manager.polynomialsChanged.connect(self.rebuild_node_with_new_polynomials)
@@ -440,10 +441,12 @@ class MainWindow(QMainWindow):
         try:
             global graph_list
             graph_list.clear()
+            
+            WidgetLib.next_graph_id = 0 
+            WidgetLib.graph_parameters.clear()
             if hasattr(self, 'tools_widget'):
                 self.tools_widget.update_graphs(graph_list)
-            WidgetLib.graph_parameters.clear()
-            WidgetLib.next_graph_id = 0
+  
             
             print("Resetting NEST Kernel...")
             nest.ResetKernel()
@@ -1089,9 +1092,9 @@ class MainWindow(QMainWindow):
 
     def reset_from_live_dashboard(self, keep_data):
         print("Live Dashboard Reset triggered.")
-        self.sim_timer.stop()
+        self.sim_timer.stop() # Simulation hart stoppen
         
-        # Save History (wenn gewünscht)
+        # Save History
         if self.action_auto_save.isChecked():
             self.archive_live_data()
             
@@ -1127,52 +1130,7 @@ class MainWindow(QMainWindow):
             self.status_bar.show_error(f"Save Error: {e}")
 
     # Update in 'on_sim_timer_timeout':
-    def on_sim_timer_timeout(self):
-        try:
-            # 1. Zeit prüfen (nur bei Continuous Modus relevant)
-            if self.sim_mode == 'continuous' and self.sim_target_time > 0:
-                try:
-                    current_time = nest.GetKernelStatus().get('time', 0.0)
-                    if current_time >= self.sim_target_time:
-                        self.pause_simulation()
-                        self.status_bar.show_success(f"Finished (Time: {current_time}ms)")
-                        if hasattr(self, 'simulation_view'):
-                            self.simulation_view.action_stop()
-                        return
-                except: pass
-
-            # 2. NEST Simulieren (ein Zeitschritt)
-            nest.Simulate(self.sim_step_size)
-            
-            # 3. Daten verteilen (3D & 2D)
-            self._distribute_simulation_data()
-            
-            # 4. GUI lebendig halten (wichtig bei hoher Last)
-            QApplication.processEvents()
-            
-        except Exception as e:
-            # Bei Fehler: Timer stoppen
-            self.sim_timer.stop()
-            if hasattr(self, 'simulation_view'):
-                self.simulation_view.is_paused = True
-            
-            error_msg = str(e)
-            
-            # --- FIX: InvalidNodeCollection stummschalten ---
-            # Das passiert erwartungsgemäß, wenn während der Simulation ein Reset gedrückt wird.
-            if "InvalidNodeCollection" in error_msg:
-                return # Silent exit, kein Popup
-            # ------------------------------------------------
-            
-            print(f"CRITICAL SIM ERROR: {error_msg}")
-            
-            if "NumericalInstability" in error_msg:
-                self.status_bar.show_error("Numerical Instability! Reset required.")
-                QMessageBox.critical(self, "Crash", "Simulation crashed (Numerical Instability).\nPlease RESET.")
-            elif "Prepare called twice" in error_msg:
-                self.status_bar.show_error("Kernel corrupted. Reset required.")
-            else:
-                self.status_bar.show_error(f"Sim Error: {e}")
+    
         
     def _switch_view(self, index, sim_mode=False):
         """Switches view and controls simulation state."""
@@ -1261,6 +1219,13 @@ class MainWindow(QMainWindow):
         
         # Index 2: Connections
         self.connection_tool = ConnectionTool(graph_list)        
+        
+        # --- HIER EINFÜGEN: Signale verbinden ---
+        # Wenn Verbindungen erstellt wurden -> Tree und 3D-View aktualisieren
+        self.connection_tool.connectionsCreated.connect(self.graph_overview.update_tree)
+        self.connection_tool.connectionsCreated.connect(self.update_visualizations)
+        # ----------------------------------------
+        
         self.tool_stack.addWidget(self.connection_tool)
         
         # Index 3: Structures 
@@ -1271,6 +1236,8 @@ class MainWindow(QMainWindow):
         # Index 4: Tools (Hier müssen wir sicherstellen, dass wir an das Signal kommen)
         self.tools_widget = ToolsWidget()
         self.tools_widget.update_graphs(graph_list)
+        self.tools_widget.deviceAdded.connect(self.graph_overview.update_tree) 
+        self.tools_widget.deviceAdded.connect(self.update_visualizations)
         
         # WICHTIG: deviceUpdated mit MainWindow verbinden für Update-Logik
         # HINWEIS: deviceCreated ist bereits in ToolsWidget.init_ui() verbunden!
@@ -1288,16 +1255,16 @@ class MainWindow(QMainWindow):
         
         # Signale verbinden
         self.graph_overview.node_selected.connect(self._on_overview_node_selected)
-        # ... andere Signale ...
-        
-        # NEU: Wenn man im Tree auf ein Device klickt
         self.graph_overview.device_selected.connect(self.on_device_tree_click)
-        
-        self.graph_overview.node_selected.connect(self._on_overview_node_selected)
         self.graph_overview.population_selected.connect(self._on_overview_pop_selected)
         self.graph_overview.connection_selected.connect(self._on_overview_conn_selected)
         self.graph_overview.requestConnectionCreation.connect(self.open_connection_tool_for_node)
         self.graph_overview.requestConnectionDeletion.connect(self.delete_connection_wrapper)
+        
+        # NEU: Delete Signal verbinden
+        self.graph_overview.requestDeviceDeletion.connect(self.delete_device_wrapper)
+        self.graph_overview.requestLiveWeightChange.connect(self.on_live_weight_change)
+
         return layout
     
     def on_device_tree_click(self, device_data):
@@ -1309,77 +1276,62 @@ class MainWindow(QMainWindow):
 
     def handle_device_update(self, old_data, new_data):
         """
-        Löscht das alte Device, resettet NEST und erstellt das neue Device.
+        Aktualisiert die Konfiguration des Geräts und führt einen Rebuild durch.
         """
-        print("\n=== UPDATING DEVICE ===")
+        print("\n=== UPDATING DEVICE (In-Place) ===")
         
-        # --- FIX: Simulation stoppen bevor wir resetten! ---
         if hasattr(self, 'sim_timer'):
             self.sim_timer.stop()
-        self.live_recorders = [] # Referenzen auf alte GIDs löschen
-        # ---------------------------------------------------
+        self.live_recorders = [] 
 
-        self.status_bar.set_status("Updating Device & Resetting Kernel...", "#FF5722")
+        self.status_bar.set_status("Updating Device Params & Rebuilding...", "#FF5722")
         QApplication.processEvents()
 
-        # 1. Target Infos holen
+        # 1. IDs identifizieren
         target = old_data.get('target', {})
         gid = target.get('graph_id')
         nid = target.get('node_id')
-        
         old_id = old_data.get('id')
-        if old_id is None:
-            print("Error: Old device has no ID. Cannot update.")
-            return
         
-        found_and_deleted = False
-        
-        # 2. Graph und Node finden & Device löschen
         target_graph = next((g for g in graph_list if g.graph_id == gid), None)
+        
+        updated = False
         
         if target_graph:
             node = target_graph.get_node(nid)
             if node:
-                def filter_devs(dev_list, target_id):
-                    return [d for d in dev_list if str(d.get('id')) != str(target_id)]
-
-                if hasattr(node, 'devices'):
-                    len_before = len(node.devices)
-                    node.devices = filter_devs(node.devices, old_id)
-                    if len(node.devices) < len_before:
-                        print(f"  ✓ Deleted device {old_id} from node.devices")
-                        found_and_deleted = True
-
+                # Wir bearbeiten direkt die Config-Liste
                 if hasattr(node, 'parameters') and 'devices' in node.parameters:
-                    len_before = len(node.parameters['devices'])
-                    node.parameters['devices'] = filter_devs(node.parameters['devices'], old_id)
-                    if len(node.parameters['devices']) < len_before:
-                        print(f"  ✓ Deleted device {old_id} from node.parameters['devices']")
-                        found_and_deleted = True
+                    for dev_conf in node.parameters['devices']:
+                        # ID Vergleich (String-sicher)
+                        if str(dev_conf.get('id')) == str(old_id):
+                            # WERTE ÜBERSCHREIBEN statt löschen/neu erstellen
+                            dev_conf['params'] = new_data['params']
+                            dev_conf['conn_params'] = new_data.get('conn_params', {})
+                            dev_conf['model'] = new_data.get('model', dev_conf['model'])
+                            
+                            # Runtime GID resetten, damit populate_node es neu erstellt
+                            dev_conf['runtime_gid'] = None 
+                            updated = True
+                            print(f"  ✓ Device config {old_id} updated in-place.")
+                            break
         
-        # 3. NEST Reset
+        if not updated:
+            print("Error: Could not find device to update in parameters.")
+            self.status_bar.show_error("Update failed: Device not found.")
+            return
+
+        # 2. NEST Reset
+        print("Resetting Kernel...")
         nest.ResetKernel()
         if self.structural_plasticity_enabled:
             nest.EnableStructuralPlasticity()
             
-        print("Kernel Reset complete.")
+        # 3. Rebuild (Das instanziiert jetzt das aktualisierte Device)
+        # Wir nutzen rebuild_all_graphs, da dies Positionen behält aber NEST-Objekte neu baut
+        self.rebuild_all_graphs(reset_nest=False, verbose=False)
         
-        # 4. Welt neu aufbauen
-        for graph in graph_list:
-            for node in graph.node_list:
-                if not hasattr(node, 'positions') or not node.positions:
-                    node.build()
-                elif all(len(p) == 0 for p in node.positions if p is not None):
-                    node.build()
-                node.populate_node() 
-        
-        # 5. Das NEUE Device erstellen
-        global _nest_simulation_has_run
-        _nest_simulation_has_run = False
-        
-        self.tools_widget.on_device_created(new_data)
-        
-        # 6. GUI Refresh
+        # 4. GUI Refresh
         self.update_visualizations()
         self.graph_overview.update_tree()
         self.status_bar.show_success("Device updated successfully!")
@@ -1606,7 +1558,7 @@ class MainWindow(QMainWindow):
             ("Network Builder", 0),
             ("Graph Inspector", 1),
             ("Connectivity", 2),
-            ("Structure Lib", 3),
+            ("Population Examples", 3),
             ("Instrumentation", 4)
         ]
 
@@ -1688,6 +1640,48 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(main_container)
         
         return wrapper_layout
+    def delete_device_wrapper(self, device_data):
+        from PyQt6.QtWidgets import QMessageBox
+        
+        model = device_data.get('model', 'Device')
+        dev_id = device_data.get('id')
+        
+        reply = QMessageBox.question(
+            self, 
+            "Delete Device", 
+            f"Really delete {model} (ID: {dev_id})?\n\nThis will reset the kernel.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.status_bar.set_status("Deleting device & Resetting...", "#FF5722")
+            QApplication.processEvents()
+            
+            # 1. Daten extrahieren
+            target = device_data.get('target', {})
+            gid = target.get('graph_id')
+            nid = target.get('node_id')
+            
+            # 2. Aus Datenstruktur entfernen
+            target_graph = next((g for g in graph_list if g.graph_id == gid), None)
+            if target_graph:
+                node = target_graph.get_node(nid)
+                if node:
+                    # Aus node.devices (Runtime Liste) löschen
+                    if hasattr(node, 'devices'):
+                        node.devices = [d for d in node.devices if str(d.get('id')) != str(dev_id)]
+                    
+                    # Aus node.parameters (Config Dict) löschen
+                    if hasattr(node, 'parameters') and 'devices' in node.parameters:
+                        node.parameters['devices'] = [d for d in node.parameters['devices'] if str(d.get('id')) != str(dev_id)]
+            
+            # 3. Kernel Reset & Rebuild
+            # Wir nutzen die existierende Methode zur Reinstanziierung
+            self.manual_nest_reset() 
+            
+            # 4. GUI Update (wird durch manual_nest_reset teilweise gemacht, aber sicherheitshalber explizit)
+            self.graph_overview.update_tree()
+            self.status_bar.show_success(f"Device {dev_id} deleted.")
 
     def reconnect_network(self):
 
@@ -1803,29 +1797,60 @@ class MainWindow(QMainWindow):
         self.plot_neuron_points()
         self.plot_graph_skeleton()
     """
+    def on_visibility_changed(self, data, visible):
+        """Versteckt/Zeigt Punktwolken."""
+        dtype = data.get('type')
+        
+        if dtype == 'node':
+            key = (data['graph_id'], data['node_id'])
+            if visible:
+                if key in self.hidden_nodes: self.hidden_nodes.remove(key)
+            else:
+                self.hidden_nodes.add(key)
+                
+        elif dtype == 'graph':
+            gid = data['graph_id']
+            if visible:
+                if gid in self.hidden_graphs: self.hidden_graphs.remove(gid)
+            else:
+                self.hidden_graphs.add(gid)
+        
+        # Update View
+        self.plot_neuron_points()
+        self.plot_graph_skeleton()
+
+
+
     def plot_neuron_points(self):
         self.neuron_plotter.clear()
         legend_entries = []
         used_types = set()
+        
         for graph in graph_list:
+            # GRAPH VISIBILITY CHECK
+            if graph.graph_id in self.hidden_graphs:
+                continue
+                
             for node in graph.node_list:
+                # NODE VISIBILITY CHECK
+                if (graph.graph_id, node.id) in self.hidden_nodes:
+                    continue
+                
                 for i, pts in enumerate(node.positions):
-                    if pts is None or len(pts) == 0:
-                        continue
+                    if pts is None or len(pts) == 0: continue
                     neuron_type = node.neuron_models[i] if i < len(node.neuron_models) else "unknown"
-                    color = get_neuron_color(neuron_type)  # ← OHNE self. !
+                    color = get_neuron_color(neuron_type)
+                    
                     if neuron_type not in used_types:
                         legend_entries.append([neuron_type, color])
                         used_types.add(neuron_type)
+                        
                     point_cloud = pv.PolyData(pts)
-                    self.neuron_plotter.add_mesh(
-                        point_cloud,
-                        color=color,
-                        point_size=10
-                    )
+                    self.neuron_plotter.add_mesh(point_cloud, color=color, point_size=10)
+                    
         if legend_entries:
             self.neuron_plotter.add_legend(legend_entries, size=(0.12, 0.12), loc='upper right')
-        self.neuron_plotter.reset_camera()
+        # self.neuron_plotter.reset_camera() # Optional: Kamera nicht immer resetten für smooth toggle
         self.neuron_plotter.update()
         
    
@@ -1952,7 +1977,21 @@ class MainWindow(QMainWindow):
         self.graph_plotter.update()
 
 
-    
+    def update_simulation_speed(self, value):
+        """
+        Passt die Timer-Verzögerung basierend auf dem Slider-Wert an.
+        Value: 0 (Langsam) bis 100 (Schnell).
+        """
+        # Mapping: 
+        # 100 -> 0ms Delay (Max Speed)
+        # 0   -> 200ms Delay (Slow Motion)
+        
+        # Invertieren: Je höher der Wert, desto kleiner das Delay
+        delay = int((100 - value) * 2) 
+        
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.setInterval(delay)
+            # Hinweis: setInterval wirkt beim nächsten Tick des Timers.
     
     def _on_skeleton_hover(self, interactor, event):
 
@@ -2047,28 +2086,47 @@ class MainWindow(QMainWindow):
             import traceback; traceback.print_exc()
 
     def _ensure_spike_recorders(self):
-        """Verbindet temporäre Spike Recorder mit allen Neuronen für die Live-View."""
+        """Verbindet Recorder nur mit Spiking-Modellen."""
         self.live_recorders = []
+        
+        # Blacklist für Rate/Analog Modelle
+        non_spiking = [
+            'siegert_neuron', 'mcculloch_pitts_neuron', 
+            'rate_neuron_ipn', 'rate_neuron_opn', 'gif_pop_psc_exp',
+            'ht_neuron' # Oft auch problematisch wenn nicht konfiguriert
+        ]
+        
         for graph in graph_list:
             for node in graph.node_list:
                 if hasattr(node, 'population'):
-                    for pop in node.population:
-                        if pop:
+                    for i, pop in enumerate(node.population):
+                        if pop is None: continue
+                        
+                        try:
+                            # Check Model
+                            model = nest.GetStatus(pop, 'model')[0]
+                            if model in non_spiking:
+                                continue
+                                
+                            # Check Recorders (Vermeide doppelte)
+                            # Hier erstellen wir aber temporäre für die 3D Sicht.
+                            
                             rec = nest.Create("spike_recorder")
                             nest.Connect(pop, rec)
                             self.live_recorders.append(rec)
-
-
-
-    # === SIMULATION CONTROL LOOP ===
+                        except Exception:
+                            # Silent Fail (z.B. wenn Modell keine Spikes hat)
+                            pass
 
     def init_simulation_timer(self):
         self.sim_timer = QTimer()
+        self.sim_timer.setTimerType(Qt.TimerType.PreciseTimer) # Wichtig für Präzision
         self.sim_timer.timeout.connect(self.on_sim_timer_timeout)
         
-        # Modus-Flag: 'continuous' oder 'step'
+        # Status-Variablen
         self.sim_mode = 'continuous' 
         self.sim_target_time = 0.0
+        self.current_nest_time = 0.0
         
         if hasattr(self, 'simulation_view'):
             self.simulation_view.sigStartContinuous.connect(self.start_continuous_simulation)
@@ -2076,35 +2134,67 @@ class MainWindow(QMainWindow):
             self.simulation_view.sigPauseSimulation.connect(self.pause_simulation)
             self.simulation_view.sigStopSimulation.connect(self.stop_simulation)
             self.simulation_view.sigResetSimulation.connect(self.reset_and_restart)
+            # Slider steuert direkt das Timer-Intervall
+            self.simulation_view.sigSpeedChanged.connect(self.update_simulation_speed)
+
+    def update_simulation_speed(self, slider_value):
+        """
+        Wandelt Slider-Wert (0-200) direkt in Timer-Intervall (ms) um.
+        0 = Max Speed.
+        >0 = Slow Motion.
+        """
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.setInterval(slider_value)
+
 
     def start_continuous_simulation(self, step_size, max_duration):
-        print(f"Starting Continuous Run (Step: {step_size}ms, Target: {max_duration}ms)")
+        print(f"Starting Continuous Run (Step: {step_size}ms)")
+        
         self.sim_mode = 'continuous'
         self.sim_step_size = step_size
-        self.sim_target_time = max_duration
         
-        self.sim_timer.setSingleShot(False) # Timer läuft endlos
-        
-        # Prüfen ob wir schon am Ende sind (falls nicht resetet wurde)
+        # Zeit holen und Sicherheits-Check
         try:
-            curr = nest.GetKernelStatus().get('time', 0.0)
-            if self.sim_target_time > 0 and curr >= self.sim_target_time:
-                print("Target time reached. Please Reset.")
-                self.status_bar.show_error("Target time reached. Please Reset.")
-                return
-        except: pass
+            stat = nest.GetKernelStatus()
+            self.current_nest_time = stat.get('time', 0.0)
+        except:
+            self.current_nest_time = 0.0
+            
+        print(f"  Current NEST Time: {self.current_nest_time} ms")
 
+        # Zielzeit Logik (Absolutzeit)
+        # Wenn max_duration > aktuelle Zeit -> Lauf bis dahin.
+        # Wenn max_duration <= aktuelle Zeit -> Lauf unendlich.
+        if max_duration > self.current_nest_time:
+            self.sim_target_time = max_duration
+            print(f"  -> Target set to {max_duration}ms")
+        else:
+            self.sim_target_time = float('inf')
+            print("  -> Target <= Current. Switching to INFINITE RUN.")
+
+        self.status_bar.set_status("Running...", "#2E7D32")
         self._ensure_spike_recorders()
-        self.sim_timer.start(0) # 0ms = so schnell wie möglich
+
+        self.sim_timer.setSingleShot(False)
+        
+        delay = 0
+        if hasattr(self, 'simulation_view'):
+            delay = self.simulation_view.slider_speed.value()
+            self.simulation_view.is_paused = False
+            self.simulation_view.update_button_styles()
+            
+        self.sim_timer.start(delay)
 
     def step_simulation(self, step_size):
+        """Führt genau einen Schritt aus."""
         print(f"Executing Single Step ({step_size}ms)")
         self.sim_mode = 'step'
         self.sim_step_size = step_size
         
-        self.sim_timer.setSingleShot(True) # Timer feuert nur EINMAL
+        self.sim_timer.setSingleShot(True) # Nur einmal feuern!
         self._ensure_spike_recorders()
-        self.sim_timer.start(0)
+        self.sim_timer.start(0) # Sofort ausführen
+
 
     def pause_simulation(self):
         print("Simulation Paused")
@@ -2117,106 +2207,158 @@ class MainWindow(QMainWindow):
         self.collect_simulation_results(0)
         self.status_bar.set_status("Stopped", "#D32F2F")
 
+    
+
+
+    def on_live_weight_change(self, conn_data, new_weight):
+        """
+        Setzt das Gewicht in NEST live UND aktualisiert die lokalen Daten,
+        damit es beim nächsten Rebuild persistent bleibt.
+        """
+        # 1. NEST Live Update
+        success = LiveConnectionController.set_weight(graph_list, conn_data, new_weight)
+        
+        if success:
+            # 2. Lokale Daten aktualisieren (damit es nicht beim nächsten Reset verloren geht)
+            # Wir müssen die Referenz im Node finden und updaten
+            src_gid = conn_data['source']['graph_id']
+            src_nid = conn_data['source']['node_id']
+            conn_id = conn_data.get('id')
+            
+            target_graph = next((g for g in graph_list if g.graph_id == src_gid), None)
+            if target_graph:
+                node = target_graph.get_node(src_nid)
+                if node and hasattr(node, 'connections'):
+                    for c in node.connections:
+                        if c.get('id') == conn_id:
+                            # Update lokalen Parameter
+                            c['params']['weight'] = new_weight
+                            # Name aktualisieren, um Status anzuzeigen (optional)
+                            if new_weight == 0.0:
+                                if "(Severed)" not in c.get('name', ''):
+                                    c['name'] = f"{c.get('name','Conn')} (Severed)"
+                            else:
+                                c['name'] = c.get('name', 'Conn').replace(" (Severed)", "")
+                            break
+            
+            # 3. GUI Feedback
+            self.graph_overview.update_tree()
+            self.status_bar.show_success(f"Connection weight set to {new_weight} (Live).")
+        else:
+            self.status_bar.show_error("Live update failed (Simulation running?)")
+
+
+
+
+    def on_sim_timer_timeout(self):
+        try:
+            # 1. Zielzeit Prüfung (nur wenn nicht unendlich)
+            if self.sim_mode == 'continuous' and self.sim_target_time != float('inf'):
+                # Zeit holen ohne Crash-Gefahr
+                stat = nest.GetKernelStatus()
+                curr = stat.get('time', stat.get('biological_time', 0.0))
+                
+                if curr >= self.sim_target_time:
+                    self.pause_simulation()
+                    self.status_bar.show_success(f"Target reached ({curr}ms).")
+                    return
+
+            # 2. Schritt simulieren
+            nest.Simulate(self.sim_step_size)
+            
+            # 3. Zeit für GUI updaten
+            stat = nest.GetKernelStatus()
+            self.current_nest_time = stat.get('time', stat.get('biological_time', 0.0))
+            
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.update_time_display(self.current_nest_time)
+            
+            # 4. Daten visualisieren
+            self._distribute_simulation_data()
+            
+            # 5. GUI responsive halten
+            QApplication.processEvents()
+            
+        except Exception as e:
+            self.sim_timer.stop()
+            # Fehler im Continuous Mode -> Pause Status setzen
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.is_paused = True
+                self.simulation_view.update_button_styles()
+            
+            err = str(e)
+            if "InvalidNodeCollection" not in err: # Reset-Fehler ignorieren
+                print(f"Sim Error: {err}")
+
     def reset_and_restart(self, duration=None):
         """
         Kompletter Reset des Kernels und Neuaufbau.
-        Argument 'duration' ist optional und wird ignoriert (kein Auto-Start mehr).
         """
         print("\n=== RESETTING SIMULATION ===")
-        self.sim_timer.stop()
+        
+        # 1. Timer stoppen
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.stop()
+        
+        # 2. ZEIT-VARIABLEN ZURÜCKSETZEN (Lokal)
+        self.current_nest_time = 0.0
+        self.sim_target_time = 0.0
+        self.sim_mode = 'step' 
         
         try:
             self.status_bar.set_status("Resetting Kernel & Network...", "#E65100")
             QApplication.processEvents()
             
-            # 1. Visualisierung stoppen
+            # 3. Visualisierung stoppen
             if hasattr(self, 'simulation_view'):
-                self.simulation_view.stop_rendering_safe()
+                if hasattr(self.simulation_view, 'stop_rendering_safe'):
+                    self.simulation_view.stop_rendering_safe()
+                
+                # GUI Reset
+                self.simulation_view.update_time_display(0.0)
+                self.simulation_view.is_paused = True
+                self.simulation_view.update_button_styles()
 
-            # 2. NEST Reset
+            # 4. NEST Reset (Setzt die Zeit automatisch auf 0.0)
             nest.ResetKernel()
+            # nest.SetKernelStatus({'time': 0.0})  <--- ENTFERNT, da Fehlerursache
+            
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
             
-            # 3. Netz neu bauen
+            # 5. Netz neu bauen (Positionen beibehalten)
             for graph in graph_list:
                 for node in graph.node_list:
                     if not hasattr(node, 'positions') or not node.positions:
                         node.build()
                     node.populate_node()
             
-            # 4. Verbindungen
+            # 6. Verbindungen wiederherstellen
             graphs_dict = {g.graph_id: g for g in graph_list}
             create_nest_connections_from_stored(graphs_dict, verbose=False)
             
-            # 5. Visualisierung updaten
+            # 7. Visualisierung & Tools neu laden
             if self.main_stack.currentIndex() == 1 and hasattr(self, 'simulation_view'):
                 self.simulation_view.load_scene() 
+                # Wichtig: Injectors aus der Liste löschen, da GIDs ungültig sind
                 self.simulation_view.restore_injectors()
             
-            # 6. Recorder
+            # 8. Recorder & Live Dashboard Reset
             self.live_recorders = [] 
             self._ensure_spike_recorders()
             
-            # 7. Live Dashboard Rescan
             if hasattr(self, 'live_dashboard'):
+                self.live_dashboard.clear_all_plots()
+                # Kurze Verzögerung für Rescan, damit NEST bereit ist
                 QTimer.singleShot(200, self.live_dashboard.scan_for_devices)
 
-            self.status_bar.show_success("Reset Done. Ready.")
-            print("=== RESET COMPLETE: READY ===")
+            self.status_bar.show_success("Reset Done. Time set to 0.0 ms.")
+            print("=== RESET COMPLETE: TIME 0.0 ===")
             
         except Exception as e:
             self.status_bar.show_error(f"Reset Failed: {e}")
             print(f"Reset Error: {e}")
             import traceback; traceback.print_exc()
-
-
-
-    def on_sim_timer_timeout(self):
-        try:
-            # 1. Zeit prüfen (bei Continuous)
-            if self.sim_mode == 'continuous' and self.sim_target_time > 0:
-                try:
-                    current_time = nest.GetKernelStatus().get('time', 0.0)
-                    if current_time >= self.sim_target_time:
-                        self.pause_simulation()
-                        self.status_bar.show_success(f"Finished (Time: {current_time}ms)")
-                        if hasattr(self, 'simulation_view'):
-                            self.simulation_view.action_stop()
-                        return
-                except: pass
-
-            # 2. NEST Simulieren
-            nest.Simulate(self.sim_step_size)
-            
-            self._distribute_simulation_data()
-            
-            QApplication.processEvents()
-
-        except Exception as e:
-            self.sim_timer.stop()
-            if hasattr(self, 'simulation_view'):
-                self.simulation_view.is_paused = True
-            
-            error_msg = str(e)
-            
-            # --- FIX: InvalidNodeCollection stummschalten ---
-            # Das passiert, wenn ein Reset durchgeführt wurde, während der Timer noch lief.
-            if "InvalidNodeCollection" in error_msg:
-                print("Simulation loop stopped due to Kernel Reset (InvalidNodeCollection). This is expected.")
-                self.live_recorders = [] # Liste bereinigen
-                return # Silent exit, kein Popup für den User
-            # ------------------------------------------------
-            
-            print(f"CRITICAL SIM ERROR: {error_msg}")
-            
-            if "NumericalInstability" in error_msg:
-                self.status_bar.show_error("Numerical Instability! Reset required.")
-                QMessageBox.critical(self, "Crash", "Simulation crashed (Numerical Instability).\nPlease RESET.")
-            elif "Prepare called twice" in error_msg:
-                self.status_bar.show_error("Kernel corrupted. Reset required.")
-            else:
-                self.status_bar.show_error(f"Sim Error: {e}")
                 
     def _distribute_simulation_data(self):
         # 1. 3D View (Temp Recorder)
@@ -2458,11 +2600,14 @@ class MainWindow(QMainWindow):
 
             print("\nResetting Environment for Load...")
             nest.ResetKernel()
+            
+            # Interne Listen leeren
             global graph_list
             graph_list.clear()
             
-            global next_graph_id
-            next_graph_id = 0
+            # WICHTIG: Direkt im WidgetLib Modul zurücksetzen!
+            WidgetLib.next_graph_id = 0
+            WidgetLib.graph_parameters.clear()
 
             total_graphs = len(project_data['graphs'])
             
@@ -2471,17 +2616,22 @@ class MainWindow(QMainWindow):
                 self.status_bar.set_progress(20 + int(40 * (i/total_graphs)))
                 QApplication.processEvents()
 
+                gid = g_data['graph_id']
+                
+                # WICHTIG: Counter synchronisieren
+                # Wir setzen den Counter immer auf ID + 1 des höchsten geladenen Graphen
+                if gid >= WidgetLib.next_graph_id:
+                    WidgetLib.next_graph_id = gid + 1
+
                 graph = Graph(
                     graph_name=g_data.get('graph_name', 'LoadedGraph'),
-                    graph_id=g_data['graph_id'],
+                    graph_id=gid,
                     parameter_list=[],
                     polynom_max_power=g_data.get('polynom_max_power', 5),
                     position=g_data.get('init_position', [0,0,0]),
                     max_nodes=g_data.get('max_nodes', 100)
                 )
                 
-                next_graph_id = max(next_graph_id, g_data['graph_id'] + 1)
-
                 for nd in g_data['nodes']:
                     params = nd['parameters'].copy()
                     params['id'] = nd['id']
@@ -2508,7 +2658,7 @@ class MainWindow(QMainWindow):
                     new_node.populate_node()
 
                 graph_list.append(graph)
-                print(f"Graph '{graph.graph_name}' loaded and populated.")
+                print(f"Graph '{graph.graph_name}' loaded (ID: {gid}). Next ID set to: {WidgetLib.next_graph_id}")
 
 
             if hasattr(self, 'tools_widget'):
@@ -2530,6 +2680,14 @@ class MainWindow(QMainWindow):
             self.graph_overview.update_tree()
             self.connection_tool.refresh()
             self.graph_editor.refresh_graph_list()
+            # Update des Trees und der Tools
+            self.update_visualizations()
+            self.graph_overview.update_tree()
+            self.connection_tool.refresh()
+            self.graph_editor.refresh_graph_list()
+
+            if hasattr(self, 'graph_builder'):
+                self.graph_builder.reset()
 
             msg = f"Loaded {total_graphs} graphs. Connections: {created} created, {failed} failed."
             self.status_bar.show_success("Project loaded successfully!")
@@ -2821,7 +2979,16 @@ class MainWindow(QMainWindow):
             print(f"   Nodes added: {total_nodes}")
             print(f"   Connections: {conn_created} created, {conn_failed} failed")
             print(f"   Total graphs now: {len(graph_list)}")
-
+            # --- HIER EINFÜGEN: ---
+            # Globalen Counter aktualisieren, damit der nächste Graph eine freie ID bekommt
+            if graph_list:
+                current_max_id = max(g.graph_id for g in graph_list)
+                if current_max_id >= WidgetLib.next_graph_id:
+                    WidgetLib.next_graph_id = current_max_id + 1
+            
+            # UI im Graph Creator aktualisieren
+            if hasattr(self, 'graph_builder'):
+                self.graph_builder.reset()
             self.status_bar.show_success(f"Merged {len(merged_graphs)} graph(s)!")
             
             QMessageBox.information(
