@@ -2,14 +2,15 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSlider, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
-    QGridLayout, QFileDialog
+    QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator
 )
 import WidgetLib
 import pyqtgraph.dockarea as dock
 from PyQt6.QtGui import QColor, QPalette, QAction
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt,QSize
 import numpy as np
 import time
+from CustomExtension import CustomTabWidget
 import vtk
 import pyvista as pv
 from pyvistaqt import QtInteractor
@@ -217,6 +218,38 @@ def convert_widget_to_graph_format(graph_id):
     del graph_parameters[graph_id]
     return converted
 
+class PreviewWidget(QWidget):
+    """
+    Schwarzes quadratisches Widget für die Sidebar.
+    Behält immer Höhe = Breite basierend auf der verfügbaren Breite.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            background-color: #000000; 
+            border: 1px solid #333;
+        """)
+        self.setMinimumSize(80, 80)
+        self._updating = False  # Verhindert Rekursion
+        
+    def resizeEvent(self, event):
+        """Erzwingt quadratische Form basierend auf der Breite."""
+        if self._updating:
+            return super().resizeEvent(event)
+        
+        self._updating = True
+        width = event.size().width()
+        if self.height() != width:
+            self.setFixedHeight(width)
+        self._updating = False
+        super().resizeEvent(event)
+    
+    def sizeHint(self):
+        return QSize(150, 150)
+    
+    def minimumSizeHint(self):
+        return QSize(80, 80)
+
 
 def create_graph_from_widget(graph_id):
     global graph_list
@@ -349,7 +382,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Neuroticks")
+        self.setMinimumSize(1280, 720)  # Minimum für vernünftige Nutzung
         self.resize(1920, 1080)
+        
+        # Erlaube Vollbild und flexibles Resize
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.active_graphs = {}
         self.structural_plasticity_enabled = True 
         self.hidden_nodes = set() # Set of (graph_id, node_id)
@@ -499,8 +536,11 @@ class MainWindow(QMainWindow):
     def safe_reset_kernel(self, enable_structural_plasticity=False):
         
         if hasattr(self, 'status_bar'):
-            self.status_bar.showMessage("Resetting NEST kernel...")
+            # FIX: showMessage gibt es nicht -> set_status nutzen
+            self.status_bar.set_status("Resetting NEST kernel...", color="#FF5722")
+            QApplication.processEvents() # UI Update erzwingen
         
+        # Reset durchführen
         stats = safe_nest_reset_and_repopulate(
             self.graphs,
             enable_structural_plasticity=enable_structural_plasticity,
@@ -509,11 +549,15 @@ class MainWindow(QMainWindow):
         
         msg = (f"Reset complete: {stats['populations_created']} populations, "
                f"{stats['connections_created']} connections")
-        if hasattr(self, 'status_bar'):
-            self.status_bar.showMessage(msg, 5000)
         
-        if hasattr(self, 'update_visualization'):
-            self.update_visualization()
+        if hasattr(self, 'status_bar'):
+            # FIX: showMessage gibt es nicht -> show_success nutzen
+            # (Der Timeout-Parameter 5000 wird hier ignoriert, da show_success ihn nicht hat)
+            self.status_bar.show_success(msg)
+        
+        # FIX: Methodenname korrigiert (Plural: update_visualizations)
+        if hasattr(self, 'update_visualizations'):
+            self.update_visualizations()
         
         return stats
 
@@ -725,7 +769,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # --- SWITCH BAR ---
+        # --- 1. SWITCH BAR ---
         switch_bar = QWidget()
         switch_bar.setStyleSheet("background-color: #1a1a1a; border-bottom: 2px solid #333;")
         switch_bar.setFixedHeight(50) 
@@ -733,104 +777,145 @@ class MainWindow(QMainWindow):
         switch_layout.setContentsMargins(10, 5, 10, 5)
         switch_layout.setSpacing(10)
         
-        self.view_switch_style_active = """
-            QPushButton {
-                background-color: #2196F3; color: white; font-weight: bold;
-                border: none; border-radius: 4px; padding: 10px 40px; font-size: 14px;
-            }
-            QPushButton:hover { background-color: #42A5F5; }
-        """
-        self.view_switch_style_inactive = """
-            QPushButton {
-                background-color: #333; color: #aaa; font-weight: bold;
-                border: 1px solid #555; border-radius: 4px; padding: 10px 40px; font-size: 14px;
-            }
-            QPushButton:hover { background-color: #444; color: white; }
-        """
+        # Styles
+        self.view_switch_style_active = "QPushButton { background-color: #2196F3; color: white; font-weight: bold; border: none; border-radius: 4px; padding: 10px 30px; font-size: 14px; } QPushButton:hover { background-color: #42A5F5; }"
+        self.view_switch_style_inactive = "QPushButton { background-color: #333; color: #aaa; font-weight: bold; border: 1px solid #555; border-radius: 4px; padding: 10px 30px; font-size: 14px; } QPushButton:hover { background-color: #444; color: white; }"
         
+        # View Buttons
         self.btn_view_editor = QPushButton(" EDITOR")
         self.btn_view_simulation = QPushButton(" SIMULATION")
         self.btn_view_data = QPushButton(" DATA")
+        self.btn_view_custom = QPushButton(" EXTENSION")
         
-        self.btn_view_editor.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_view_simulation.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_view_data.setCursor(Qt.CursorShape.PointingHandCursor)
-        
-        self.btn_view_editor.setStyleSheet(self.view_switch_style_active)
-        self.btn_view_simulation.setStyleSheet(self.view_switch_style_inactive)
-        self.btn_view_data.setStyleSheet(self.view_switch_style_inactive)
+        for btn in [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom]:
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(self.view_switch_style_inactive)
 
         self.btn_view_editor.clicked.connect(lambda: self._switch_main_view(0))
         self.btn_view_simulation.clicked.connect(lambda: self._switch_main_view(1))
         self.btn_view_data.clicked.connect(lambda: self._switch_main_view(2))
+        self.btn_view_custom.clicked.connect(lambda: self._switch_main_view(3))
         
-        self.view_buttons = [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data]
+        self.view_buttons = [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom]
         
         switch_layout.addWidget(self.btn_view_editor)
         switch_layout.addWidget(self.btn_view_simulation)
         switch_layout.addWidget(self.btn_view_data)
+        switch_layout.addWidget(self.btn_view_custom)
         switch_layout.addStretch()
+
+        # --- 2. GLOBAL SIMULATION CONTROL ---
+        self.global_sim_control = QWidget()
+        self.global_sim_control.setStyleSheet("background-color: transparent;")
+        gsc_layout = QHBoxLayout(self.global_sim_control)
+        gsc_layout.setContentsMargins(0, 0, 0, 0)
+        gsc_layout.setSpacing(8)
         
-        lbl_title = QLabel("NEUROTICKS")
-        lbl_title.setStyleSheet("color: #666; font-weight: bold; font-size: 12px; letter-spacing: 3px;")
-        switch_layout.addWidget(lbl_title)
+        # Controls
+        lbl_step = QLabel("Res:"); lbl_step.setStyleSheet("color:#888;")
+        self.global_step_spin = QDoubleSpinBox()
+        self.global_step_spin.setRange(0.1, 1000); self.global_step_spin.setValue(25.0); self.global_step_spin.setSuffix(" ms")
+        self.global_step_spin.setFixedWidth(70); self.global_step_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
         
+        lbl_dur = QLabel("Target:"); lbl_dur.setStyleSheet("color:#888;")
+        self.global_duration_spin = QDoubleSpinBox()
+        self.global_duration_spin.setRange(0, 1e7); self.global_duration_spin.setValue(1000.0); self.global_duration_spin.setSuffix(" ms")
+        self.global_duration_spin.setFixedWidth(90); self.global_duration_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
+        
+        # Time Display (LCD Look)
+        self.global_time_label = QLabel("T: 0.0 ms")
+        self.global_time_label.setFixedWidth(100)
+        self.global_time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.global_time_label.setStyleSheet("background-color: #000; color: #00FF00; font-family: Consolas; font-size: 14px; font-weight: bold; border: 1px solid #444; padding: 2px;")
+        
+        # Buttons (Nur Start/Pause/Reset)
+        btn_style = "font-weight: bold; border-radius: 3px; padding: 5px 10px;"
+        
+        self.global_btn_start = QPushButton("▶")
+        self.global_btn_start.setStyleSheet(f"{btn_style} background-color: #2E7D32; color: white;")
+        self.global_btn_start.clicked.connect(self._global_start)
+        
+        self.global_btn_pause = QPushButton("⏸")
+        self.global_btn_pause.setStyleSheet(f"{btn_style} background-color: #FBC02D; color: black;")
+        self.global_btn_pause.clicked.connect(self._global_pause)
+        
+        self.global_btn_reset = QPushButton("↺")
+        self.global_btn_reset.setStyleSheet(f"{btn_style} background-color: #E65100; color: white;")
+        self.global_btn_reset.clicked.connect(self._global_reset)
+        
+        # Add to layout
+        gsc_layout.addWidget(lbl_step)
+        gsc_layout.addWidget(self.global_step_spin)
+        gsc_layout.addWidget(lbl_dur)
+        gsc_layout.addWidget(self.global_duration_spin)
+        gsc_layout.addWidget(self.global_time_label)
+        gsc_layout.addWidget(self.global_btn_start)
+        gsc_layout.addWidget(self.global_btn_pause)
+        gsc_layout.addWidget(self.global_btn_reset)
+        
+        switch_layout.addWidget(self.global_sim_control)
         main_layout.addWidget(switch_bar)
         
-        # --- STACK ---
+        # --- 3. STACK ---
         self.main_stack = QStackedWidget()
-        self.main_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) 
-        
         self.editor_widget = self._create_editor_widget()
-        self.main_stack.addWidget(self.editor_widget)
-
-        # --- SIMULATION VIEW SETUP ---
         self.simulation_view = SimulationViewWidget(graph_list, self)
-        
-        # FIX: Korrekte Signalnamen verwenden (sigPauseSimulation, sigStopSimulation)
-        self.simulation_view.sigPauseSimulation.connect(lambda: self.collect_simulation_results(duration=0))
-        self.simulation_view.sigStopSimulation.connect(lambda: self.collect_simulation_results(duration=0))
-        
-        self.main_stack.addWidget(self.simulation_view)
         self.live_dashboard = LiveDataDashboard(graph_list, self)
-        self.live_dashboard.sigStartLive.connect(self.start_continuous_simulation)
-        self.live_dashboard.sigPauseLive.connect(self.pause_simulation)
-        
-        # WICHTIG: Neuer Reset Slot
-        self.live_dashboard.sigResetLive.connect(self.reset_from_live_dashboard)
-        
-        self.main_stack.addWidget(self.live_dashboard)
+        self.custom_tab = CustomTabWidget(graph_list, self)
         self.data_view = self._create_data_view()
-        self.main_stack.addWidget(self.data_view)
+        
+        self.main_stack.addWidget(self.editor_widget)     # 0
+        self.main_stack.addWidget(self.simulation_view)   # 1
+        self.main_stack.addWidget(self.live_dashboard)    # 2
+        self.main_stack.addWidget(self.custom_tab)        # 3
         
         main_layout.addWidget(self.main_stack)
+
+        # --- 4. FINAL SYNC ---
+        self.sim_dashboard.sigDurationChanged.connect(self.global_duration_spin.setValue)
+        self.global_duration_spin.valueChanged.connect(self.sim_dashboard.update_duration_from_external)
         
         self.update_visualizations()
-        
-        # Initialisiert den Timer und verbindet die Steuersignale (Start/Step)
         self.init_simulation_timer()
+        self._switch_main_view(0)
+
 
     def _create_data_view(self):
         self.data_dashboard = AnalysisDashboard(graph_list) 
         return self.data_dashboard
     
     def _switch_main_view(self, index):
-        old_index = self.main_stack.currentIndex()
-        
-        # Index 1 ist der Simulation View
-        if old_index == 1:
-            print("Verlasse Simulation View -> Cleanup GL...")
-            if hasattr(self.simulation_view, 'cleanup_gl_context'):
-                self.simulation_view.cleanup_gl_context()
-            
         self.main_stack.setCurrentIndex(index)
         
-        # Buttons Styling update...
+        # Buttons Styling update
         for i, btn in enumerate(self.view_buttons):
             if i == index:
                 btn.setStyleSheet(self.view_switch_style_active)
             else:
                 btn.setStyleSheet(self.view_switch_style_inactive)
+        
+        # --- RENDERING CONTROL ---
+        if index == 1: # Simulation Tab
+            if hasattr(self, 'simulation_view') and self.simulation_view.scene_loaded:
+                self.simulation_view.start_rendering()
+        else:
+            if hasattr(self, 'simulation_view'):
+                self.simulation_view.stop_rendering_safe()
+                
+        if index == 2: # Data Tab
+            if hasattr(self, 'live_dashboard'):
+                self.live_dashboard.reload_and_center()
+            
+            # --- FIX: Auch das Analysis Dashboard aktualisieren! ---
+            if hasattr(self, 'data_dashboard'):
+                # Wir müssen sicherstellen, dass die Comboboxen neu befüllt werden
+                # Dafür nutzen wir die existierende Logik im TimeSeriesWidget via Dashboard
+                self.data_dashboard.refresh_all_tabs()
+                
+        # --- CUSTOM TAB HOOK ---
+        if index == 3: # Custom Tab
+            if hasattr(self, 'custom_tab'):
+                self.custom_tab.on_tab_active()
     
     
 
@@ -862,9 +947,15 @@ class MainWindow(QMainWindow):
         editor_layout.addLayout(bottom_layout, 2)
         
         return editor
+  
     
+
+
+
+
+
     def create_top_left(self):
-        """Visualization area with scene selector."""
+        """Visualization area with scene selector - UPDATED VERSION."""
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -875,33 +966,42 @@ class MainWindow(QMainWindow):
         
         scene_layout = QVBoxLayout()
         scene_layout.setContentsMargins(0, 0, 0, 0)
-        scene_layout.setSpacing(1)
+        scene_layout.setSpacing(0)
         
-        # Button Style
+        # Button Style - mit Umrandung wie Navigation Buttons
         nav_style = """
             QPushButton {
-                background-color: #444;
-                color: white;
-                border: none;
+                background-color: #333;
+                color: #aaa;
+                border: 1px solid #444;
                 border-radius: 0px;
                 font-weight: bold;
-                text-align: left;
-                padding-left: 15px;
-                min-height: 40px;
+                text-align: center;
+                padding: 5px;
             }
-            QPushButton:hover { background-color: #555; border-left: 4px solid #2196F3; }
-            QPushButton:checked { background-color: #666; border-left: 4px solid #2196F3; }
+            QPushButton:hover { 
+                background-color: #444; 
+                color: white;
+                border: 1px solid #2196F3; 
+            }
+            QPushButton:checked { 
+                background-color: #555; 
+                color: white;
+                border: 1px solid #2196F3;
+                border-left: 4px solid #2196F3; 
+            }
         """
         
         btn_neurons = QPushButton("Neurons")
         btn_graph = QPushButton("Graph")
         
+        # Firing Patterns Container mit Slider
         self.firing_patterns_container = QWidget()
         fp_layout = QVBoxLayout(self.firing_patterns_container)
         fp_layout.setContentsMargins(0, 0, 0, 0)
         fp_layout.setSpacing(0)
         
-        btn_sim = QPushButton("Firing Patterns")
+        btn_sim = QPushButton("Firing\nPatterns")
         
         self.slider_wrapper = QWidget()
         self.slider_wrapper.setStyleSheet("background-color: #3a3a3a; border-left: 4px solid #FFD700;")
@@ -938,26 +1038,41 @@ class MainWindow(QMainWindow):
         fp_layout.addWidget(btn_sim)
         fp_layout.addWidget(self.slider_wrapper)
         
-        btn_flow = QPushButton("Positional Flowfield")
+        btn_flow = QPushButton("Positional\nFlowfield")
         btn_simulation = QPushButton("Simulation")
         btn_other = QPushButton("Other")
         
-        for btn in [btn_neurons, btn_graph, btn_flow, btn_simulation, btn_other]:
+        # Alle Buttons mit Style und Expanding Policy
+        all_nav_buttons = [btn_neurons, btn_graph, btn_sim, btn_flow, btn_simulation, btn_other]
+        for btn in all_nav_buttons:
             btn.setStyleSheet(nav_style)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            btn.setCheckable(True)
         
-        btn_sim.setStyleSheet(nav_style)
+        # Buttons-Container (nimmt den Platz ÜBER dem schwarzen Widget)
+        buttons_container = QWidget()
+        buttons_layout = QVBoxLayout(buttons_container)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(1)
         
-        scene_layout.addWidget(btn_neurons)
-        scene_layout.addWidget(btn_graph)
-        scene_layout.addWidget(self.firing_patterns_container) 
-        scene_layout.addWidget(btn_flow)
-        scene_layout.addWidget(btn_simulation)
-        scene_layout.addWidget(btn_other)
-            
-        scene_layout.addStretch()
+        # Buttons gleichmäßig verteilt (stretch factor 1 für jeden)
+        buttons_layout.addWidget(btn_neurons, 1)
+        buttons_layout.addWidget(btn_graph, 1)
+        buttons_layout.addWidget(self.firing_patterns_container, 1)
+        buttons_layout.addWidget(btn_flow, 1)
+        buttons_layout.addWidget(btn_simulation, 1)
+        buttons_layout.addWidget(btn_other, 1)
+        
+        # === SCHWARZES QUADRATISCHES WIDGET ===
+        self.preview_widget = PreviewWidget()
+        
+        # Hauptlayout für scene_menu
+        scene_layout.addWidget(buttons_container, 1)  # Buttons bekommen flex-Anteil
+        scene_layout.addWidget(self.preview_widget, 0)  # Preview hat feste Größe (quadratisch)
+        
         scene_menu.setLayout(scene_layout)
         
+        # Visualisierungs-Stack
         self.vis_stack = QStackedWidget()
         
         self.neuron_plotter = self.create_neuron_visualization()
@@ -970,7 +1085,8 @@ class MainWindow(QMainWindow):
         self.vis_stack.addWidget(self.blink_widget)        
         self.vis_stack.addWidget(self.flow_widget)  
         self.sim_dashboard = SimulationDashboardWidget(graph_list)
-        # HEADLESS SIGNALE VERBINDEN
+        
+        # Headless Signale verbinden
         self.sim_dashboard.requestStartSimulation.connect(self.start_headless_simulation)
         self.sim_dashboard.requestStopSimulation.connect(self.stop_headless_simulation)
         self.sim_dashboard.requestResetKernel.connect(self.manual_nest_reset)
@@ -987,15 +1103,14 @@ class MainWindow(QMainWindow):
         btn_simulation.clicked.connect(lambda: self._switch_view(4))
         btn_other.clicked.connect(lambda: self._switch_view(5))
         
-        for btn in self.nav_buttons:
-            btn.setCheckable(True)
-        
         btn_neurons.setChecked(True)
         
         layout.addWidget(scene_menu, 1)
         layout.addWidget(self.vis_stack, 9)
         
         return layout
+        
+    
     def start_headless_simulation(self, duration):
         """
         Startet die Simulation ohne grafische Updates.
@@ -1033,22 +1148,29 @@ class MainWindow(QMainWindow):
 
     def headless_loop_step(self):
         try:
-            # 1. Simulieren
-            nest.Simulate(self.headless_step_size)
-            
-            # 2. Zeit prüfen
+            # NEST Zeit holen
             current_time = nest.GetKernelStatus().get('time', 0.0)
             
-            # 3. Progress Update
-            # (Berechnung relativ zum Start schwer, hier einfach visual feedback)
-            # Wir lassen den Balken einfach pulsieren oder laufen
+            # Wie viel fehlt noch?
+            remaining = self.headless_target_time - current_time
+            
+            if remaining <= 0.0001:
+                self.finish_headless_simulation()
+                return
+
+            # Schrittweite anpassen (Maximal 50ms oder Rest)
+            step_to_take = min(self.headless_step_size, remaining)
+
+            # 1. Simulieren
+            nest.Simulate(step_to_take)
+            
+            # 2. Zeit prüfen (nach Schritt)
+            current_time = nest.GetKernelStatus().get('time', 0.0)
+            
+            # 3. Progress Update (Visueller Effekt)
             prog = int((current_time % 1000) / 10) 
             self.status_bar.set_progress(prog)
             
-            # 4. Abbruchbedingung
-            if current_time >= self.headless_target_time:
-                self.finish_headless_simulation()
-                
         except Exception as e:
             self.headless_timer.stop()
             self.stop_headless_simulation(error_msg=str(e))
@@ -1100,6 +1222,7 @@ class MainWindow(QMainWindow):
             
         # Reset aufrufen
         self.reset_and_restart()
+        self.simulation_view.update_time_display(0.0)
 
 
 
@@ -1857,7 +1980,13 @@ class MainWindow(QMainWindow):
 
 
     def plot_graph_skeleton(self):
-
+        """
+        Aktualisierte Visualisierung für den Editor:
+        - Gekrümmte Pfeile (Splines) statt gerader Linien.
+        - Farbcodierung nach Gewicht (Rot=Ex, Blau=Inh).
+        - Orange Aura für Knoten mit Geräten.
+        - Große Hitboxen für einfache Selektion.
+        """
         self.graph_plotter.clear()
         
         self.highlighted_actor = None
@@ -1866,8 +1995,7 @@ class MainWindow(QMainWindow):
         
         self.skeleton_info_map = {}
         
-        cmap = plt.get_cmap("tab20")
-        
+        # Tooltip Actor Setup
         self.tooltip_actor = vtk.vtkTextActor()
         self.tooltip_actor.GetTextProperty().SetFontSize(16)
         self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 0.0) 
@@ -1877,31 +2005,57 @@ class MainWindow(QMainWindow):
         self.tooltip_actor.SetVisibility(False)
         self.graph_plotter.renderer.AddViewProp(self.tooltip_actor)
         
+        # Node Map für schnellen Zugriff
         node_map = {}
         for graph in graph_list:
             for node in graph.node_list:
                 node_map[(graph.graph_id, node.id)] = node
 
+        import random
+
         for graph in graph_list:
+            # Basis-Graph-Farbe (für Nodes)
+            cmap = plt.get_cmap("tab20")
             rgba = cmap(graph.graph_id % 20)
             graph_color = rgba[:3]
-            graph_name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
             
             for node in graph.node_list:
                 center = np.array(node.center_of_mass)
-                sphere = pv.Sphere(radius=0.4, center=center)
                 
-                actor = self.graph_plotter.add_mesh(
+                # --- 1. NODE DARSTELLUNG ---
+                sphere = pv.Sphere(radius=0.5, center=center)
+                node_actor = self.graph_plotter.add_mesh(
                     sphere,
                     color=graph_color,
-                    opacity=0.6,
+                    opacity=0.8,
                     smooth_shading=True,
                     pickable=True
                 )
                 
-                info_text = f"NODE: {node.name} (ID: {node.id})"
-                self.skeleton_info_map[actor] = info_text
+                # Info Text
+                n_pops = len(node.population) if hasattr(node, 'population') and node.population else 0
+                info_text = f"NODE: {node.name} (ID: {node.id})\nGraph: {graph.graph_id}\nPops: {n_pops}"
+                self.skeleton_info_map[node_actor] = info_text
                 
+                # --- 2. GERÄTE AURA (Orange Glow) ---
+                # Prüfen ob Devices vorhanden sind (in Config oder Runtime)
+                has_devices = False
+                if hasattr(node, 'devices') and node.devices:
+                    has_devices = True
+                elif hasattr(node, 'parameters') and node.parameters.get('devices'):
+                    has_devices = True
+                
+                if has_devices:
+                    aura = pv.Sphere(radius=0.9, center=center)
+                    self.graph_plotter.add_mesh(
+                        aura,
+                        color="#FF9800", # Orange
+                        opacity=0.15,    # Sehr transparent
+                        pickable=False,  # Klicks gehen durch auf den Node
+                        smooth_shading=True
+                    )
+
+                # --- 3. VERBINDUNGEN (Curved Arrows) ---
                 if hasattr(node, 'connections') and node.connections:
                     for conn in node.connections:
                         try:
@@ -1913,59 +2067,105 @@ class MainWindow(QMainWindow):
                             
                             if target_node:
                                 conn_name = conn.get('name', 'Connection')
-                                info_text = f"CONN: {conn_name}\nFrom: {node.name} -> To: {target_node.name}"
-
+                                params = conn.get('params', {})
+                                weight = float(params.get('weight', 0.0))
+                                
+                                # Farb-Logik
+                                if weight > 0:
+                                    edge_color = "#FF3333" # Rot (Excitatory)
+                                elif weight < 0:
+                                    edge_color = "#3366FF" # Blau (Inhibitory)
+                                else:
+                                    edge_color = "white"   # Neutral/Cut
+                                
                                 start = np.array(node.center_of_mass)
                                 end = np.array(target_node.center_of_mass)
+                                
+                                conn_info_text = (f"CONN: {conn_name}\n"
+                                                  f"{node.name} -> {target_node.name}\n"
+                                                  f"Weight: {weight}")
 
+                                # Self-Loop (Ring)
                                 if node == target_node:
-                                    torus = pv.ParametricTorus(ringradius=0.6, crosssectionradius=0.05) 
-                                    torus.translate([0, 0, 0.5])
+                                    torus = pv.ParametricTorus(ringradius=1.2, crosssectionradius=0.08)
+                                    # Leicht kippen und verschieben für Sichtbarkeit
+                                    torus.rotate_x(45)
                                     torus.translate(start)
                                     
-                                    conn_actor = self.graph_plotter.add_mesh(
-                                        torus,
-                                        color=graph_color,
-                                        opacity=0.8,
+                                    actor_self = self.graph_plotter.add_mesh(
+                                        torus, color=edge_color, opacity=0.9, pickable=True
+                                    )
+                                    self.skeleton_info_map[actor_self] = conn_info_text + " (Self)"
+                                
+                                else:
+                                    # --- CURVED TRAJECTORY ---
+                                    mid_point = (start + end) / 2.0
+                                    
+                                    # Random Offset für Curve (verhindert Überlappung)
+                                    # Wir nutzen die IDs für deterministischen "Zufall", damit es beim Redraw nicht flackert
+                                    seed = node.id * 100 + target_node.id
+                                    random.seed(seed)
+                                    
+                                    offset = np.array([
+                                        random.uniform(-3, 3),
+                                        random.uniform(-3, 3),
+                                        random.uniform(1, 4) # Bogen leicht nach oben
+                                    ])
+                                    control_point = mid_point + offset
+                                    
+                                    # Spline erstellen (Kurve)
+                                    points = np.array([start, control_point, end])
+                                    spline = pv.Spline(points, n_points=20)
+                                    
+                                    # 1. Dünne Linie (Visual)
+                                    actor_line = self.graph_plotter.add_mesh(
+                                        spline, 
+                                        color=edge_color, 
+                                        line_width=2.0, 
+                                        render_lines_as_tubes=True,
+                                        pickable=False # Klick geht auf Hitbox
+                                    )
+                                    
+                                    # 2. Unsichtbare Röhre (Hitbox)
+                                    # Radius groß genug zum leichten Klicken
+                                    hitbox = spline.tube(radius=0.4)
+                                    actor_hitbox = self.graph_plotter.add_mesh(
+                                        hitbox,
+                                        color=edge_color,
+                                        opacity=0.0, # Unsichtbar (oder 0.05 für Debugging)
                                         pickable=True
                                     )
-                                    self.skeleton_info_map[conn_actor] = info_text + " (Self)"
-
-                                else:
-                                    direction_vec = end - start
-                                    dist = np.linalg.norm(direction_vec)
+                                    self.skeleton_info_map[actor_hitbox] = conn_info_text
                                     
-                                    if dist > 0.1:
-                                        direction_norm = direction_vec / dist
-                                        
-                                        offset_start = 0.4
-                                        offset_end = 0.4
-                                        arrow_start = start + (direction_norm * offset_start)
-                                        
-                                        raw_length = dist - (offset_start + offset_end)
-                                        arrow_length = max(0.1, raw_length)
-
-                                        arrow = pv.Arrow(
-                                            start=arrow_start, 
-                                            direction=direction_norm, 
-                                            scale=arrow_length,
-                                            tip_length=min(0.25, 0.4 / arrow_length), 
-                                            tip_radius=0.08,  
-                                            shaft_radius=0.02  
-                                        )
-                                        
-                                        conn_actor = self.graph_plotter.add_mesh(
-                                            arrow, 
-                                            color=graph_color, 
-                                            opacity=0.8,
-                                            pickable=True,
-                                            smooth_shading=True
-                                        )
-                                        self.skeleton_info_map[conn_actor] = info_text
+                                    # 3. Pfeilspitze (Cone) am Ende
+                                    # Wir berechnen die Richtung basierend auf den letzten Punkten des Splines
+                                    last_pt = spline.points[-1]
+                                    prev_pt = spline.points[-3] # Ein Stück zurück für besseren Vektor
+                                    direction = last_pt - prev_pt
+                                    norm = np.linalg.norm(direction)
+                                    if norm > 0: direction /= norm
+                                    
+                                    # Position etwas vor dem Ziel-Node, damit die Spitze nicht im Node verschwindet
+                                    cone_pos = end - (direction * 0.5)
+                                    
+                                    arrow_head = pv.Cone(
+                                        center=cone_pos,
+                                        direction=direction,
+                                        height=0.6,
+                                        radius=0.25,
+                                        resolution=12
+                                    )
+                                    
+                                    actor_head = self.graph_plotter.add_mesh(
+                                        arrow_head,
+                                        color=edge_color,
+                                        pickable=False
+                                    )
 
                         except Exception as e:
-                            print(f"Error plotting conn: {e}")
+                            print(f"Error plotting connection skeleton: {e}")
 
+        # Observer neu setzen für Tooltips
         try:
             self.graph_plotter.iren.remove_observer(self._observer_tag)
         except:
@@ -1974,6 +2174,7 @@ class MainWindow(QMainWindow):
             "MouseMoveEvent", self._on_skeleton_hover
         )
         
+        self.graph_plotter.reset_camera()
         self.graph_plotter.update()
 
 
@@ -1992,7 +2193,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'sim_timer'):
             self.sim_timer.setInterval(delay)
             # Hinweis: setInterval wirkt beim nächsten Tick des Timers.
-    
+    def update_simulation_target(self, new_duration):
+        """
+        Aktualisiert die Zielzeit, wenn sich die Duration im UI ändert.
+        Funktioniert auch während laufender Simulation.
+        """
+        if hasattr(self, 'sim_timer') and self.sim_timer.isActive():
+            # Wenn Simulation läuft: Zielzeit relativ zur aktuellen Zeit setzen
+            self.sim_target_time = self.current_nest_time + new_duration
+            print(f"  -> Target updated to {self.sim_target_time}ms")
+        else:
+            # Wenn nicht aktiv: Einfach als absolute Zeit speichern
+            self.sim_target_time = new_duration
     def _on_skeleton_hover(self, interactor, event):
 
         x, y = interactor.GetEventPosition()
@@ -2086,57 +2298,118 @@ class MainWindow(QMainWindow):
             import traceback; traceback.print_exc()
 
     def _ensure_spike_recorders(self):
-        """Verbindet Recorder nur mit Spiking-Modellen."""
+        """
+        Erstellt unsichtbare Spike-Recorder für JEDE Population,
+        damit die 3D-Visualisierung immer funktioniert, auch wenn der User
+        keine eigenen Recorder angelegt hat.
+        """
+        # Liste leeren, aber vorher alte Recorder in NEST löschen geht nicht einfach,
+        # daher einfach neu initialisieren. NEST Reset räumt eh auf.
         self.live_recorders = []
         
-        # Blacklist für Rate/Analog Modelle
+        # Modelle, die nicht spiken können
         non_spiking = [
             'siegert_neuron', 'mcculloch_pitts_neuron', 
             'rate_neuron_ipn', 'rate_neuron_opn', 'gif_pop_psc_exp',
-            'ht_neuron' # Oft auch problematisch wenn nicht konfiguriert
+            'ht_neuron' 
         ]
         
         for graph in graph_list:
             for node in graph.node_list:
                 if hasattr(node, 'population'):
-                    for i, pop in enumerate(node.population):
+                    for pop in node.population:
                         if pop is None: continue
                         
                         try:
-                            # Check Model
+                            # Modell prüfen
                             model = nest.GetStatus(pop, 'model')[0]
                             if model in non_spiking:
                                 continue
                                 
-                            # Check Recorders (Vermeide doppelte)
-                            # Hier erstellen wir aber temporäre für die 3D Sicht.
-                            
+                            # Recorder erstellen
                             rec = nest.Create("spike_recorder")
+                            
+                            # WICHTIG: record_to auf 'memory' setzen
+                            nest.SetStatus(rec, {"record_to": "memory"})
+                            
                             nest.Connect(pop, rec)
+                            
+                            # Als NodeCollection zur Liste hinzufügen
                             self.live_recorders.append(rec)
-                        except Exception:
-                            # Silent Fail (z.B. wenn Modell keine Spikes hat)
-                            pass
+                            
+                        except Exception as e:
+                            print(f"Warning creating live recorder: {e}")
 
     def init_simulation_timer(self):
         self.sim_timer = QTimer()
-        self.sim_timer.setTimerType(Qt.TimerType.PreciseTimer) # Wichtig für Präzision
+        self.sim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.sim_timer.timeout.connect(self.on_sim_timer_timeout)
         
-        # Status-Variablen
         self.sim_mode = 'continuous' 
         self.sim_target_time = 0.0
         self.current_nest_time = 0.0
         
+        # NEU: Drosselung für GUI Updates (verhindert Einfrieren bei kleinen Steps)
+        self.last_ui_update_realtime = 0.0
+        
         if hasattr(self, 'simulation_view'):
-            self.simulation_view.sigStartContinuous.connect(self.start_continuous_simulation)
-            self.simulation_view.sigStepSimulation.connect(self.step_simulation)
-            self.simulation_view.sigPauseSimulation.connect(self.pause_simulation)
-            self.simulation_view.sigStopSimulation.connect(self.stop_simulation)
-            self.simulation_view.sigResetSimulation.connect(self.reset_and_restart)
-            # Slider steuert direkt das Timer-Intervall
             self.simulation_view.sigSpeedChanged.connect(self.update_simulation_speed)
+        
 
+    # === GLOBAL SIMULATION CONTROL METHODS ===
+    def _global_start(self):
+        """Start über globale Konsole."""
+        step = self.global_step_spin.value()
+        duration = self.global_duration_spin.value()
+        self.start_continuous_simulation(step, duration)
+        self._update_global_button_state('running')
+    
+    def _global_step(self):
+        """Single Step über globale Konsole."""
+        step = self.global_step_spin.value()
+        self.step_simulation(step)
+    
+    def _global_pause(self):
+        """Pause über globale Konsole."""
+        self.pause_simulation()
+        self._update_global_button_state('paused')
+    
+    def _global_stop(self):
+        """Stop über globale Konsole."""
+        self.stop_simulation()
+        self._update_global_button_state('stopped')
+    
+    def _global_reset(self):
+        """Reset über globale Konsole."""
+        self.reset_and_restart()
+        self._update_global_button_state('stopped')
+        self.global_time_label.setText("T: 0.0 ms")
+    
+    def _update_global_button_state(self, state):
+        base = "font-weight: bold; border-radius: 3px; padding: 5px 10px;"
+        
+        if state == 'running':
+            self.global_btn_start.setEnabled(False)
+            self.global_btn_start.setStyleSheet(f"{base} background-color: #1B5E20; color: #666;") # Dunkelgrün
+            self.global_btn_pause.setEnabled(True)
+            self.global_btn_pause.setStyleSheet(f"{base} background-color: #FBC02D; color: black;")
+        
+        elif state == 'paused' or state == 'stopped':
+            self.global_btn_start.setEnabled(True)
+            self.global_btn_start.setStyleSheet(f"{base} background-color: #2E7D32; color: white;") # Hellgrün
+            self.global_btn_pause.setEnabled(False)
+            self.global_btn_pause.setStyleSheet(f"{base} background-color: #555; color: #888;")
+    
+    def update_global_time_display(self, time_ms=None):
+        if not hasattr(self, 'global_time_label'): return
+        
+        if time_ms is None:
+            try: time_ms = nest.GetKernelStatus().get('time', 0.0)
+            except: time_ms = 0.0
+
+        # Einfaches SetText + Repaint
+        self.global_time_label.setText(f"{float(time_ms):.1f} ms")
+        self.global_time_label.repaint()
     def update_simulation_speed(self, slider_value):
         """
         Wandelt Slider-Wert (0-200) direkt in Timer-Intervall (ms) um.
@@ -2148,42 +2421,40 @@ class MainWindow(QMainWindow):
 
 
     def start_continuous_simulation(self, step_size, max_duration):
-        print(f"Starting Continuous Run (Step: {step_size}ms)")
+        # Werte direkt aus den globalen Widgets holen
+        step_val = self.global_step_spin.value()
+        duration_val = self.global_duration_spin.value() # Das ist "Run for X ms"
         
         self.sim_mode = 'continuous'
-        self.sim_step_size = step_size
+        self.sim_step_size = step_val
         
-        # Zeit holen und Sicherheits-Check
         try:
             stat = nest.GetKernelStatus()
             self.current_nest_time = stat.get('time', 0.0)
         except:
             self.current_nest_time = 0.0
             
-        print(f"  Current NEST Time: {self.current_nest_time} ms")
+        print(f"Starting Continuous Run from {self.current_nest_time} ms")
 
-        # Zielzeit Logik (Absolutzeit)
-        # Wenn max_duration > aktuelle Zeit -> Lauf bis dahin.
-        # Wenn max_duration <= aktuelle Zeit -> Lauf unendlich.
-        if max_duration > self.current_nest_time:
-            self.sim_target_time = max_duration
-            print(f"  -> Target set to {max_duration}ms")
+        # LOGIK: Ziel ist IMMER "Jetzt + Dauer", wenn Dauer > 0
+        if duration_val > 0:
+            self.sim_target_time = self.current_nest_time + duration_val
+            print(f"  -> Target set to {self.sim_target_time:.1f}ms (+{duration_val}ms)")
         else:
             self.sim_target_time = float('inf')
-            print("  -> Target <= Current. Switching to INFINITE RUN.")
+            print("  -> Infinite Run (Duration = 0)")
 
         self.status_bar.set_status("Running...", "#2E7D32")
         self._ensure_spike_recorders()
 
         self.sim_timer.setSingleShot(False)
         
-        delay = 0
+        # Rendering aktivieren
         if hasattr(self, 'simulation_view'):
-            delay = self.simulation_view.slider_speed.value()
-            self.simulation_view.is_paused = False
-            self.simulation_view.update_button_styles()
+            self.simulation_view.start_rendering()
             
-        self.sim_timer.start(delay)
+        self.sim_timer.start(0)
+
 
     def step_simulation(self, step_size):
         """Führt genau einen Schritt aus."""
@@ -2191,21 +2462,32 @@ class MainWindow(QMainWindow):
         self.sim_mode = 'step'
         self.sim_step_size = step_size
         
-        self.sim_timer.setSingleShot(True) # Nur einmal feuern!
+        self.sim_timer.setSingleShot(True)
         self._ensure_spike_recorders()
-        self.sim_timer.start(0) # Sofort ausführen
+        self.sim_timer.start(0)
 
 
     def pause_simulation(self):
         print("Simulation Paused")
         self.sim_timer.stop()
         self.status_bar.set_status("Paused", "#FBC02D")
+        
+        # Rendering stoppen
+        if hasattr(self, 'simulation_view'):
+            self.simulation_view.stop_rendering_safe()
+        
+        self._update_global_button_state('paused')
 
     def stop_simulation(self):
         print("Simulation Stopped")
         self.sim_timer.stop()
         self.collect_simulation_results(0)
         self.status_bar.set_status("Stopped", "#D32F2F")
+        
+        if hasattr(self, 'simulation_view'):
+            self.simulation_view.stop_rendering_safe()
+            
+        self._update_global_button_state('stopped')
 
     
 
@@ -2252,53 +2534,45 @@ class MainWindow(QMainWindow):
 
     def on_sim_timer_timeout(self):
         try:
-            # 1. Zielzeit Prüfung (nur wenn nicht unendlich)
             if self.sim_mode == 'continuous' and self.sim_target_time != float('inf'):
-                # Zeit holen ohne Crash-Gefahr
-                stat = nest.GetKernelStatus()
-                curr = stat.get('time', stat.get('biological_time', 0.0))
-                
-                if curr >= self.sim_target_time:
+                remaining = self.sim_target_time - self.current_nest_time
+                if remaining <= 0.0001: 
                     self.pause_simulation()
-                    self.status_bar.show_success(f"Target reached ({curr}ms).")
+                    # Status Update bei Zielerreichung
+                    self.update_global_time_display(self.current_nest_time)
+                    self.status_bar.show_success(f"Target reached ({self.current_nest_time:.1f}ms).")
                     return
+                step_to_take = min(self.sim_step_size, remaining)
+            else:
+                step_to_take = self.sim_step_size
 
-            # 2. Schritt simulieren
-            nest.Simulate(self.sim_step_size)
+            # Simulieren
+            nest.Simulate(step_to_take)
             
-            # 3. Zeit für GUI updaten
-            stat = nest.GetKernelStatus()
-            self.current_nest_time = stat.get('time', stat.get('biological_time', 0.0))
+            # Zeit holen
+            self.current_nest_time = nest.GetKernelStatus().get('time', 0.0)
             
-            if hasattr(self, 'simulation_view'):
-                self.simulation_view.update_time_display(self.current_nest_time)
-            
-            # 4. Daten visualisieren
+            # --- GUI UPDATE (Immer) ---
+            self.update_global_time_display(self.current_nest_time)
             self._distribute_simulation_data()
-            
-            # 5. GUI responsive halten
             QApplication.processEvents()
             
         except Exception as e:
             self.sim_timer.stop()
-            # Fehler im Continuous Mode -> Pause Status setzen
-            if hasattr(self, 'simulation_view'):
-                self.simulation_view.is_paused = True
-                self.simulation_view.update_button_styles()
-            
-            err = str(e)
-            if "InvalidNodeCollection" not in err: # Reset-Fehler ignorieren
-                print(f"Sim Error: {err}")
+            self.status_bar.show_error(f"Sim Error: {e}")
+            print(f"Sim Error: {e}")
+            import traceback; traceback.print_exc()
+
+
 
     def reset_and_restart(self, duration=None):
-        """
-        Kompletter Reset des Kernels und Neuaufbau.
-        """
         print("\n=== RESETTING SIMULATION ===")
-        
-        # 1. Timer stoppen
         if hasattr(self, 'sim_timer'):
             self.sim_timer.stop()
+        
+        self.current_nest_time = 0.0
+        self.sim_target_time = 0.0
+
         
         # 2. ZEIT-VARIABLEN ZURÜCKSETZEN (Lokal)
         self.current_nest_time = 0.0
@@ -2325,7 +2599,11 @@ class MainWindow(QMainWindow):
             
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
+            self.current_nest_time = 0.0
+            self.update_global_time_display(0.0)
+            self._update_global_button_state('stopped')
             
+            print("=== RESET COMPLETE: TIME 0.0 ===")
             # 5. Netz neu bauen (Positionen beibehalten)
             for graph in graph_list:
                 for node in graph.node_list:
@@ -2348,37 +2626,157 @@ class MainWindow(QMainWindow):
             self._ensure_spike_recorders()
             
             if hasattr(self, 'live_dashboard'):
-                self.live_dashboard.clear_all_plots()
-                # Kurze Verzögerung für Rescan, damit NEST bereit ist
+                self.live_dashboard.clear_all_data()
+                # self.live_dashboard.set_simulation_state('stopped') # <--- ENTFERNT
+                
+                # Kurze Verzögerung für Rescan, damit NEST-Objekte sicher da sind
                 QTimer.singleShot(200, self.live_dashboard.scan_for_devices)
-
-            self.status_bar.show_success("Reset Done. Time set to 0.0 ms.")
+                
+            self.update_global_time_display(0.0)
+            self._update_global_button_state('stopped')
             print("=== RESET COMPLETE: TIME 0.0 ===")
             
         except Exception as e:
             self.status_bar.show_error(f"Reset Failed: {e}")
             print(f"Reset Error: {e}")
             import traceback; traceback.print_exc()
-                
-    def _distribute_simulation_data(self):
-        # 1. 3D View (Temp Recorder)
-        if hasattr(self, 'live_recorders'):
-            all_spikes = []
-            for rec in self.live_recorders:
-                try:
-                    ev = nest.GetStatus(rec, 'events')[0]
-                    if len(ev['times']) > 0:
-                        all_spikes.extend(ev['senders'])
-                        nest.SetStatus(rec, {'n_events': 0})
-                except: pass
-            
-            if all_spikes and hasattr(self, 'simulation_view'):
-                self.simulation_view.feed_spikes(all_spikes)
+ 
 
-        # 2. Live Dashboard (User Recorder)
-        if hasattr(self, 'live_dashboard'):
-            self.live_dashboard.update_plots()
-    
+
+
+
+    def _distribute_simulation_data(self):
+        """
+        Zentrale Daten-Pipeline.
+        Fixed: Robuste Iteration für Live-Visualisierung (kein Batch-Crash mehr).
+        """
+        # 1. Zeitstempel holen
+        try:
+            k_stat = nest.GetKernelStatus()
+            sim_time = k_stat.get('time', k_stat.get('biological_time', 0.0))
+        except:
+            sim_time = 0.0
+
+        # =========================================================
+        # BAHN 1: VISUELLE ANIMATION (Live Recorders)
+        # =========================================================
+        if hasattr(self, 'simulation_view') and self.simulation_view.isVisible():
+            if hasattr(self, 'live_recorders') and self.live_recorders:
+                visual_spikes_flat = []
+                
+                # FIX: Wir iterieren wieder einzeln über die Recorder.
+                # Das ist sicher, da NEST Listen von Collections nicht direkt mag.
+                for rec in self.live_recorders:
+                    try:
+                        # rec ist eine NodeCollection
+                        st = nest.GetStatus(rec)[0]
+                        
+                        if st.get('n_events', 0) > 0:
+                            events = st.get('events', {})
+                            if 'senders' in events:
+                                senders = events['senders']
+                                # Numpy zu Liste
+                                if hasattr(senders, 'tolist'):
+                                    visual_spikes_flat.extend(senders.tolist())
+                                else:
+                                    visual_spikes_flat.extend(senders)
+                            
+                            # Puffer leeren (Wichtig!)
+                            nest.SetStatus(rec, {'n_events': 0})
+                    except Exception:
+                        pass # Einzelner Fehler soll Loop nicht killen
+
+                # Direkt an Animator senden
+                if visual_spikes_flat:
+                    self.simulation_view.feed_spikes(visual_spikes_flat)
+
+        # =========================================================
+        # BAHN 2: DATEN-ANALYSE & HISTORY (User Devices)
+        # =========================================================
+        
+        live_data_snapshot = {} 
+        has_dashboard_data = False
+        
+        # Iteriere über Graphen -> Nodes -> Devices
+        graphs = getattr(self, 'active_graphs', {}).values()
+        if not graphs: graphs = graph_list
+
+        for graph in graphs:
+            for node in graph.node_list:
+                if not hasattr(node, 'devices') or not node.devices:
+                    continue
+                
+                # History initialisieren
+                if "history" not in node.results: 
+                    node.results["history"] = []
+                
+                # Daten-Paket für diesen Zeitschritt
+                step_record = {
+                    "time": sim_time, 
+                    "devices": {}
+                }
+                data_in_step = False
+
+                for dev in node.devices:
+                    gid = dev.get('runtime_gid')
+                    model = dev.get('model', '')
+                    dev_id = dev.get('id')
+                    
+                    if gid is None: continue
+                    
+                    # Nur Recorder/Meter des Users
+                    if "recorder" in model or "meter" in model:
+                        try:
+                            # Robustes GID-Handling
+                            nest_handle = gid 
+                            dict_key = None
+                            
+                            # Key für Python Dict (Int) extrahieren
+                            if hasattr(gid, 'tolist'):
+                                vals = gid.tolist()
+                                dict_key = vals[0] if vals else None
+                            elif isinstance(gid, (list, tuple)):
+                                dict_key = gid[0] if gid else None
+                            else:
+                                dict_key = gid
+                                # Handle muss für NEST oft iterable sein
+                                nest_handle = [gid]
+                                
+                            if dict_key is None: continue
+
+                            # Daten holen
+                            status = nest.GetStatus(nest_handle)[0]
+                            if status.get('n_events', 0) > 0:
+                                events = status.get('events', {})
+                                
+                                # A) Für History bereinigen
+                                clean_events = {k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in events.items()}
+                                
+                                step_record["devices"][str(dev_id)] = {
+                                    "type": model,
+                                    "events": clean_events
+                                }
+                                data_in_step = True
+                                
+                                # B) Für LivePlots roh speichern
+                                live_data_snapshot[dict_key] = events
+                                has_dashboard_data = True
+                                
+                                # C) Puffer leeren
+                                nest.SetStatus(nest_handle, {'n_events': 0})
+                                
+                        except Exception:
+                            pass
+                
+                if data_in_step:
+                    node.results["history"].append(step_record)
+
+        # An DataDashboard senden
+        if has_dashboard_data and hasattr(self, 'live_dashboard'):
+            self.live_dashboard.process_incoming_data(live_data_snapshot, sim_time)
+
+
+
     def rebuild_all_graphs(
             self,  
             target_graphs=None, 
