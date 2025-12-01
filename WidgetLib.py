@@ -1,6 +1,6 @@
 import sys
 from PyQt6.QtWidgets import QApplication,QDialog,QAbstractSpinBox,QDialogButtonBox,QListWidget,QSlider, QMainWindow,QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel
-from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLabel,QGroupBox, QStackedWidget, QToolBar, QMenu, QGridLayout, QStackedLayout
+from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLabel,QGroupBox, QStackedWidget, QToolBar, QMenu, QGridLayout, QStackedLayout,QTreeWidgetItemIterator
 from PyQt6.QtGui import QColor, QPalette, QAction,QIcon,QBrush,QMatrix4x4
 from PyQt6.QtCore import QSize, Qt, pyqtSignal,QTimer
 import code
@@ -4953,19 +4953,23 @@ for graph in self.graph_list:
 """
 
 
+
+
+
 class BlinkingNetworkWidget(QWidget):
+    """
+    Visualisiert das Netzwerk. Kanten sind IMMER sichtbar (Skelett)
+    und leuchten zufällig auf ("Blinking"), um die Struktur zu zeigen.
+    """
     def __init__(self, graph_list, parent=None):
         super().__init__(parent)
         self.graph_list = graph_list
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
-        # PyVista Setup
         self.plotter = QtInteractor(self)
         self.plotter.set_background("black")
-        self.plotter.enable_depth_peeling(number_of_peels=4, occlusion_ratio=0.0)
         self.plotter.enable_anti_aliasing()
-        
         self.layout.addWidget(self.plotter)
         
         # State Arrays
@@ -4977,7 +4981,9 @@ class BlinkingNetworkWidget(QWidget):
         self.base_colors = None
         
         self.connected_mask = None 
-        self.base_opacity = 0.3 
+        
+        # Feste Basis-Sichtbarkeit (kein Slider mehr)
+        self.base_opacity = 0.2
         
         self.connectivity_map = [] 
         self.population_ranges = {} 
@@ -4989,15 +4995,12 @@ class BlinkingNetworkWidget(QWidget):
         self.timer.timeout.connect(self.animate)
         
         self.build_scene()
-        self.timer.start(16)
+        self.timer.start(30) # 30 FPS
 
     def set_base_opacity(self, value):
-        self.base_opacity = value
-        if self.edge_intensities is not None and self.edge_mesh is not None:
-            mask = self.edge_intensities < 0.9
-            self.edge_intensities[mask] = self.base_opacity
-            self.edge_mesh.cell_data["glow"] = self.edge_intensities
-            self.plotter.update()
+        # Dummy-Methode, falls CleanAlpha den Slider noch hat.
+        # Wir ignorieren den Wert, da wir eine feste Darstellung wollen.
+        pass
 
     def build_scene(self):
         self.plotter.clear()
@@ -5010,6 +5013,7 @@ class BlinkingNetworkWidget(QWidget):
         all_colors = []
         current_idx = 0
         
+        # 1. Neuronen sammeln
         for graph in self.graph_list:
             for node in graph.node_list:
                 if not hasattr(node, 'positions') or not node.positions: continue
@@ -5037,16 +5041,18 @@ class BlinkingNetworkWidget(QWidget):
         self.connected_mask = np.zeros(n_points, dtype=bool)
         
         self.neuron_mesh = pv.PolyData(points)
-        self.neuron_mesh.point_data["display_color"] = self.base_colors * 0.3
+        self.neuron_mesh.point_data["display_color"] = self.base_colors
         
         self.plotter.add_mesh(
             self.neuron_mesh, scalars="display_color", rgb=True,
-            point_size=6, render_points_as_spheres=True, ambient=0.4
+            point_size=6, render_points_as_spheres=True, 
+            ambient=0.3, diffuse=0.8
         )
         
+        # 2. Verbindungen sammeln
         lines_data = []
         current_edge_idx = 0
-        VISUAL_EDGE_LIMIT = 80
+        VISUAL_EDGE_LIMIT = 200 # Limit etwas erhöht für bessere Dichte
         
         for graph in self.graph_list:
             for node in graph.node_list:
@@ -5066,6 +5072,7 @@ class BlinkingNetworkWidget(QWidget):
                         self.connected_mask[s_start:s_end] = True
                         self.connected_mask[t_start:t_end] = True
                         
+                        # Zufällige Auswahl von Verbindungen zur Visualisierung
                         n_possible = (s_end-s_start) * (t_end-t_start)
                         n_show = min(VISUAL_EDGE_LIMIT, int(np.sqrt(n_possible)))
                         n_show = max(1, n_show)
@@ -5088,10 +5095,12 @@ class BlinkingNetworkWidget(QWidget):
         if lines_data:
             self.edge_mesh = pv.PolyData(points, lines=np.array(lines_data))
             
+            # Initiale Intensität auf Basis-Level (Sichtbares Skelett)
             self.edge_intensities = np.full(self.edge_mesh.n_cells, self.base_opacity)
             self.edge_mesh.cell_data["glow"] = self.edge_intensities
             
-            colors = ["#0a0500", "#8B5A2B", "#FFD700", "#FFFFFF"]
+            # Colormap: Dunkelgrau (Basis) -> Gold -> Weiß (Aktiv)
+            colors = ["#333333", "#555555", "#FFD700", "#FFFFFF"]
             gold_cmap = mcolors.LinearSegmentedColormap.from_list("gold", colors, N=256)
             
             self.plotter.add_mesh(
@@ -5100,11 +5109,9 @@ class BlinkingNetworkWidget(QWidget):
                 cmap=gold_cmap,
                 clim=[0.0, 1.0], 
                 opacity="linear", 
-                
                 render_lines_as_tubes=True, 
                 line_width=1.5,
-                
-                use_transparency=True, 
+                use_transparency=True,
                 show_scalar_bar=False
             )
             
@@ -5112,78 +5119,60 @@ class BlinkingNetworkWidget(QWidget):
 
     def start_simulation(self):
         self.simulation_running = True
-        if self.activity is not None: self.activity[:] = 0
-        if self.edge_intensities is not None: self.edge_intensities[:] = self.base_opacity
 
     def stop_simulation(self):
         self.simulation_running = False
 
-    def stop_animation(self):
-        self.stop_simulation()
-
     def animate(self):
-        if (not self.isVisible() or 
-            not self.is_active or 
-            self.neuron_mesh is None or 
-            not hasattr(self, 'plotter') or 
-            self.plotter.render_window is None):
+        if (not self.isVisible() or not self.is_active or 
+            self.neuron_mesh is None or not hasattr(self, 'plotter')):
             return
         
         try:
-            if self.simulation_running:
-                self.activity *= 0.90
+            # 1. Decay (Alles klingt langsam ab auf Basis-Level)
+            self.activity *= 0.92
+            
+            if self.edge_intensities is not None:
+                diff = self.edge_intensities - self.base_opacity
+                self.edge_intensities = self.base_opacity + (diff * 0.88)
+
+            # 2. "Blinking" Logic: Zufälliges Feuern durch das Netzwerk
+            # Das passiert IMMER, auch ohne Simulation, damit man die Struktur sieht.
+            # Wenn Simulation läuft, könnte man hier echte Spikes addieren.
+            
+            # Zufällige "Quellen" im Netz aktivieren
+            if len(self.connectivity_map) > 0:
+                # Wähle zufällige Verbindungen aus
+                import random
+                n_flash = max(1, int(len(self.connectivity_map) * 0.05)) # 5% der Verbindungen pro Frame
+                flash_conns = random.sample(self.connectivity_map, n_flash)
                 
-                if self.edge_intensities is not None:
-                    diff = self.edge_intensities - self.base_opacity
-                    self.edge_intensities = self.base_opacity + (diff * 0.80)
-                    self.edge_intensities = np.maximum(self.edge_intensities, self.base_opacity)
-
-                connected_indices = np.where(self.connected_mask)[0]
-                if len(connected_indices) > 0:
-                    n_fire = max(1, int(len(connected_indices) * 0.03))
-                    noise_idx = np.random.choice(connected_indices, n_fire)
-                    self.activity[noise_idx] += 0.6
-
-                for conn in self.connectivity_map:
-                    src_act = self.activity[conn['src_slice']]
-                    mean_src = np.mean(src_act)
+                for conn in flash_conns:
+                    # Kanten aufleuchten lassen (voll)
+                    self.edge_intensities[conn['edge_slice']] = 1.0
                     
-                    if mean_src > 0.2:
-                        if self.edge_intensities is not None:
-                            flash_val = np.clip(mean_src * 2.5, 0.8, 1.0)
-                            current = self.edge_intensities[conn['edge_slice']]
-                            self.edge_intensities[conn['edge_slice']] = np.maximum(current, flash_val)
-                        
-                        strength = mean_src * abs(conn['weight']) * 0.5
-                        targets = conn['tgt_indices']
-                        n_hits = max(1, int(len(targets) * 0.3))
+                    # Ziel-Neuronen leicht aufleuchten lassen
+                    targets = conn['tgt_indices']
+                    if len(targets) > 0:
+                        n_hits = max(1, int(len(targets) * 0.2))
                         hit_idx = targets[np.random.choice(len(targets), size=n_hits)]
-                        self.activity[hit_idx] += strength
+                        self.activity[hit_idx] += 0.3
 
-                self.activity = np.clip(self.activity, 0, 1.5)
-                
-                display_act = np.clip(self.activity, 0, 1)
-                colors = self.base_colors * 0.3 + (np.ones_like(self.base_colors) * display_act[:, None] * 0.9)
-                mask = display_act > 0.8
-                colors[mask] = [1.0, 1.0, 1.0] 
-                self.neuron_mesh.point_data["display_color"] = colors
-                
-                if self.edge_mesh:
-                    self.edge_mesh.cell_data["glow"] = self.edge_intensities
+            # 3. Werte clippen
+            self.activity = np.clip(self.activity, 0, 1.2)
+            
+            # 4. Farben updaten
+            # Neuronen: Basis-Farbe -> Weiß bei Aktivität
+            act_norm = np.clip(self.activity, 0, 1)[:, None]
+            target_color = np.array([1.0, 1.0, 1.0]) 
+            display_colors = self.base_colors * (1.0 - act_norm * 0.6) + target_color * (act_norm * 0.6)
+            
+            self.neuron_mesh.point_data["display_color"] = display_colors
+            
+            if self.edge_mesh:
+                self.edge_mesh.cell_data["glow"] = self.edge_intensities
 
-            else:
-                # IDLE MODE
-                import time
-                t = time.time()
-                pulse = (np.sin(t * 2) + 1) / 2 * 0.2 + 0.2
-                if self.neuron_mesh and "display_color" in self.neuron_mesh.point_data:
-                    self.neuron_mesh.point_data["display_color"] = self.base_colors * pulse
-                
-                if self.edge_intensities is not None and self.edge_mesh:
-                    noise = np.random.uniform(-0.01, 0.01, len(self.edge_intensities))
-                    self.edge_intensities[:] = np.clip(self.base_opacity + noise, 0, 1)
-                    self.edge_mesh.cell_data["glow"] = self.edge_intensities
-
+            # 5. Render
             if self.plotter.render_window:
                 self.plotter.update()
             
@@ -5193,126 +5182,14 @@ class BlinkingNetworkWidget(QWidget):
     def closeEvent(self, event):
         self.is_active = False
         self.simulation_running = False
-        
-        if hasattr(self, 'timer'):
-            self.timer.stop()
-        
-        if hasattr(self, 'plotter'):
-            self.plotter.close()
-            
+        if hasattr(self, 'timer'): self.timer.stop()
+        if hasattr(self, 'plotter'): self.plotter.close()
         super().closeEvent(event)
 
 
 
 
 
-
-
-
-
-
-    def create_nest_connections(self,graph_list):
-
-        
-        total_connections_created = 0
-        
-        print("CREATING NEST CONNECTIONS")
-        
-        for graph in self.graph_list:
-            graph_id = graph.graph_id
-            print(f"\nProcessing Graph {graph_id}...")
-            
-            for node in graph.node_list:
-                node_id = node.id
-                
-                if not hasattr(node, 'connections') or not node.connections:
-                    continue
-                
-                print(f"Node {node_id} has {len(node.connections)} connection(s)")
-                
-                for conn in node.connections:
-                    try:
-                        source_graph_id = conn['source']['graph_id']
-                        source_node_id = conn['source']['node_id']
-                        source_pop_id = conn['source']['pop_id']
-                        
-                        source_graph = next((g for g in graph_list if g.graph_id == source_graph_id), None)
-                        if not source_graph:
-                            print(f"Source Graph {source_graph_id} not found!")
-                            continue
-                        
-                        source_node = next((n for n in source_graph.node_list if n.id == source_node_id), None)
-                        if not source_node:
-                            print(f"Source Node {source_node_id} not found!")
-                            continue
-                        
-                        if source_pop_id >= len(source_node.population):
-                            print(f"    ⚠ Source Population {source_pop_id} out of range!")
-                            continue
-                        source_population = source_node.population[source_pop_id]
-                        
-                        target_graph_id = conn['target']['graph_id']
-                        target_node_id = conn['target']['node_id']
-                        target_pop_id = conn['target']['pop_id']
-                        
-                        target_graph = next((g for g in graph_list if g.graph_id == target_graph_id), None)
-                        if not target_graph:
-                            print(f"    ⚠ Target Graph {target_graph_id} not found!")
-                            continue
-                        
-                        target_node = next((n for n in target_graph.node_list if n.id == target_node_id), None)
-                        if not target_node:
-                            print(f"    ⚠ Target Node {target_node_id} not found!")
-                            continue
-                        
-                        if target_pop_id >= len(target_node.population):
-                            print(f"    ⚠ Target Population {target_pop_id} out of range!")
-                            continue
-                        target_population = target_node.population[target_pop_id]
-                        
-                        params = conn['params']
-                        
-                        conn_spec = {'rule': params['rule']}
-                        
-                        if 'indegree' in params:
-                            conn_spec['indegree'] = params['indegree']
-                        if 'outdegree' in params:
-                            conn_spec['outdegree'] = params['outdegree']
-                        if 'N' in params:
-                            conn_spec['N'] = params['N']
-                        if 'p' in params:
-                            conn_spec['p'] = params['p']
-                        
-                        conn_spec['allow_autapses'] = params.get('allow_autapses', True)
-                        conn_spec['allow_multapses'] = params.get('allow_multapses', True)
-                        
-                        syn_spec = {
-                            'synapse_model': params.get('synapse_model', 'static_synapse'),
-                            'weight': params.get('weight', 1.0),
-                            'delay': params.get('delay', 1.0)
-                        }
-                        
-                        nest.Connect(
-                            source_population,
-                            target_population,
-                            conn_spec=conn_spec,
-                            syn_spec=syn_spec
-                        )
-                        
-                        total_connections_created += 1
-                        
-                        print(f"{conn['name']}")
-                        print(f"{len(source_population)} → {len(target_population)} neurons")
-                        print(f"Rule: {params['rule']}, Weight: {params['weight']}, Delay: {params['delay']}ms")
-                    
-                    except Exception as e:
-                        print(f"Error creating connection {conn.get('name', 'unknown')}: {e}")
-                        import traceback
-                        traceback.print_exc()
-        
-        print(f"Total NEST connections created: {total_connections_created}")
-        
-        return total_connections_created
 
 
 
@@ -7671,26 +7548,6 @@ class DeviceHelpWidget(QWidget):
         layout.addWidget(help_text)
 
 
-class SafeGLViewWidget(gl.GLViewWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.rendering_enabled = True
-
-    def paintGL(self, *args, **kwargs):
-
-        if not self.rendering_enabled or not self.isVisible() or not self.isValid():
-            return
-            
-        try:
-            super().paintGL(*args, **kwargs)
-        except Exception:
-            pass
-
-    def stop_rendering(self):
-        self.rendering_enabled = False
-        
-    def start_rendering(self):
-        self.rendering_enabled = True
 
 class StructuresWidget(QWidget):
 
@@ -7702,23 +7559,40 @@ class StructuresWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
         # Header
-        header_lbl = QLabel("CORTICAL STRUCTURES")
-        header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #E91E63; border-bottom: 2px solid #E91E63; padding-bottom: 5px;")
-        layout.addWidget(header_lbl)
+        header_frame = QFrame()
+        header_frame.setStyleSheet("background-color: #2b2b2b; border-bottom: 1px solid #444;")
+        hl = QVBoxLayout(header_frame)
+        hl.setContentsMargins(10, 10, 10, 10)
         
-        info = QLabel("Select a region to auto-generate a node patch (10x10x10)\nwith biological neuron distributions.")
-        info.setStyleSheet("color: #888; font-style: italic; margin-bottom: 10px;")
-        layout.addWidget(info)
+        header_lbl = QLabel("CORTICAL STRUCTURES")
+        header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #E91E63;")
+        hl.addWidget(header_lbl)
+        
+        info = QLabel("Select a region to auto-generate a node patch.")
+        info.setStyleSheet("color: #888; font-style: italic;")
+        hl.addWidget(info)
+        
+        layout.addWidget(header_frame)
 
+        # Scroll Area für horizontale Leiste
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("border: none;")
+        scroll.setStyleSheet("border: none; background-color: #1e1e1e;")
+        # Scrollbar immer unten anzeigen, wenn nötig
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         container = QWidget()
-        self.grid_layout = QGridLayout(container)
-        self.grid_layout.setSpacing(10)
+        container.setStyleSheet("background-color: #1e1e1e;")
+        
+        # HIER DIE ÄNDERUNG: Alles in eine Reihe (HBox) statt Grid
+        self.items_layout = QHBoxLayout(container)
+        self.items_layout.setSpacing(5)             # Enger zusammen (vorher 10)
+        self.items_layout.setContentsMargins(10, 10, 10, 10)
+        self.items_layout.setAlignment(Qt.AlignmentFlag.AlignLeft) # Links packen
 
         region_data = {r_key: {} for r_key in region_names.values()}
         
@@ -7727,7 +7601,6 @@ class StructuresWidget(QWidget):
                 if prob > 0:
                     region_data[r_key][model] = prob
 
-        row, col = 0, 0
         for display_name, r_key in region_names.items():
             if r_key not in region_data or not region_data[r_key]:
                 continue
@@ -7743,6 +7616,7 @@ class StructuresWidget(QWidget):
             # Button erstellen
             btn = QPushButton(display_name)
             btn.setMinimumHeight(60)
+            btn.setFixedWidth(160) # Feste Breite damit sie schön nebeneinander stehen
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet("""
                 QPushButton {
@@ -7750,10 +7624,10 @@ class StructuresWidget(QWidget):
                     color: white;
                     font-weight: bold;
                     border: 1px solid #455A64;
-                    border-radius: 5px;
-                    font-size: 12px;
-                    text-align: left;
-                    padding-left: 10px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    text-align: center;
+                    padding: 5px;
                 }
                 QPushButton:hover {
                     background-color: #E91E63;
@@ -7769,11 +7643,7 @@ class StructuresWidget(QWidget):
             btn.clicked.connect(lambda checked, n=display_name, m=model_list, p=prob_list: 
                               self.structureSelected.emit(n, m, p))
             
-            self.grid_layout.addWidget(btn, row, col)
-            
-            col += 1
-            if col > 1: 
-                row += 1
+            self.items_layout.addWidget(btn)
         
         scroll.setWidget(container)
         layout.addWidget(scroll)
@@ -8066,13 +7936,36 @@ class FlowFieldWidget(QWidget):
 
 
 
+
+        
+# ==============================================================================
+# EINFÜGEN IN WidgetLib.py (Ersetzt SafeGLViewWidget & SimulationViewWidget)
+# ==============================================================================
+
+class SafeGLViewWidget(gl.GLViewWidget):
+    """
+    Robuster OpenGL Viewport. 
+    Erzwingt Kontext-Updates und fängt Rendering-Fehler ab.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.opts['antialias'] = True
+        self.opts['viewport'] = None 
+    
+    def paintGL(self, *args, **kwargs):
+        # Harte Prüfung: Wenn nicht sichtbar, gar nicht erst versuchen zu zeichnen
+        if not self.isVisible() or not self.isValid():
+            return
+        try:
+            # WICHTIG: Kontext aktuell machen vor dem Zeichnen
+            self.makeCurrent()
+            super().paintGL(*args, **kwargs)
+        except Exception:
+            # Silent fail bei GL Fehlern (verhindert Console Spam & Freezes)
+            pass
+
 class SimulationViewWidget(QWidget):
-    # --- SIGNALS ---
-    sigPauseSimulation = pyqtSignal()
-    sigStopSimulation = pyqtSignal()
-    sigStartContinuous = pyqtSignal(float, float) 
-    sigStepSimulation = pyqtSignal(float)
-    sigResetSimulation = pyqtSignal() 
+    # Signal für Render-Geschwindigkeit (Visualisierung)
     sigSpeedChanged = pyqtSignal(int)
 
     def __init__(self, graph_list, parent=None):
@@ -8081,9 +7974,6 @@ class SimulationViewWidget(QWidget):
         
         self.scene_loaded = False
         self.active_tool = None 
-        self.conn_selection = None 
-        
-        # Simulation State
         self.is_paused = True 
         
         # Data Containers
@@ -8104,7 +7994,18 @@ class SimulationViewWidget(QWidget):
         
         # Defaults
         self.stim_params = {'radius': 5.0, 'weight': 1000.0, 'delay': 1.0}
-        self.conn_params = {'weight': 50.0, 'delay': 1.0}
+        self.conn_params = {
+            'weight': 50.0, 'delay': 1.0, 'radius': 5.0,
+            'rule': 'all_to_all', 'p': 0.1, 'indegree': 10, 
+            'outdegree': 10, 'N': 100,
+            'synapse_model': 'static_synapse',
+            'allow_autapses': False, 'allow_multapses': True
+        }
+        
+        # Connector State
+        self.conn_source_gids = []
+        self.conn_source_indices = []
+        self.temp_connections = []
 
         # Visual Params
         self.point_size = 8.0       
@@ -8119,164 +8020,122 @@ class SimulationViewWidget(QWidget):
         self.render_timer.timeout.connect(self.update_animation)
         
         self.init_ui()
-        self.update_button_styles() 
-        
-    def stop_rendering_safe(self):
-        self.is_paused = True
-        if hasattr(self, 'render_timer'):
-            self.render_timer.stop()
-        if self.scatter_item:
-            try: self.scatter_item.setVisible(False)
-            except: pass
-    
+
     def init_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
         
         # Sidebar
-        sidebar = QWidget(); sidebar.setFixedWidth(320)
-        sidebar.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setFixedWidth(300) 
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setStyleSheet("background-color: #232323; border: none; border-right: 1px solid #444;")
+        
+        sidebar = QWidget()
+        sidebar.setStyleSheet("background-color: #232323;")
         sb = QVBoxLayout(sidebar); sb.setContentsMargins(10,10,10,10); sb.setSpacing(15)
         
-        # Load Control
-        load_box = QGroupBox("Scene")
+        # 1. SCENE CONTROL
+        load_box = QGroupBox("Scene Control")
         lb_layout = QHBoxLayout(load_box)
-        self.btn_load = QPushButton("⚡ LOAD"); self.btn_load.clicked.connect(self.load_scene)
-        self.btn_load.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold;")
-        self.btn_clear = QPushButton("✕"); self.btn_clear.setFixedWidth(30); self.btn_clear.clicked.connect(self.unload_scene)
-        self.btn_clear.setStyleSheet("background-color: #444; color: white;")
+        self.btn_load = QPushButton("⚡ LOAD SCENE"); self.btn_load.clicked.connect(self.load_scene)
+        self.btn_load.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold; padding: 8px;")
+        self.btn_clear = QPushButton("✕"); self.btn_clear.setFixedWidth(40); self.btn_clear.clicked.connect(self.unload_scene)
+        self.btn_clear.setStyleSheet("background-color: #444; color: white; font-weight: bold;")
         lb_layout.addWidget(self.btn_load); lb_layout.addWidget(self.btn_clear)
         sb.addWidget(load_box)
         
-        # Sim Control
-        sim_group = QGroupBox("Simulation Control")
-        sim_layout = QVBoxLayout(sim_group)
-        row1 = QHBoxLayout()
-        self.btn_start = QPushButton("▶ RUN"); self.btn_start.setMinimumHeight(45); self.btn_start.clicked.connect(self.action_start)
-        self.btn_step = QPushButton("⏯ STEP"); self.btn_step.setMinimumHeight(45); self.btn_step.clicked.connect(self.action_step)
-        row1.addWidget(self.btn_start); row1.addWidget(self.btn_step)
-        sim_layout.addLayout(row1)
-        row2 = QHBoxLayout()
-        self.btn_pause = QPushButton("⏸"); self.btn_pause.clicked.connect(self.action_pause); self.btn_pause.setToolTip("Pause")
-        self.btn_stop = QPushButton("⏹"); self.btn_stop.clicked.connect(self.action_stop); self.btn_stop.setToolTip("Stop")
-        self.btn_reset = QPushButton("↺"); self.btn_reset.clicked.connect(self.action_reset); self.btn_reset.setStyleSheet("background-color: #D84315;")
-        row2.addWidget(self.btn_pause); row2.addWidget(self.btn_stop); row2.addWidget(self.btn_reset)
-        sim_layout.addLayout(row2)
+        # 2. VISUAL SETTINGS
+        vis_group = QGroupBox("Visualization")
+        vl = QVBoxLayout(vis_group)
         self.slider_speed = QSlider(Qt.Orientation.Horizontal); self.slider_speed.setRange(0, 200); self.slider_speed.setValue(0)
-        self.slider_speed.valueChanged.connect(self._update_speed_label)
         self.slider_speed.valueChanged.connect(self.sigSpeedChanged.emit)
-        self.lbl_speed_info = QLabel("Speed: Max"); self.lbl_speed_info.setAlignment(Qt.AlignmentFlag.AlignCenter); self.lbl_speed_info.setStyleSheet("color: #aaa; font-size: 10px;")
-        sim_layout.addWidget(QLabel("Speed / Delay:"))
-        sim_layout.addWidget(self.slider_speed); sim_layout.addWidget(self.lbl_speed_info)
-        sb.addWidget(sim_group)
-        
-        # Params
-        param_group = QGroupBox("Parameters")
-        pl = QFormLayout(param_group)
-        self.spin_step_size = QDoubleSpinBox(); self.spin_step_size.setRange(0.1, 1000); self.spin_step_size.setValue(25.0); self.spin_step_size.setSuffix(" ms")
-        self.spin_duration = QDoubleSpinBox(); self.spin_duration.setRange(0, 1e6); self.spin_duration.setValue(5000); self.spin_duration.setSuffix(" ms")
-        self.lbl_current_time = QLabel("T: 0.0 ms"); self.lbl_current_time.setStyleSheet("color: #00E5FF; font-weight: bold; background: #111; padding: 4px; border-radius: 4px;")
-        pl.addRow("Step Size:", self.spin_step_size); pl.addRow("Target:", self.spin_duration); pl.addRow("Time:", self.lbl_current_time)
-        sb.addWidget(param_group)
+        vl.addWidget(QLabel("Render Delay:"))
+        vl.addWidget(self.slider_speed)
+        sb.addWidget(vis_group)
 
-        # Tools Group
-        tool_group = QGroupBox("Live Tools")
+        # 3. LIVE TOOLS
+        tool_group = QGroupBox("Live Interaction Tools")
         tl = QVBoxLayout(tool_group)
         
-        # ... UI Helper Function call (siehe WidgetLib Struktur) ...
-        # Da wir hier in der Klasse sind, fügen wir den Injector-UI Code direkt ein
+        create_injector_ui(self, tl)
         
-        # INJECTOR BUTTON
-        self.btn_tool_inject = QPushButton("💉 Injector Tool")
-        self.btn_tool_inject.setCheckable(True)
-        self.btn_tool_inject.clicked.connect(lambda: self.set_active_tool('injector'))
-        self.btn_tool_inject.setStyleSheet("text-align:left; padding:6px; font-weight: bold; color: #FF9800;")
-        tl.addWidget(self.btn_tool_inject)
-        
-        # INJECTOR SETTINGS
-        self.injector_settings = QWidget()
-        self.injector_settings.setStyleSheet("background-color: #2b2b2b; border-radius: 4px;")
-        il = QVBoxLayout(self.injector_settings)
-        il.setContentsMargins(5, 5, 5, 5)
-        
-        # Typ
-        self.combo_gen_type = QComboBox()
-        self.combo_gen_type.addItem("⚡ Spike Generator (Instant)", "spike_generator")
-        self.combo_gen_type.addItem("🔄 Poisson Generator (Rate)", "poisson_generator")
-        self.combo_gen_type.setStyleSheet("background-color: #444; color: white;")
-        self.combo_gen_type.currentIndexChanged.connect(self._update_gen_type_ui)
-        il.addWidget(self.combo_gen_type)
-        
-        # Radius
-        self.lbl_radius = QLabel(f"Radius: {self.stim_params['radius']} mm")
-        self.slider_radius = QSlider(Qt.Orientation.Horizontal)
-        self.slider_radius.setRange(1, 200)
-        self.slider_radius.setValue(int(self.stim_params['radius']*10))
-        self.slider_radius.valueChanged.connect(self._update_radius)
-        il.addWidget(self.lbl_radius); il.addWidget(self.slider_radius)
-        
-        # Params Grid
-        grid_params = QGridLayout()
-        grid_params.setContentsMargins(0,0,0,0)
-        
-        grid_params.addWidget(QLabel("W (pA):"), 0, 0)
-        self.spin_inj_weight = QDoubleSpinBox(); self.spin_inj_weight.setRange(-1000000, 1000000); self.spin_inj_weight.setValue(1000.0)
-        self.spin_inj_weight.valueChanged.connect(lambda v: self.stim_params.update({'weight': v}))
-        grid_params.addWidget(self.spin_inj_weight, 0, 1)
-        
-        grid_params.addWidget(QLabel("D (ms):"), 1, 0)
-        self.spin_inj_delay = QDoubleSpinBox(); self.spin_inj_delay.setRange(0.1, 1000); self.spin_inj_delay.setValue(1.0)
-        self.spin_inj_delay.valueChanged.connect(lambda v: self.stim_params.update({'delay': v}))
-        grid_params.addWidget(self.spin_inj_delay, 1, 1)
-        
-        self.lbl_rate = QLabel("Hz:")
-        self.spin_inj_rate = QDoubleSpinBox(); self.spin_inj_rate.setRange(0.1, 5000); self.spin_inj_rate.setValue(100.0)
-        self.lbl_rate.setVisible(False); self.spin_inj_rate.setVisible(False)
-        
-        grid_params.addWidget(self.lbl_rate, 2, 0)
-        grid_params.addWidget(self.spin_inj_rate, 2, 1)
-        
-        il.addLayout(grid_params)
-        self.injector_settings.setVisible(False)
-        tl.addWidget(self.injector_settings)
-        
-        # CONNECTOR BUTTON
+        # --- CONNECTOR TOOL ---
         self.btn_tool_connect = QPushButton("🔗 Quick Connect")
         self.btn_tool_connect.setCheckable(True)
         self.btn_tool_connect.clicked.connect(lambda: self.set_active_tool('connector'))
         self.btn_tool_connect.setStyleSheet("text-align:left; padding:6px; font-weight: bold; color: #00E5FF;")
         tl.addWidget(self.btn_tool_connect)
         
+        self.connector_settings = QWidget()
+        self.connector_settings.setStyleSheet("background-color: #2b2b2b; border-radius: 4px;")
+        cl = QVBoxLayout(self.connector_settings); cl.setContentsMargins(5, 5, 5, 5)
+        
+        # --- NEU: Radius Slider für Connection Tool ---
+        self.lbl_conn_radius = QLabel(f"Radius: {self.conn_params['radius']:.1f} mm")
+        self.lbl_conn_radius.setStyleSheet("color: #FF9800; font-weight:bold;")
+        self.slider_conn_radius = QSlider(Qt.Orientation.Horizontal)
+        self.slider_conn_radius.setRange(1, 200) # 0.1 bis 20.0 mm
+        self.slider_conn_radius.setValue(int(self.conn_params['radius'] * 10))
+        self.slider_conn_radius.valueChanged.connect(self._update_conn_radius)
+        
+        cl.addWidget(self.lbl_conn_radius)
+        cl.addWidget(self.slider_conn_radius)
+        # ----------------------------------------------
+        
+        # Connector Params
+        self.combo_conn_rule = QComboBox(); self.combo_conn_rule.addItems(["all_to_all", "pairwise_bernoulli"])
+        self.combo_conn_rule.currentTextChanged.connect(self._on_conn_rule_changed)
+        cl.addWidget(self.combo_conn_rule)
+        
+        # Dynamische Parameter
+        self.conn_rule_params_widget = QWidget()
+        self.conn_rule_params_layout = QFormLayout(self.conn_rule_params_widget)
+        cl.addWidget(self.conn_rule_params_widget)
+        
+        # Versteckte Inputs für Rules
+        self.spin_conn_indegree = QSpinBox(); self.spin_conn_indegree.setRange(1, 10000); self.spin_conn_indegree.setValue(10)
+        self.spin_conn_outdegree = QSpinBox(); self.spin_conn_outdegree.setRange(1, 10000); self.spin_conn_outdegree.setValue(10)
+        self.spin_conn_N = QSpinBox(); self.spin_conn_N.setRange(1, 100000); self.spin_conn_N.setValue(100)
+        self.spin_conn_p = QDoubleSpinBox(); self.spin_conn_p.setRange(0, 1); self.spin_conn_p.setValue(0.1)
+        
+        # Synapse Form Layout (Fix für addRow Fehler)
+        syn_form = QFormLayout()
+        self.spin_conn_weight = QDoubleSpinBox(); self.spin_conn_weight.setRange(-1000, 1000); self.spin_conn_weight.setValue(50.0)
+        self.spin_conn_delay = QDoubleSpinBox(); self.spin_conn_delay.setRange(0.1, 1000); self.spin_conn_delay.setValue(1.0)
+        syn_form.addRow("Weight:", self.spin_conn_weight)
+        syn_form.addRow("Delay:", self.spin_conn_delay)
+        cl.addLayout(syn_form)
+        
+        self.chk_autapses = QCheckBox("Autapses"); self.chk_multapses = QCheckBox("Multapses"); self.chk_multapses.setChecked(True)
+        cl.addWidget(self.chk_autapses); cl.addWidget(self.chk_multapses)
+        
+        # MONITOR BUTTON
+        self.btn_tool_monitor = QPushButton("📡 Monitor (Add Recorder)")
+        self.btn_tool_monitor.setCheckable(True)
+        self.btn_tool_monitor.clicked.connect(lambda: self.set_active_tool('monitor'))
+        self.btn_tool_monitor.setStyleSheet("text-align:left; padding:6px; font-weight: bold; color: #E91E63;")
+        tl.addWidget(self.btn_tool_monitor)
+
+        self.connector_settings.setVisible(False)
+        tl.addWidget(self.connector_settings)
+        
         self.lbl_tool_status = QLabel("Mode: View Only")
         self.lbl_tool_status.setStyleSheet("color: #777; font-style: italic; margin-top: 5px;")
         tl.addWidget(self.lbl_tool_status)
         
-        # ACTIVE INJECTORS GRID
-        tl.addWidget(QLabel("Active Injectors:", styleSheet="color: #FF9800; font-weight: bold; margin-top: 10px;"))
-        self.elec_scroll = QScrollArea()
-        self.elec_scroll.setWidgetResizable(True)
-        self.elec_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.elec_scroll.setStyleSheet("background-color: #1e1e1e; border-radius: 4px;")
+        self.lbl_conn_status = QLabel("")
+        self.lbl_conn_status.setStyleSheet("color: #4CAF50; font-size: 10px;")
+        cl.addWidget(self.lbl_conn_status)
+
+        sb.addWidget(tool_group)
+        sb.addStretch()
         
-        self.elec_container = QWidget()
-        self.elec_grid = QGridLayout(self.elec_container)
-        self.elec_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.elec_grid.setSpacing(5); self.elec_grid.setContentsMargins(5, 5, 5, 5)
-        
-        self.elec_scroll.setWidget(self.elec_container)
-        tl.addWidget(self.elec_scroll)
-        
-        # Clear Button
-        btn_clear_inj = QPushButton("Clear Injectors")
-        btn_clear_inj.setStyleSheet("background-color: #444; font-size: 10px;")
-        btn_clear_inj.clicked.connect(self.restore_injectors)
-        tl.addWidget(btn_clear_inj)
-        
-        sb.addWidget(tool_group); sb.addStretch()
-        layout.addWidget(sidebar)
+        sidebar_scroll.setWidget(sidebar)
+        layout.addWidget(sidebar_scroll)
         
         # GL View
-        self.view = gl.GLViewWidget()
+        self.view = SafeGLViewWidget()
         self.view.opts['distance'] = 40
         self.view.setBackgroundColor('#050505')
         gz = gl.GLGridItem(); gz.translate(0, 0, -10); self.view.addItem(gz)
@@ -8285,39 +8144,167 @@ class SimulationViewWidget(QWidget):
         self.view.mousePressEvent = self.on_mouse_press
         layout.addWidget(self.view)
 
-    # --- UI Helpers ---
-    def _update_speed_label(self, value):
-        if value == 0: self.lbl_speed_info.setText("Speed: Max"); self.lbl_speed_info.setStyleSheet("color: #00E676;")
-        else: self.lbl_speed_info.setText(f"Speed: Slow (+{value}ms)"); self.lbl_speed_info.setStyleSheet("color: #FFC107;")
+    # --- Dummys ---
+    def update_time_display(self, t): pass
+    def update_button_styles(self): pass
 
+    # --- Render Control ---
+    def start_rendering(self):
+        if not self.scene_loaded: return
+        self.is_paused = False
+        if not self.render_timer.isActive():
+            self.render_timer.start(30)
+
+    def stop_rendering_safe(self):
+        self.is_paused = True
+        self.render_timer.stop()
+
+    def update_animation(self):
+        if not self.isVisible() or not self.scene_loaded or not self.scatter_item: 
+            return
+            
+        try:
+            self.anim_rg *= self.decay_tail; self.anim_b *= self.decay_flash; self.heat *= self.decay_heat
+            if np.max(self.anim_rg) < 0.05 and np.max(self.anim_b) < 0.05: return
+            
+            new_c = self.base_colors.copy()
+            
+            mask = self.anim_rg > 0.05
+            if np.any(mask):
+                val = self.anim_rg[mask, np.newaxis]
+                new_c[mask, 0:3] = np.minimum(1.0, new_c[mask, 0:3] + val)
+                new_c[mask, 3] = np.minimum(1.0, 0.4 + val.flatten())
+            
+            mask_b = self.anim_b > 0.05
+            if np.any(mask_b):
+                val_b = self.anim_b[mask_b, np.newaxis]
+                new_c[mask_b, 2] = np.minimum(1.0, new_c[mask_b, 2] + val_b.flatten())
+                new_c[mask_b, 0:2] *= 0.5 
+                new_c[mask_b, 3] = 1.0
+                
+            self.scatter_item.setData(color=new_c)
+            
+        except Exception:
+            pass 
+
+    def load_scene(self):
+        if self.scene_loaded: self.unload_scene()
+        points = []; colors = []; gids = []
+        for graph in self.graph_list:
+            for node in graph.node_list:
+                if hasattr(node, 'positions') and node.positions:
+                    for i, clust in enumerate(node.positions):
+                        if clust is None or len(clust) == 0: continue
+                        model = node.neuron_models[i] if hasattr(node, 'neuron_models') and i < len(node.neuron_models) else "unknown"
+                        rgb = mcolors.to_rgba(neuron_colors.get(model, "#fff"), alpha=0.6)
+                        points.append(clust); colors.append(np.tile(rgb, (len(clust), 1)))
+                        if hasattr(node, 'population') and len(node.population) > i and node.population[i]:
+                            ids = nest.GetStatus(node.population[i], 'global_id')
+                            gids.append(np.array(ids)) if len(ids) == len(clust) else gids.append(np.zeros(len(clust), dtype=int))
+                        else: gids.append(np.zeros(len(clust), dtype=int))
+
+        if not points: return
+        self.all_points = np.vstack(points); self.base_colors = np.vstack(colors)
+        self.current_colors = self.base_colors.copy()
+        self.global_ids = np.concatenate(gids)
+        self.gid_to_idx = {gid: i for i, gid in enumerate(self.global_ids) if gid > 0}
+        N = len(self.all_points)
+        self.anim_rg = np.zeros(N); self.anim_b = np.zeros(N); self.heat = np.zeros(N)
+        
+        try:
+            self.scatter_item = gl.GLScatterPlotItem(pos=self.all_points, color=self.current_colors, size=self.point_size, pxMode=True)
+            self.scatter_item.setGLOptions('translucent')
+            
+            # FIX: Kontext sicherstellen vor addItem
+            if self.view.isValid():
+                self.view.makeCurrent()
+                self.view.addItem(self.scatter_item)
+                self.scene_loaded = True
+                self.start_rendering()
+                print(f"Scene Loaded: {N} neurons.")
+            else:
+                print("GL View not ready.")
+        except Exception as e:
+            print(f"OpenGL Init Error: {e}")
+            self.scatter_item = None
+
+    def unload_scene(self):
+        self.stop_rendering_safe()
+        if self.scatter_item: 
+            try:
+                if self.view.isValid():
+                    self.view.makeCurrent()
+                    self.view.removeItem(self.scatter_item)
+            except: pass
+        self.scatter_item = None; self.scene_loaded = False
+
+    def feed_spikes(self, gids):
+        if not self.scene_loaded or not gids: return
+        indices = [self.gid_to_idx[gid] for gid in gids if gid in self.gid_to_idx]
+        if indices: 
+            self.anim_rg[indices] = 1.0; 
+            self.heat[indices] += 1.0
+
+    # --- Tools Helpers ---
+    def _update_speed_label(self, value): pass 
     def _update_radius(self, value):
+        """Updates radius for Injector Tool"""
         r = value / 10.0
         self.stim_params['radius'] = r
         self.lbl_radius.setText(f"Radius: {r:.1f} mm")
+    
+    def _update_conn_radius(self, value):
+        """Updates radius for Connection Tool"""
+        r = value / 10.0
+        self.conn_params['radius'] = r
+        self.lbl_conn_radius.setText(f"Radius: {r:.1f} mm")
         
     def _update_gen_type_ui(self, index):
         gen_type = self.combo_gen_type.currentData()
         is_poisson = (gen_type == 'poisson_generator')
         self.lbl_rate.setVisible(is_poisson)
         self.spin_inj_rate.setVisible(is_poisson)
-
-    def update_time_display(self, time_ms): 
-        self.lbl_current_time.setText(f"T: {time_ms:.1f} ms")
+        
+    def _on_conn_rule_changed(self, rule):
+        while self.conn_rule_params_layout.count():
+            item = self.conn_rule_params_layout.takeAt(0)
+            if item.widget(): item.widget().setParent(None)
+        self.conn_params['rule'] = rule
+        if rule == "fixed_indegree": self.conn_rule_params_layout.addRow("Indegree:", self.spin_conn_indegree)
+        elif rule == "fixed_outdegree": self.conn_rule_params_layout.addRow("Outdegree:", self.spin_conn_outdegree)
+        elif rule == "fixed_total_number": self.conn_rule_params_layout.addRow("Total N:", self.spin_conn_N)
+        elif rule == "pairwise_bernoulli": self.conn_rule_params_layout.addRow("Probability:", self.spin_conn_p)
+    
+    def _get_neurons_in_radius(self, center_idx):
+        center_pos = self.all_points[center_idx]
+        radius = self.conn_params['radius']
+        dists = np.linalg.norm(self.all_points - center_pos, axis=1)
+        neighbor_indices = np.where(dists <= radius)[0]
+        raw_gids = self.global_ids[neighbor_indices]
+        valid_mask = raw_gids > 0
+        return neighbor_indices[valid_mask], raw_gids[valid_mask]
 
     def set_active_tool(self, tool_name):
         if self.active_tool == tool_name:
             self.active_tool = None
-            self.btn_tool_inject.setChecked(False); self.btn_tool_connect.setChecked(False)
-            self.injector_settings.setVisible(False)
+            self.btn_tool_inject.setChecked(False); self.btn_tool_connect.setChecked(False); self.btn_tool_monitor.setChecked(False)
+            self.injector_settings.setVisible(False); self.connector_settings.setVisible(False)
             self.lbl_tool_status.setText("Mode: View Only")
         else:
             self.active_tool = tool_name
             self.btn_tool_inject.setChecked(tool_name == 'injector')
             self.btn_tool_connect.setChecked(tool_name == 'connector')
+            self.btn_tool_monitor.setChecked(tool_name == 'monitor')
+            
             self.injector_settings.setVisible(tool_name == 'injector')
+            self.connector_settings.setVisible(tool_name == 'connector')
+
             if tool_name == 'injector': self.lbl_tool_status.setText("Click to ADD Injector")
             elif tool_name == 'connector': self.lbl_tool_status.setText("Click Source -> Click Target")
-            self.conn_selection = None
+            elif tool_name == 'monitor': self.lbl_tool_status.setText("Click to RECORD Spikes")
+            
+            self.conn_source_gids = []
+            self.lbl_conn_status.setText("")
 
     def project_point_to_screen(self, vec3):
         view_matrix = self.view.viewMatrix()
@@ -8353,7 +8340,6 @@ class SimulationViewWidget(QWidget):
             event.accept() 
         else: 
             self._original_mouse_press(event)
-
     def handle_tool_click(self, center_gid, center_idx):
         print(f"Interaction at GID: {center_gid}")
         
@@ -8362,98 +8348,124 @@ class SimulationViewWidget(QWidget):
             radius = self.stim_params['radius']
             dists = np.linalg.norm(self.all_points - center_pos, axis=1)
             neighbor_indices = np.where(dists <= radius)[0]
-            target_gids = self.global_ids[neighbor_indices]
-            
-            if len(target_gids) == 0: return
-
-            try:
-                gen_type = self.combo_gen_type.currentData()
-                w = self.stim_params['weight']
-                d = self.stim_params['delay']
-                
-                # --- FIX: BadDelay verhindern ---
-                # Check Kernel Min/Max Delay
-                try:
-                    kstat = nest.GetKernelStatus()
-                    min_d = kstat.get('min_delay', 0.1)
-                    max_d = kstat.get('max_delay', 1000.0)
-                    
-                    # Clamp Delay
-                    if d < min_d:
-                        print(f"⚠ Delay {d} < min_delay {min_d}. Adjusted.")
-                        d = min_d
-                    elif d > max_d:
-                        print(f"⚠ Delay {d} > max_delay {max_d}. Adjusted.")
-                        d = max_d
-                except Exception as e:
-                    print(f"Kernel check failed: {e}")
-
-                # Generator erstellen
-                if gen_type == 'poisson_generator':
-                    sg = nest.Create('poisson_generator', params={'rate': 0.0})
-                else:
-                    sg = nest.Create('spike_generator')
-                
-                nest.Connect(sg, target_gids.tolist(), 
-                             conn_spec={'rule': 'all_to_all'},
-                             syn_spec={'weight': w, 'delay': d})
-                
-                gen_gid = sg.tolist()[0]
-                elec_id = self.next_electrode_id
-                self.next_electrode_id += 1
-                
-                letter = InjectorButton.get_next_letter()
-                item = InjectorButton(elec_id, gen_gid, len(target_gids), letter, gen_type)
-                item.triggerClicked.connect(self.trigger_electrode)
-                item.removeClicked.connect(self.remove_electrode)
-                
-                # Add to Grid
-                row = (elec_id - 1) // 3
-                col = (elec_id - 1) % 3
-                self.elec_grid.addWidget(item, row, col)
-                
-                self.electrodes[elec_id] = {
-                    'gid': gen_gid, 'widget': item, 'targets': neighbor_indices, 
-                    'center': center_pos.tolist(), 'gen_type': gen_type, 'letter': letter
-                }
-                
-                # --- FIX: KEIN VISUELLES FEEDBACK BEIM ERSTELLEN ---
-                # Nur Text-Log
-                print(f"Injector {letter} (#{elec_id}) created for {len(target_gids)} targets.")
-                self.lbl_tool_status.setText(f"Injector {letter} added!")
-                
-            except Exception as e: print(f"Injection err: {e}")
+            raw_target_gids = self.global_ids[neighbor_indices]
+            if len(raw_target_gids) == 0: return
+            self.create_injector_at(center_pos, raw_target_gids, neighbor_indices)
 
         elif self.active_tool == 'connector':
-            if self.conn_selection is None:
-                self.conn_selection = center_gid
-                self.anim_b[center_idx] = 3.0
-                self.lbl_tool_status.setText(f"Src: {center_gid}. Click Target.")
+            neighbor_indices, neighbor_gids = self._get_neurons_in_radius(center_idx)
+            if len(neighbor_gids) == 0:
+                self.lbl_tool_status.setText("No neurons in radius!")
+                return
+            
+            if len(self.conn_source_gids) == 0:
+                self.conn_source_gids = neighbor_gids.tolist()
+                self.conn_source_indices = neighbor_indices.tolist()
+                
+                # Visual Feedback (Blau markieren)
+                self.anim_b[neighbor_indices] = 3.0
+                
+                self.lbl_tool_status.setText(f"Source: {len(self.conn_source_gids)} neurons. Click Target.")
+                self.lbl_conn_status.setText(f"✓ {len(self.conn_source_gids)} source neurons selected")
             else:
+                target_gids = neighbor_gids.tolist()
+                target_indices = neighbor_indices.tolist()
                 try:
-                    nest.Connect((self.conn_selection,), (center_gid,), 
-                                 conn_spec={'rule': 'all_to_all'},
-                                 syn_spec={'weight': self.conn_params['weight'], 
-                                           'delay': self.conn_params['delay'], 
-                                           'synapse_model': 'static_synapse'})
-                    print(f"🔗 Connected {self.conn_selection} -> {center_gid}")
-                    # Hier ist Feedback okay, da Strukturänderung
-                    self.anim_rg[center_idx] = 5.0 
-                    self.conn_selection = None
-                    self.lbl_tool_status.setText("Connected! Next Source?")
-                except Exception as e: 
-                    print(f"Conn err: {e}"); self.conn_selection = None; self.lbl_tool_status.setText("Error connecting.")
+                    # --- FIX: GIDs SORTIEREN FÜR NEST 3 ---
+                    # NEST wirft einen Fehler, wenn die Liste für NodeCollection unsortiert ist.
+                    src_sorted = sorted(self.conn_source_gids)
+                    tgt_sorted = sorted(target_gids)
+                    
+                    src_collection = nest.NodeCollection(src_sorted)
+                    tgt_collection = nest.NodeCollection(tgt_sorted)
+                    
+                    conn_spec = self._build_conn_spec()
+                    syn_spec = self._build_syn_spec()
+                    
+                    nest.Connect(src_collection, tgt_collection, conn_spec, syn_spec)
+                    
+                    # Visual Feedback (Grün markieren bei Erfolg)
+                    self.anim_rg[target_indices] = 5.0
+                    
+                    n_src = len(self.conn_source_gids)
+                    n_tgt = len(target_gids)
+                    print(f"🔗 Connected {n_src} -> {n_tgt} neurons")
+                    self.lbl_tool_status.setText(f"Connected {n_src}→{n_tgt}! Next Source?")
+                    self.lbl_conn_status.setText(f"✓ {n_src} → {n_tgt}")
+                    
+                except Exception as e:
+                    print(f"Connection Error: {e}")
+                    self.lbl_conn_status.setText(f"✗ {e}")
+                
+                # Reset Source nach Verbindung
+                self.conn_source_gids = []
+                self.conn_source_indices = []
+             
+        elif self.active_tool == 'monitor':
+             center_pos = self.all_points[center_idx]
+             radius = self.stim_params['radius']
+             dists = np.linalg.norm(self.all_points - center_pos, axis=1)
+             neighbor_indices = np.where(dists <= radius)[0]
+             raw_target_gids = self.global_ids[neighbor_indices]
+             if len(raw_target_gids) == 0: return
+             
+             try:
+                 rec = nest.Create("spike_recorder")
+                 # --- FIX: Auch hier sortieren ---
+                 targets_sorted = sorted(raw_target_gids.tolist())
+                 nest.Connect(nest.NodeCollection(targets_sorted), rec)
+                 
+                 rec_gid = rec.tolist()[0]
+                 elec_id = self.next_electrode_id; self.next_electrode_id += 1
+                 letter = f"R{elec_id}"
+                 
+                 item = InjectorButton(elec_id, rec_gid, len(raw_target_gids), letter, "recorder")
+                 item.btn.setStyleSheet("QPushButton { background-color: #8E24AA; color: white; font-weight: bold; border: 2px solid #BA68C8; border-radius: 8px; }")
+                 item.removeClicked.connect(self.remove_electrode)
+                 row = (elec_id - 1) // 3; col = (elec_id - 1) % 3
+                 self.elec_grid.addWidget(item, row, col)
+                 self.electrodes[elec_id] = {'gid': rec_gid, 'widget': item, 'targets': neighbor_indices, 'center': center_pos.tolist(), 'gen_type': 'recorder', 'letter': letter}
+                 self.lbl_tool_status.setText(f"Recorder {letter} added!")
+             except Exception as e: print(f"Monitor Error: {e}")
+
+
+
+    def create_injector_at(self, center_pos, target_gids, neighbor_indices):
+        try:
+            gen_type = self.combo_gen_type.currentData()
+            w = self.stim_params['weight']; d = self.stim_params['delay']
+            
+            if gen_type == 'poisson_generator': 
+                sg = nest.Create('poisson_generator', params={'rate': 0.0})
+            else: 
+                sg = nest.Create('spike_generator')
+            
+            # --- FIX: GIDs SORTIEREN ---
+            targets_sorted = sorted(target_gids.tolist())
+            nest.Connect(sg, nest.NodeCollection(targets_sorted), conn_spec={'rule': 'all_to_all'}, syn_spec={'weight': w, 'delay': d})
+            
+            gen_gid = sg.tolist()[0]
+            elec_id = self.next_electrode_id; self.next_electrode_id += 1
+            letter = InjectorButton.get_next_letter()
+            
+            item = InjectorButton(elec_id, gen_gid, len(target_gids), letter, gen_type)
+            item.triggerClicked.connect(self.trigger_electrode)
+            item.removeClicked.connect(self.remove_electrode)
+            
+            row = (elec_id - 1) // 3; col = (elec_id - 1) % 3
+            self.elec_grid.addWidget(item, row, col)
+            self.electrodes[elec_id] = {'gid': gen_gid, 'widget': item, 'targets': neighbor_indices, 'center': center_pos.tolist(), 'gen_type': gen_type, 'letter': letter}
+            self.lbl_tool_status.setText(f"Injector {letter} added!")
+        except Exception as e: 
+            print(f"Injection err: {e}")
 
     def trigger_electrode(self, gid):
         try:
             elec_data = None
             for e in self.electrodes.values():
-                if e['gid'] == gid:
-                    elec_data = e; break
-            
+                if e['gid'] == gid: elec_data = e; break
             gen_type = elec_data['gen_type'] if elec_data else 'spike_generator'
             letter = elec_data['letter'] if elec_data else '?'
-            
             sg_node = nest.NodeCollection([gid])
             
             if gen_type == 'poisson_generator':
@@ -8466,16 +8478,10 @@ class SimulationViewWidget(QWidget):
                     nest.SetStatus(sg_node, {'rate': r})
                     print(f"🔄 Injector {letter}: ON ({r} Hz)")
             else:
-                # Spike Generator
                 t = nest.GetKernelStatus().get('time', 0.0) + 1.0
                 nest.SetStatus(sg_node, {'spike_times': [t]})
                 print(f"⚡ Injector {letter} FIRED at {t}ms")
-                
-                # --- FIX: KEIN KÜNSTLICHES AUFLEUCHTEN ---
-                # Die Visualisierung wird nun ausschließlich durch echte Spikes (via Recorder) getrieben.
-                
-        except Exception as e:
-            print(f"Fire Error: {e}")
+        except Exception as e: print(f"Fire Error: {e}")
 
     def remove_electrode(self, elec_id):
         if elec_id in self.electrodes:
@@ -8490,100 +8496,22 @@ class SimulationViewWidget(QWidget):
             if item.widget(): item.widget().deleteLater()
         self.next_electrode_id = 1
         InjectorButton.reset_counter()
+        self.conn_source_gids = []
+        if hasattr(self, 'lbl_conn_status'): self.lbl_conn_status.setText("")
 
-    # --- ACTIONS ---
-    def action_start(self):
-        if not self.scene_loaded: self.load_scene()
-        if not self.scene_loaded: return
-        self.is_paused = False
-        self.update_button_styles()
-        self.sigStartContinuous.emit(self.spin_step_size.value(), self.spin_duration.value())
+    def _build_conn_spec(self):
+        rule = self.combo_conn_rule.currentText()
+        spec = {'rule': rule, 'allow_autapses': self.chk_autapses.isChecked(), 'allow_multapses': self.chk_multapses.isChecked()}
+        if rule == "fixed_indegree": spec['indegree'] = self.spin_conn_indegree.value()
+        elif rule == "fixed_outdegree": spec['outdegree'] = self.spin_conn_outdegree.value()
+        elif rule == "fixed_total_number": spec['N'] = self.spin_conn_N.value()
+        elif rule == "pairwise_bernoulli": spec['p'] = self.spin_conn_p.value()
+        return spec
     
-    def action_step(self):
-        if not self.scene_loaded: self.load_scene()
-        self.is_paused = True
-        self.update_button_styles()
-        self.sigStepSimulation.emit(self.spin_step_size.value())
-        
-    def action_pause(self): self.is_paused = True; self.update_button_styles(); self.sigPauseSimulation.emit()
-    def action_stop(self): self.is_paused = True; self.update_button_styles(); self.sigStopSimulation.emit()
-    
-    def action_reset(self): 
-        self.is_paused = True
-        self.update_button_styles()
-        self.unload_scene()
-        self.restore_injectors() 
-        self.sigResetSimulation.emit()
+    def _build_syn_spec(self):
+        return {'synapse_model': 'static_synapse', 'weight': self.spin_conn_weight.value(), 'delay': max(self.spin_conn_delay.value(), 0.1)}
 
-    def update_button_styles(self):
-        base = "QPushButton { font-weight: bold; border-radius: 4px; padding: 5px; }"
-        if not self.is_paused:
-            self.btn_start.setStyleSheet(base + "background-color: #00E676; color: black; border: 2px solid white;")
-            self.btn_start.setText("RUNNING...")
-            self.btn_step.setEnabled(False)
-        else:
-            self.btn_start.setStyleSheet(base + "background-color: #2E7D32; color: #ccc;")
-            self.btn_start.setText("▶ RUN"); self.btn_step.setEnabled(True)
-        self.btn_pause.setStyleSheet(base + "background-color: #FBC02D; color: black;")
-        self.btn_stop.setStyleSheet(base + "background-color: #C62828; color: white;")
 
-    def load_scene(self):
-        if self.scene_loaded: self.unload_scene()
-        points = []; colors = []; gids = []
-        for graph in self.graph_list:
-            for node in graph.node_list:
-                if hasattr(node, 'positions') and node.positions:
-                    for i, clust in enumerate(node.positions):
-                        if clust is None or len(clust) == 0: continue
-                        model = node.neuron_models[i] if hasattr(node, 'neuron_models') and i < len(node.neuron_models) else "unknown"
-                        rgb = mcolors.to_rgba(neuron_colors.get(model, "#fff"), alpha=0.6)
-                        points.append(clust); colors.append(np.tile(rgb, (len(clust), 1)))
-                        if hasattr(node, 'population') and len(node.population) > i and node.population[i]:
-                            ids = nest.GetStatus(node.population[i], 'global_id')
-                            gids.append(np.array(ids)) if len(ids) == len(clust) else gids.append(np.zeros(len(clust), dtype=int))
-                        else: gids.append(np.zeros(len(clust), dtype=int))
-        if not points: return
-        self.all_points = np.vstack(points); self.base_colors = np.vstack(colors)
-        self.current_colors = self.base_colors.copy()
-        self.global_ids = np.concatenate(gids)
-        self.gid_to_idx = {gid: i for i, gid in enumerate(self.global_ids) if gid > 0}
-        N = len(self.all_points)
-        self.anim_rg = np.zeros(N); self.anim_b = np.zeros(N); self.heat = np.zeros(N)
-        self.scatter_item = gl.GLScatterPlotItem(pos=self.all_points, color=self.current_colors, size=self.point_size, pxMode=True)
-        self.scatter_item.setGLOptions('translucent')
-        self.view.addItem(self.scatter_item)
-        self.scene_loaded = True
-        self.render_timer.start(30)
-        print(f"Scene Loaded: {N} neurons.")
-
-    def unload_scene(self):
-        self.render_timer.stop()
-        if self.scatter_item: 
-            try: self.view.removeItem(self.scatter_item)
-            except: pass
-        self.scatter_item = None; self.scene_loaded = False
-
-    def feed_spikes(self, gids):
-        if not self.scene_loaded or not gids: return
-        indices = [self.gid_to_idx[gid] for gid in gids if gid in self.gid_to_idx]
-        if indices: self.anim_rg[indices] = 1.0; self.heat[indices] += 1.0
-
-    def update_animation(self):
-        if not self.scene_loaded or not self.scatter_item: return
-        self.anim_rg *= self.decay_tail; self.anim_b *= self.decay_flash; self.heat *= self.decay_heat
-        if np.max(self.anim_rg) < 0.05 and np.max(self.anim_b) < 0.05: return
-        new_c = self.base_colors.copy()
-        mask = self.anim_rg > 0.05
-        if np.any(mask):
-            val = self.anim_rg[mask, np.newaxis]
-            new_c[mask, 0:3] = np.minimum(1.0, new_c[mask, 0:3] + val)
-            new_c[mask, 3] = np.minimum(1.0, 0.4 + val.flatten())
-        mask_b = self.anim_b > 0.05
-        if np.any(mask_b):
-            val_b = self.anim_b[mask_b, np.newaxis]
-            new_c[mask_b, 2] = np.minimum(1.0, new_c[mask_b, 2] + val_b.flatten())
-            new_c[mask_b, 0:2] *= 0.5; new_c[mask_b, 3] = 1.0
-        self.scatter_item.setData(color=new_c)
 
 
 class InjectorButton(QWidget):
@@ -8994,6 +8922,19 @@ class AnalysisDashboard(QWidget):
         # Start auf Tab 0
         self.switch_view(0)
 
+    def refresh_all_tabs(self):
+        """Erzwingt ein Neuladen der Graphen/Nodes in allen Tabs."""
+        # 1. Graph Info Tab
+        if hasattr(self, 'graph_info'):
+            self.graph_info.refresh_combo()
+            
+        # 2. Time Series Tab (Hier ist das Hauptproblem)
+        if hasattr(self, 'time_series'):
+            self.time_series.refresh_graphs()
+            
+        # 3. Tool Inspector (optional, falls er State hält)
+        # self.tool_inspector.refresh...
+        
     def switch_view(self, index):
         self.content_stack.setCurrentIndex(index)
         
@@ -9035,6 +8976,7 @@ class SimulationDashboardWidget(QWidget):
     """
     requestStartSimulation = pyqtSignal(float) 
     requestStopSimulation = pyqtSignal()
+    sigDurationChanged = pyqtSignal(float)
     requestResetKernel = pyqtSignal()
 
     def __init__(self, graph_list):
@@ -9065,7 +9007,7 @@ class SimulationDashboardWidget(QWidget):
         self.duration_spin.setValue(1000.0)
         self.duration_spin.setSuffix(" ms")
         self.duration_spin.setStyleSheet("font-size: 14px; padding: 5px; color: #00E5FF; font-weight: bold;")
-        
+        self.duration_spin.valueChanged.connect(self.sigDurationChanged.emit)
         self.input_placeholder = QLineEdit("No external input file selected")
         self.input_placeholder.setReadOnly(True)
         self.input_placeholder.setStyleSheet("color: #888; font-style: italic;")
@@ -9212,6 +9154,15 @@ class SimulationDashboardWidget(QWidget):
         self.lbl_neurons.setText(str(total_neurons))
         self.lbl_conns.setText(str(total_conns))
         self._plot_pie_chart(model_counts)
+
+
+
+    def update_duration_from_external(self, val):
+        """Setzt den Wert, ohne das Signal erneut zu feuern (verhindert Loop)."""
+        self.duration_spin.blockSignals(True)
+        self.duration_spin.setValue(val)
+        self.duration_spin.blockSignals(False)
+
 
     def _plot_pie_chart(self, counts):
         self.figure.clear()
@@ -9407,62 +9358,91 @@ class GraphInfoWidget(QWidget):
 
 
 
-class TimeSeriesPlotWidget(QWidget):
 
+
+
+
+# ==============================================================================
+# EINFÜGEN IN WidgetLib.py (Ersetzt TimeSeriesPlotWidget)
+# ==============================================================================
+
+class TimeSeriesPlotWidget(QWidget):
+    """
+    Advanced Analysis Dashboard.
+    Analysiert Daten basierend auf dem gewählten Gerätetyp (Spike Recorder / Multimeter).
+    Bietet 2D (Matplotlib/PyQtGraph) und 3D (OpenGL) Visualisierungen.
+    """
     def __init__(self, graph_list):
         super().__init__()
         self.graph_list = graph_list
+        self.current_data = {} # Cache für geladene Daten
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        # --- Controls (Dark Mode Style) ---
+        # --- Top Controls ---
         ctrl_frame = QFrame()
         ctrl_frame.setStyleSheet("background-color: #2b2b2b; border: 1px solid #444; border-radius: 4px;")
         ctrl_layout = QHBoxLayout(ctrl_frame)
         
-        lbl_style = "color: #ddd; font-weight: bold;"
-        combo_style = "background-color: #1e1e1e; color: white; border: 1px solid #555; padding: 2px;"
+        style_combo = "background-color: #1e1e1e; color: white; border: 1px solid #555; padding: 4px;"
+        style_lbl = "color: #ddd; font-weight: bold;"
         
-        self.combo_graph = QComboBox()
-        self.combo_graph.setStyleSheet(combo_style)
-        self.combo_node = QComboBox()
-        self.combo_node.setStyleSheet(combo_style)
-        self.combo_device = QComboBox()
-        self.combo_device.setStyleSheet(combo_style)
+        self.combo_graph = QComboBox(); self.combo_graph.setStyleSheet(style_combo)
+        self.combo_node = QComboBox(); self.combo_node.setStyleSheet(style_combo)
+        self.combo_device = QComboBox(); self.combo_device.setStyleSheet(style_combo)
         
-        self.btn_plot = QPushButton("Plot Data")
-        self.btn_plot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; border-radius: 3px; padding: 5px 15px;")
+        # Analysis Type Selector (wird dynamisch gefüllt)
+        self.combo_analysis = QComboBox()
+        self.combo_analysis.setStyleSheet("background-color: #004d40; color: white; border: 1px solid #00695c; padding: 4px; font-weight: bold;")
         
-        ctrl_layout.addWidget(QLabel("Graph:", styleSheet=lbl_style))
+        self.btn_plot = QPushButton("📊 ANALYZE")
+        self.btn_plot.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_plot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; border-radius: 3px; padding: 6px 20px;")
+        
+        ctrl_layout.addWidget(QLabel("Graph:", styleSheet=style_lbl))
         ctrl_layout.addWidget(self.combo_graph)
-        ctrl_layout.addWidget(QLabel("Node:", styleSheet=lbl_style))
+        ctrl_layout.addWidget(QLabel("Node:", styleSheet=style_lbl))
         ctrl_layout.addWidget(self.combo_node)
-        ctrl_layout.addWidget(QLabel("Device:", styleSheet=lbl_style))
-        ctrl_layout.addWidget(self.combo_device)
+        ctrl_layout.addWidget(QLabel("Device:", styleSheet=style_lbl))
+        ctrl_layout.addWidget(self.combo_device, 1) # Stretch
+        ctrl_layout.addWidget(QLabel("Tool:", styleSheet=style_lbl))
+        ctrl_layout.addWidget(self.combo_analysis, 1)
         ctrl_layout.addWidget(self.btn_plot)
-        ctrl_layout.addStretch()
         
         layout.addWidget(ctrl_frame)
         
-        # --- Plot Area (Light Mode) ---
-        # Figure facecolor='white' macht den Hintergrund weiß
-        self.figure = Figure(figsize=(8, 6), facecolor='white')
-        self.canvas = FigureCanvas(self.figure)
+        # --- Content Stack (2D vs 3D) ---
+        self.stack = QStackedWidget()
         
-        # Canvas expandieren lassen
-        sizePolicy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.canvas.setSizePolicy(sizePolicy)
+        # View 0: PyQtGraph 2D (GraphicsLayoutWidget)
+        self.pg_view = pg.GraphicsLayoutWidget()
+        self.pg_view.setBackground('w') # Weißer Hintergrund wie gewünscht
+        self.stack.addWidget(self.pg_view)
         
-        layout.addWidget(self.canvas)
+        # View 1: 3D OpenGL (SafeGLViewWidget)
+        self.gl_view = SafeGLViewWidget()
+        self.gl_view.opts['distance'] = 200
+        self.gl_view.setBackgroundColor('k') # Schwarz für 3D cool
+        self.stack.addWidget(self.gl_view)
         
-        # Events
+        # View 2: Matplotlib (Fallback / Speziell)
+        self.fig = Figure(figsize=(5, 4), facecolor='white')
+        self.mpl_canvas = FigureCanvas(self.fig)
+        self.stack.addWidget(self.mpl_canvas)
+        
+        layout.addWidget(self.stack)
+        
+        # --- Logic Connections ---
         self.combo_graph.currentIndexChanged.connect(self.on_graph_changed)
         self.combo_node.currentIndexChanged.connect(self.on_node_changed)
-        self.btn_plot.clicked.connect(self.plot_data)
+        self.combo_device.currentIndexChanged.connect(self.on_device_changed)
+        self.btn_plot.clicked.connect(self.run_analysis)
         
         self.refresh_graphs()
+
+    # --- Data Loading & Navigation ---
 
     def refresh_graphs(self):
         self.combo_graph.blockSignals(True)
@@ -9477,122 +9457,343 @@ class TimeSeriesPlotWidget(QWidget):
         self.combo_node.blockSignals(True)
         self.combo_node.clear()
         gid = self.combo_graph.currentData()
-        
         graph = next((g for g in self.graph_list if g.graph_id == gid), None)
         if graph:
             for node in graph.node_list:
                 self.combo_node.addItem(f"{node.name} (ID: {node.id})", node)
-        
         self.combo_node.blockSignals(False)
         self.on_node_changed()
 
     def on_node_changed(self):
+        self.combo_device.blockSignals(True)
         self.combo_device.clear()
         node = self.combo_node.currentData()
         if not node: return
         
-        known_devices = set()
+        # Sammle alle Devices aus History und Config
+        known_devices = {} # id -> model
         
+        # 1. Config Devices
         if hasattr(node, 'devices'):
             for d in node.devices:
-                dev_id = d.get('id')
-                model = d.get('model', 'unknown')
-                known_devices.add((dev_id, model))
-        
+                known_devices[d.get('id')] = d.get('model', 'unknown')
+                
+        # 2. History Devices
         if hasattr(node, 'results') and 'history' in node.results:
             for entry in node.results['history']:
                 if 'devices' in entry:
-                    for dev_id_str, info in entry['devices'].items():
+                    for did_str, info in entry['devices'].items():
                         try:
-                            did = int(dev_id_str)
-                            model = info.get('model', 'unknown')
-                            known_devices.add((did, model))
+                            did = int(did_str)
+                            if did not in known_devices:
+                                known_devices[did] = info.get('model', 'unknown')
                         except: pass
         
-        for did, model in sorted(known_devices):
-            self.combo_device.addItem(f"Dev {did}: {model}", did)
+        for did in sorted(known_devices.keys()):
+            model = known_devices[did]
+            # Nur Recorder und Meter interessieren uns
+            if "recorder" in model or "meter" in model:
+                self.combo_device.addItem(f"#{did}: {model}", (did, model))
+                
+        self.combo_device.blockSignals(False)
+        self.on_device_changed()
 
-    def plot_data(self):
-        self.figure.clear()
-        # Weißer Subplot
-        ax = self.figure.add_subplot(111)
+    def on_device_changed(self):
+        """Aktualisiert die verfügbaren Tools basierend auf dem Gerätetyp."""
+        self.combo_analysis.clear()
+        data = self.combo_device.currentData()
+        if not data: return
         
+        did, model = data
+        
+        if "spike_recorder" in model:
+            self.combo_analysis.addItems([
+                "Raster Plot (2D)", 
+                "Population Activity (Histogram)", 
+                "Firing Rate (Line)", 
+                "ISI Distribution (Histogram)",
+                "Spike Matrix (Heatmap)",
+                "3D Spike Cloud",
+                "3D Activity Surface"
+            ])
+        elif "meter" in model or "multimeter" in model:
+            self.combo_analysis.addItems([
+                "Membrane Potential (Traces)",
+                "V_m Heatmap",
+                "3D V_m Surface"
+            ])
+
+    def _fetch_data(self):
+        """Sammelt ALLE historischen Daten für das gewählte Gerät."""
         node = self.combo_node.currentData()
-        dev_id = self.combo_device.currentData()
+        dev_data_raw = self.combo_device.currentData()
+        if not node or not dev_data_raw: return None
         
-        if not node or dev_id is None:
-            ax.text(0.5, 0.5, "No device selected", ha='center', color='black')
-            self.canvas.draw()
-            return
+        dev_id, model = dev_data_raw
+        
+        if not hasattr(node, 'results') or 'history' not in node.results:
+            return None
             
-        if not hasattr(node, 'results') or 'history' not in node.results or not node.results['history']:
-            ax.text(0.5, 0.5, "No history data available", ha='center', color='black')
-            self.canvas.draw()
-            return
-
-        all_times = []
-        all_senders = [] 
-        all_values = {}  
+        # Container
+        merged = {'times': [], 'senders': [], 'V_m': [], 'model': model, 'dev_id': dev_id}
         
-        found_any = False
-        device_type = "unknown"
-        
+        # Iteriere durch History (Snapshots)
         for run in node.results['history']:
-            dev_data = run['devices'].get(dev_id) or run['devices'].get(str(dev_id))
+            if 'devices' not in run: continue
             
-            if not dev_data or 'data' not in dev_data: continue
+            # ID kann str oder int sein im JSON
+            dev_entry = run['devices'].get(dev_id) or run['devices'].get(str(dev_id))
+            if not dev_entry or 'data' not in dev_entry: continue
             
-            found_any = True
-            raw = dev_data['data']
+            d = dev_entry['data']
             
-            if 'times' in raw: all_times.extend(raw['times'])
-            if 'senders' in raw:
-                all_senders.extend(raw['senders'])
-                device_type = "spike_recorder"
+            # Daten anhängen
+            if 'times' in d: merged['times'].extend(d['times'])
+            if 'senders' in d: merged['senders'].extend(d['senders'])
+            if 'V_m' in d: merged['V_m'].extend(d['V_m'])
             
-            for k, v in raw.items():
-                if k not in ['times', 'senders']:
-                    if k not in all_values: all_values[k] = []
-                    all_values[k].extend(v)
-                    device_type = "meter"
+        # Convert to Numpy
+        if merged['times']: merged['times'] = np.array(merged['times'])
+        if merged['senders']: merged['senders'] = np.array(merged['senders'])
+        if merged['V_m']: merged['V_m'] = np.array(merged['V_m'])
+        
+        return merged
 
-        if not found_any or not all_times:
-            ax.text(0.5, 0.5, "No data in history", ha='center', color='black')
-            self.canvas.draw()
+    def run_analysis(self):
+        data = self._fetch_data()
+        if not data or len(data['times']) == 0:
+            print("No data found for this device.")
             return
 
-        times = np.array(all_times)
+        mode = self.combo_analysis.currentText()
+        
+        # Cleanup Views
+        self.pg_view.clear()
+        self.gl_view.items = [] # Reset GL items
+        self.fig.clear()
+        
+        # Switch Logic
+        if "3D" in mode:
+            self.stack.setCurrentIndex(1) # OpenGL
+            self._plot_3d(data, mode)
+        elif "Matplotlib" in mode: # Fallback option falls gewünscht
+            self.stack.setCurrentIndex(2) # MPL
+            self._plot_mpl(data, mode)
+        else:
+            self.stack.setCurrentIndex(0) # PyQtGraph 2D
+            self._plot_2d(data, mode)
+
+    # --- 2D Plotting Implementations (PyQtGraph) ---
+    
+    def _plot_2d(self, data, mode):
+        times = data['times']
+        
+        # Sortieren (wichtig für Line Plots)
         sort_idx = np.argsort(times)
         times = times[sort_idx]
         
-        if device_type == "spike_recorder":
-            senders = np.array(all_senders)[sort_idx]
-            # Schwarze Punkte für Spikes
-            ax.scatter(times, senders, s=5, c='black', marker='|')
-            ax.set_ylabel("Neuron ID", color='black')
-            ax.set_title(f"Raster Plot (Dev {dev_id})", color='black')
+        if mode == "Raster Plot (2D)":
+            senders = data['senders'][sort_idx]
+            p = self.pg_view.addPlot(title=f"Spike Raster (#{data['dev_id']})")
+            # Optimierter Scatter für viele Punkte
+            scatter = pg.ScatterPlotItem(x=times, y=senders, size=3, pen=None, brush='k')
+            p.addItem(scatter)
+            p.setLabel('bottom', 'Time', 'ms')
+            p.setLabel('left', 'Neuron ID')
+
+        elif mode == "Population Activity (Histogram)":
+            p = self.pg_view.addPlot(title="Population Activity (PSTH)")
+            y, x = np.histogram(times, bins=100)
+            # Bar graph construct
+            curve = pg.BarGraphItem(x=x[:-1], height=y, width=(x[1]-x[0]), brush='b')
+            p.addItem(curve)
+            p.setLabel('bottom', 'Time', 'ms')
+            p.setLabel('left', 'Spike Count')
+
+        elif mode == "Firing Rate (Line)":
+            # Gleitender Durchschnitt
+            bin_size = 10.0 # ms
+            bins = np.arange(times.min(), times.max() + bin_size, bin_size)
+            counts, _ = np.histogram(times, bins=bins)
             
-        elif device_type == "meter":
-            for key, vals in all_values.items():
-                vals = np.array(vals)[sort_idx]
-                ax.plot(times, vals, label=key, linewidth=1.5)
+            unique_senders = len(np.unique(data['senders'])) if len(data['senders']) > 0 else 1
+            rate = counts / (bin_size / 1000.0) / unique_senders
             
-            ax.set_ylabel("Value", color='black')
-            # Legende mit weißem Hintergrund und schwarzem Rahmen
-            ax.legend(facecolor='white', edgecolor='black', labelcolor='black')
-            ax.set_title(f"Analog Signals (Dev {dev_id})", color='black')
-            ax.grid(True, linestyle='--', alpha=0.5, color='gray')
+            p = self.pg_view.addPlot(title="Population Firing Rate")
+            p.plot(bins[:-1], rate, pen=pg.mkPen('r', width=2))
+            p.setLabel('bottom', 'Time', 'ms')
+            p.setLabel('left', 'Rate', 'Hz')
+
+        elif mode == "ISI Distribution (Histogram)":
+            senders = data['senders']
+            isis = []
+            for nid in np.unique(senders):
+                st = np.sort(times[senders == nid])
+                if len(st) > 1:
+                    isis.extend(np.diff(st))
             
-        ax.set_xlabel("Time (ms)", color='black')
+            if isis:
+                p = self.pg_view.addPlot(title="Inter-Spike Intervals (ISI)")
+                y, x = np.histogram(isis, bins=50)
+                bg = pg.BarGraphItem(x=x[:-1], height=y, width=(x[1]-x[0]), brush='g')
+                p.addItem(bg)
+                p.setLabel('bottom', 'ISI', 'ms')
+            else:
+                self.pg_view.addLabel("Not enough spikes for ISI")
+
+        elif mode == "Membrane Potential (Traces)":
+            vals = data['V_m'][sort_idx]
+            # Da Multimeter senders speichert, müssen wir entwirren
+            # Achtung: V_m Array ist flat, wir müssen wissen welcher Sender zu welchem Wert gehört
+            # NEST Multimeter liefert (sender, time, V_m) Tripel.
+            # Im Dictionary sind sie getrennte Arrays gleicher Länge.
+            
+            senders = data.get('senders') # Multimeter hat auch senders!
+            if senders is not None:
+                senders = senders[sort_idx]
+                unique_ids = np.unique(senders)[:10] # Limit auf 10 Neuronen
+                
+                p = self.pg_view.addPlot(title="Membrane Potential (First 10 Neurons)")
+                p.addLegend()
+                
+                colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k', 'orange', 'purple', 'brown']
+                for i, uid in enumerate(unique_ids):
+                    mask = senders == uid
+                    t_u = times[mask]
+                    v_u = vals[mask]
+                    p.plot(t_u, v_u, pen=pg.mkPen(colors[i%len(colors)], width=1.5), name=f"N{uid}")
+                
+                p.setLabel('bottom', 'Time', 'ms')
+                p.setLabel('left', 'Voltage', 'mV')
+
+        elif "Heatmap" in mode:
+            # Generic Heatmap logic
+            self._plot_heatmap_2d(data, mode)
+
+    def _plot_heatmap_2d(self, data, mode):
+        times = data['times']
         
-        # Achsenfarben auf Schwarz setzen
-        ax.tick_params(axis='x', colors='black')
-        ax.tick_params(axis='y', colors='black')
-        for spine in ax.spines.values():
-            spine.set_edgecolor('black')
+        if "Spike" in mode:
+            senders = data['senders']
+            # Binning: X=Time, Y=NeuronID
+            t_bins = 50
+            n_bins = max(10, len(np.unique(senders)))
+            
+            hist, x_edges, y_edges = np.histogram2d(times, senders, bins=[t_bins, n_bins])
+            
+            p = self.pg_view.addPlot(title="Spike Density Heatmap")
+            img = pg.ImageItem(hist)
+            img.setLookupTable(pg.colormap.get('inferno').getLookupTable())
+            p.addItem(img)
+            p.setLabel('bottom', 'Time Bin')
+            p.setLabel('left', 'Neuron Bin')
+            
+            # Colorbar
+            bar = pg.ColorBarItem(values=(0, np.max(hist)), colorMap='inferno')
+            bar.setImageItem(img)
+            
+        elif "V_m" in mode:
+            # V_m Heatmap ist tricky, da wir diskrete Neuronen haben.
+            # Wir machen eine Matrix: Rows=NeuronID, Cols=Time
+            senders = data['senders']
+            vals = data['V_m']
+            
+            u_ids = np.unique(senders)
+            u_ids.sort()
+            
+            # Interpolation auf gemeinsames Zeitgitter
+            common_time = np.linspace(times.min(), times.max(), 200)
+            matrix = np.zeros((len(u_ids), len(common_time)))
+            
+            for i, uid in enumerate(u_ids):
+                mask = senders == uid
+                t_n = times[mask]
+                v_n = vals[mask]
+                # Sortieren
+                s = np.argsort(t_n)
+                if len(s) > 1:
+                    matrix[i, :] = np.interp(common_time, t_n[s], v_n[s])
+            
+            p = self.pg_view.addPlot(title="Membrane Potential Heatmap")
+            img = pg.ImageItem(matrix)
+            img.setLookupTable(pg.colormap.get('viridis').getLookupTable())
+            p.addItem(img)
+            p.setLabel('bottom', 'Time')
+            p.setLabel('left', 'Neuron Index')
+
+    # --- 3D Plotting Implementations (OpenGL) ---
+
+    def _plot_3d(self, data, mode):
+        times = data['times']
         
-        self.figure.tight_layout()
-        self.canvas.draw()
+        self.gl_view.setCameraPosition(distance=100, elevation=30, azimuth=45)
+        
+        # Grid hinzufügen
+        g = gl.GLGridItem()
+        g.scale(10, 10, 1)
+        self.gl_view.addItem(g)
+        
+        if mode == "3D Spike Cloud":
+            senders = data['senders']
+            # Normalize coords
+            x = (times - times.min()) / (times.ptp() + 1e-6) * 100 - 50
+            y = (senders - senders.min()) / (senders.ptp() + 1e-6) * 100 - 50
+            z = np.zeros_like(x)
+            
+            pos = np.column_stack((x, y, z))
+            
+            # Farbe nach Zeit
+            colors = np.zeros((len(pos), 4))
+            colors[:, 0] = (x + 50) / 100.0 # R
+            colors[:, 2] = 1.0 - ((x + 50) / 100.0) # B
+            colors[:, 1] = 0.5
+            colors[:, 3] = 0.8 # Alpha
+            
+            sp = gl.GLScatterPlotItem(pos=pos, color=colors, size=5, pxMode=True)
+            self.gl_view.addItem(sp)
+            
+        elif mode == "3D Activity Surface" or "3D V_m" in mode:
+            # Surface Plot braucht Matrix Daten
+            # Wir recyceln die Heatmap Logik, aber für 3D
+            senders = data['senders']
+            vals = data['V_m'] if "V_m" in mode else np.ones_like(times) # Bei Spikes nur 1
+            
+            # Binned Matrix erstellen
+            t_bins = 50
+            n_bins = 50
+            
+            if "V_m" in mode:
+                 # V_m Interpolation logic (vereinfacht)
+                 pass # Komplex zu implementieren ad-hoc, wir nehmen Scatter als Fallback
+                 self._plot_3d(data, "3D Spike Cloud") # Fallback
+                 return
+            else:
+                # Spike Histogram 2D
+                hist, _, _ = np.histogram2d(times, senders, bins=[t_bins, n_bins])
+                
+                # Scale Z
+                z = hist * 5.0
+                
+                surface = gl.GLSurfacePlotItem(z=z, shader='heightColor', computeNormals=False, smooth=False)
+                # Custom Colormap für Shader
+                surface.shader()['colorMap'] = np.array([0,0,1,1, 0,1,0,1, 1,1,0,1, 1,0,0,1])
+                surface.translate(-t_bins/2, -n_bins/2, 0)
+                surface.scale(2, 2, 1)
+                self.gl_view.addItem(surface)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -9856,172 +10057,6 @@ class ToolInspectorWidget(QWidget):
 
 
 
-
-
-
-class LivePlotWidget(QWidget):
-    """
-    Einzelner Plot für ein Device (im Detail-Bereich).
-    Puffert Daten lokal, um das NEST-Queue-Limit zu umgehen.
-    """
-    def __init__(self, device_id, device_type, params, node_info, max_points=100000, parent=None):
-        super().__init__(parent)
-        self.device_id = device_id
-        self.device_type = device_type
-        self.params = params
-        self.node_info = node_info 
-        self.nest_gid = None 
-        
-        # Puffer-Einstellungen
-        self.max_points = max_points
-        self.global_time_offset = 0.0 
-        self.last_recorded_time = 0.0 # FIX: Initialisierung
-        
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
-        
-        # Header Zeile (Mini)
-        dev_name = params.get('label', device_type)
-        if "recorder" in device_type: dev_name = "Spikes"
-        elif "meter" in device_type: dev_name = "Analog"
-        
-        # Farbe aus Node-Info
-        c_hex = self.node_info.get('color', '#FFFFFF')
-        
-        lbl = QLabel(f"<span style='color:{c_hex}'><b>{dev_name}</b></span> <span style='color:#666'>(#{device_id})</span>")
-        lbl.setStyleSheet("font-size: 9pt; margin-left: 4px;")
-        self.layout.addWidget(lbl)
-
-        # Plot
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_widget.setBackground(None) # Transparent
-        self.plot_widget.setMinimumHeight(120)
-        
-        # Interaktion: Pan/Zoom erlauben, aber Standard ist Auto-Scroll
-        self.plot_widget.setMouseEnabled(x=True, y=True)
-        self.layout.addWidget(self.plot_widget)
-        
-        # Datenspeicher (Listen sind performant genug für append)
-        self.times = []
-        self.senders = []      # Nur für Spike Recorder
-        self.values = {}       # Nur für Multimeter {var_name: []}
-        
-        self.scatter_item = None
-        self.curves = {}
-        
-        self._init_plot_type()
-
-    def _init_plot_type(self):
-        c = QColor(self.node_info.get('color', '#FFFFFF'))
-        
-        if "spike_recorder" in self.device_type:
-            self.plot_widget.setLabel('left', 'Neuron ID')
-            # pxMode=True verhindert "Morphen" beim Zoomen (Punkte bleiben gleich groß)
-            self.scatter_item = pg.ScatterPlotItem(
-                size=3, pen=None, brush=pg.mkBrush(c), 
-                symbol='s', pxMode=True
-            )
-            self.plot_widget.addItem(self.scatter_item)
-            
-        elif "meter" in self.device_type:
-            rec_vars = self.params.get('record_from', ['V_m'])
-            if isinstance(rec_vars, str): rec_vars = [rec_vars]
-            
-            for i, var in enumerate(rec_vars):
-                # Variation der Farbe für verschiedene Variablen
-                pen_c = c
-                if i == 1: pen_c = c.lighter(150)
-                
-                self.curves[var] = self.plot_widget.plot(name=var, pen=pg.mkPen(pen_c, width=1.5))
-                self.values[var] = []
-
-    def set_time_offset(self, offset):
-        """Verschiebt die Zeitachse für neue Daten (bei Reset mit Keep Data)."""
-        self.global_time_offset = offset
-
-    def update_data(self, events):
-        """Nimmt Daten aus NEST entgegen und puffert sie."""
-        raw_times = events.get('times', [])
-        if len(raw_times) == 0: return
-        
-        # Zeit korrigieren (Offset addieren)
-        adj_times = np.array(raw_times) + self.global_time_offset
-        self.last_recorded_time = adj_times[-1]
-        
-        # --- Spikes ---
-        if self.scatter_item:
-            new_senders = events.get('senders', [])
-            self.times.extend(adj_times)
-            self.senders.extend(new_senders)
-            
-            # Limitierung (FIFO Queue)
-            if len(self.times) > self.max_points:
-                cut = len(self.times) - self.max_points
-                self.times = self.times[cut:]
-                self.senders = self.senders[cut:]
-            
-            # Plot Update
-            # Performance-Trick: downsampling für Anzeige bei extrem vielen Punkten?
-            # Hier zeigen wir alles im Puffer an.
-            self.scatter_item.setData(self.times, self.senders)
-
-        # --- Analog ---
-        elif self.curves:
-            self.times.extend(adj_times)
-            
-            # Limitierung Times
-            if len(self.times) > self.max_points:
-                cut = len(self.times) - self.max_points
-                self.times = self.times[cut:]
-            
-            # Werte updaten
-            for k in self.curves:
-                if k in events:
-                    self.values[k].extend(events[k])
-                    # Limitierung Values
-                    if len(self.values[k]) > self.max_points:
-                        v_cut = len(self.values[k]) - self.max_points
-                        self.values[k] = self.values[k][v_cut:]
-            
-            # Kurven zeichnen
-            for k, curve in self.curves.items():
-                if k in self.values:
-                    # Länge angleichen (Sicherheit)
-                    min_len = min(len(self.times), len(self.values[k]))
-                    curve.setData(self.times[:min_len], self.values[k][:min_len])
-        
-        # Auto-Scroll (Window: Letzte 2000ms)
-        if len(self.times) > 0:
-            last = self.times[-1]
-            # update range, disable auto-range to prevent flickering
-            self.plot_widget.setXRange(max(0, last - 2000), last + 10, padding=0)
-
-    def clear_data(self):
-        self.times = []
-        self.senders = []
-        for k in self.values: self.values[k] = []
-        self.global_time_offset = 0.0
-        self.last_recorded_time = 0.0
-        
-        if self.scatter_item: self.scatter_item.clear()
-        for c in self.curves.values(): c.clear()
-    
-    def get_full_history(self):
-        """Exportiert alle Daten im aktuellen Puffer."""
-        d = {
-            "times": list(self.times), 
-            "type": self.device_type, 
-            "id": self.device_id
-        }
-        if self.scatter_item:
-            d["senders"] = list(self.senders)
-        elif self.curves:
-            d["values"] = {k: list(v) for k, v in self.values.items()}
-        return d
-
-
 class NodeLiveGroup(QGroupBox):
     """Gruppiert Plots eines Nodes."""
     def __init__(self, graph_id, node_id, node_name, model_name, color_hex, parent=None):
@@ -10092,204 +10127,6 @@ class NodeLiveGroup(QGroupBox):
         pass
 
 
-class LiveDataDashboard(QWidget):
-    # Signale an MainWindow
-    sigStartLive = pyqtSignal(float, float) 
-    sigPauseLive = pyqtSignal()
-    sigResetLive = pyqtSignal(bool) 
-    
-    def __init__(self, graph_list, parent=None):
-        super().__init__(parent)
-        self.graph_list = graph_list
-        self.node_groups = {}
-        self.plot_widgets_map = {} 
-        self.current_max_time = 0.0
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # --- Sidebar ---
-        sidebar = QWidget()
-        sidebar.setFixedWidth(220)
-        sidebar.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
-        sb = QVBoxLayout(sidebar)
-        
-        sb.addWidget(QLabel("LIVE DATA CONTROL", styleSheet="color:#00E5FF; font-weight:bold; margin-bottom:10px;"))
-        
-        self.btn_start = QPushButton("▶ RUN")
-        self.btn_start.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold; padding: 8px;")
-        self.btn_start.clicked.connect(self.on_start)
-        sb.addWidget(self.btn_start)
-        
-        self.btn_pause = QPushButton("⏸ PAUSE")
-        self.btn_pause.setStyleSheet("background-color: #FBC02D; color: black; font-weight: bold; padding: 8px;")
-        self.btn_pause.clicked.connect(self.sigPauseLive.emit)
-        sb.addWidget(self.btn_pause)
-        
-        self.btn_reset = QPushButton("💾 RESET & SAVE")
-        self.btn_reset.setToolTip("Saves history to JSON and resets simulation.")
-        self.btn_reset.setStyleSheet("background-color: #BF360C; color: white; font-weight: bold; padding: 8px;")
-        self.btn_reset.clicked.connect(self.on_reset)
-        sb.addWidget(self.btn_reset)
-        
-        self.chk_keep = QCheckBox("Keep Data on Reset")
-        self.chk_keep.setChecked(True)
-        self.chk_keep.setStyleSheet("color: #ddd; margin-top: 5px;")
-        sb.addWidget(self.chk_keep)
-        
-        self.btn_clear = QPushButton("🗑 Clear Plots")
-        self.btn_clear.clicked.connect(self.clear_all_plots)
-        self.btn_clear.setStyleSheet("background-color: #444; color: #fff;")
-        sb.addWidget(self.btn_clear)
-        
-        sb.addSpacing(20)
-        
-        grp = QGroupBox("Config")
-        f = QFormLayout(grp)
-        self.spin_step = QDoubleSpinBox(); self.spin_step.setRange(1, 1000); self.spin_step.setValue(25.0); self.spin_step.setSuffix(" ms")
-        self.spin_hist = QSpinBox(); self.spin_hist.setRange(1000, 1000000); self.spin_hist.setValue(50000); self.spin_hist.setSuffix(" pts")
-        self.spin_hist.setToolTip("Max points per plot (FIFO Buffer)")
-        self.spin_hist.valueChanged.connect(self.update_history_len)
-        
-        f.addRow("Step:", self.spin_step)
-        f.addRow("Buffer:", self.spin_hist)
-        sb.addWidget(grp)
-        
-        btn_scan = QPushButton("↻ Rescan Devices")
-        btn_scan.clicked.connect(self.scan_for_devices)
-        sb.addWidget(btn_scan)
-        
-        sb.addStretch()
-        layout.addWidget(sidebar)
-        
-        # --- Content Area ---
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("border: none; background-color: #121212;")
-        
-        self.content = QWidget()
-        self.content.setStyleSheet("background-color: #121212;")
-        self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setSpacing(5)
-        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
-        self.scroll.setWidget(self.content)
-        layout.addWidget(self.scroll)
-        
-        self.rescan_timer = QTimer()
-        self.rescan_timer.setSingleShot(True)
-        self.rescan_timer.timeout.connect(self.scan_for_devices)
-
-    def on_start(self):
-        self.sigStartLive.emit(self.spin_step.value(), 0.0) # 0.0 Duration = Infinite
-
-    def on_reset(self):
-        keep = self.chk_keep.isChecked()
-        if keep:
-            max_t = 0
-            for w in self.plot_widgets_map.values():
-                if w.last_recorded_time > max_t: max_t = w.last_recorded_time
-            self.current_max_time = max_t
-        else:
-            self.current_max_time = 0
-            self.clear_all_plots()
-            
-        self.sigResetLive.emit(keep)
-        self.rescan_timer.start(500)
-
-    def clear_all_plots(self):
-        for w in self.plot_widgets_map.values(): w.clear_data()
-        self.current_max_time = 0
-
-    def update_history_len(self, val):
-        for w in self.plot_widgets_map.values():
-            w.max_points = val
-
-    def scan_for_devices(self):
-        print("Scanning for live devices...")
-        
-        # Bestehende Devices markieren
-        found_dev_keys = set()
-        
-        for graph in self.graph_list:
-            for node in graph.node_list:
-                # 1. Gruppe (Node) finden oder erstellen
-                g_key = (graph.graph_id, node.id)
-                if g_key not in self.node_groups:
-                    model = node.neuron_models[0] if node.neuron_models else "unknown"
-                    c = neuron_colors.get(model, "#ffffff")
-                    group = NodeLiveGroup(graph.graph_id, node.id, node.name, model, c)
-                    self.content_layout.addWidget(group)
-                    self.node_groups[g_key] = group
-                
-                group = self.node_groups[g_key]
-                
-                # 2. Devices finden
-                devices = getattr(node, 'devices', [])
-                if not devices and 'devices' in node.parameters: devices = node.parameters['devices']
-                
-                relevant = [d for d in devices if "recorder" in d.get('model','') or "meter" in d.get('model','')]
-                
-                for dev in relevant:
-                    dtype = dev.get('model')
-                    did = dev.get('id')
-                    d_key = (graph.graph_id, node.id, did)
-                    found_dev_keys.add(d_key)
-                    
-                    nest_gid = dev.get('runtime_gid')
-                    
-                    if d_key in self.plot_widgets_map:
-                        # Update
-                        w = self.plot_widgets_map[d_key]
-                        w.nest_gid = nest_gid
-                        w.set_time_offset(self.current_max_time)
-                    else:
-                        # Neu erstellen
-                        model = node.neuron_models[0] if node.neuron_models else "unknown"
-                        c = neuron_colors.get(model, "#fff")
-                        info = {'name': node.name, 'color': c}
-                        
-                        w = LivePlotWidget(did, dtype, dev.get('params',{}), info, max_points=self.spin_hist.value())
-                        w.nest_gid = nest_gid
-                        w.set_time_offset(self.current_max_time)
-                        
-                        self.plot_widgets_map[d_key] = w
-                        group.add_plot(w)
-        
-        # Cleanup Orphans (Entfernte Devices)
-        for k in list(self.plot_widgets_map.keys()):
-            if k not in found_dev_keys:
-                w = self.plot_widgets_map.pop(k)
-                w.deleteLater()
-                
-        # Cleanup Empty Groups
-        for k in list(self.node_groups.keys()):
-            # Prüfen ob die Gruppe noch Plots hat (einfacher Hack: Wir löschen sie hier nicht, 
-            # sondern lassen sie leer stehen, um Flackern zu vermeiden. 
-            # Ein Full Refresh Button könnte aufräumen.)
-            pass
-
-    def update_plots(self):
-        if not self.isVisible(): return
-        for w in self.plot_widgets_map.values():
-            gid = w.nest_gid
-            if gid is None: continue
-            try:
-                status = nest.GetStatus(gid)[0]
-                if status.get('n_events', 0) > 0:
-                    w.update_data(status.get('events', {}))
-                    nest.SetStatus(gid, {'n_events': 0})
-            except: pass
-
-    def get_all_data(self):
-        """Exportiert History."""
-        out = {}
-        for k, w in self.plot_widgets_map.items():
-            name = f"Graph{k[0]}_Node{k[1]}_Dev{k[2]}"
-            out[name] = w.get_full_history()
-        return out
 
 
 
@@ -10410,169 +10247,592 @@ class NodeLiveGroup(QGroupBox):
         self.sum_plot.setTitle("Aggregate Activity (ToDo)", size='8pt')
 
 
+
+
 class LiveDataDashboard(QWidget):
-    sigStartLive = pyqtSignal(float, float) 
-    sigPauseLive = pyqtSignal()
-    sigResetLive = pyqtSignal(bool) 
+    """
+    Passives Dashboard. Empfängt Daten von CleanAlpha (Master-Loop).
+    Features: Lokaler Cache, Synchrones Scrolling, Click-to-Open (keine Checkboxen).
+    Erlaubt gleichzeitiges Öffnen von Rate- und Raster-Plots.
+    """
+    # View Modes (bestimmen, was beim Klick auf eine Population passiert)
+    MODE_POP_ACTIVITY = 0 # Öffnet Rate Plot
+    MODE_DEVICE_DETAIL = 1 # Öffnet Raster Plot
     
     def __init__(self, graph_list, parent=None):
         super().__init__(parent)
         self.graph_list = graph_list
-        self.node_groups = {} # Map: (graph_id, node_id) -> NodeLiveGroup
-        self.plot_widgets_map = {} # Map: key -> widget
-        self.current_max_time = 0.0
+        # Map speichert jetzt: (GraphID, NodeID, PopID, TYP) -> Widget
+        self.active_plots_map = {} 
+        self.current_view_mode = self.MODE_POP_ACTIVITY
+        
+        # Lokaler Datencache {gid: {'times': [], 'senders': [], 'values': []}}
+        self.data_cache = {} 
+        self.time_window = 1000.0 
+        
         self.init_ui()
 
     def init_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # --- Sidebar ---
-        sidebar = QWidget()
-        sidebar.setFixedWidth(220)
-        sidebar.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
-        sb_layout = QVBoxLayout(sidebar)
+        # --- Linke Seite: Config ---
+        left_container = QWidget()
+        left_container.setFixedWidth(280) 
+        left_container.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setSpacing(10)
         
-        sb_layout.addWidget(QLabel("LIVE MONITOR", styleSheet="color:#00E5FF; font-weight:bold;"))
+        left_layout.addWidget(QLabel("DATA VISUALIZATION", styleSheet="color:#00E5FF; font-weight:bold; font-size:12px; margin-top:5px;"))
+
+        # Mode Buttons (Bestimmen Klick-Verhalten)
+        mode_group = QFrame()
+        mode_group.setStyleSheet("background-color: #1a1a1a; border-radius: 4px; padding: 2px;")
+        mode_l = QHBoxLayout(mode_group)
+        mode_l.setContentsMargins(0,0,0,0); mode_l.setSpacing(1)
         
-        self.btn_start = QPushButton("▶ RUN"); self.btn_start.clicked.connect(self.on_start)
-        self.btn_start.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold;")
-        sb_layout.addWidget(self.btn_start)
+        self.btn_mode_pop = QPushButton("📈 Add Activity Plot")
+        self.btn_mode_detail = QPushButton("⚡ Add Raster Plot")
+        self.mode_btns = [self.btn_mode_pop, self.btn_mode_detail]
         
-        self.btn_pause = QPushButton("⏸ PAUSE"); self.btn_pause.clicked.connect(self.sigPauseLive.emit)
-        self.btn_pause.setStyleSheet("background-color: #FBC02D; color: black; font-weight: bold;")
-        sb_layout.addWidget(self.btn_pause)
+        for i, btn in enumerate(self.mode_btns):
+            btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setFixedHeight(30)
+            btn.setStyleSheet(self._get_mode_btn_style(False))
+            btn.clicked.connect(lambda checked, idx=i: self.set_view_mode(idx))
         
-        self.btn_reset = QPushButton("💾 RESET"); self.btn_reset.clicked.connect(self.on_reset)
-        self.btn_reset.setStyleSheet("background-color: #D32F2F; color: white; font-weight: bold;")
-        sb_layout.addWidget(self.btn_reset)
+        mode_l.addWidget(self.btn_mode_pop)
+        mode_l.addWidget(self.btn_mode_detail)
+        left_layout.addWidget(QLabel("Click Action (Select Mode then Click Item):", styleSheet="color:#aaa; font-size:10px; margin-top:5px;"))
+        left_layout.addWidget(mode_group)
         
-        self.chk_keep = QCheckBox("Keep Data"); self.chk_keep.setChecked(True)
-        sb_layout.addWidget(self.chk_keep)
+        # Time Window
+        win_group = QGroupBox("Time Window")
+        win_l = QFormLayout(win_group)
+        self.spin_window = QDoubleSpinBox()
+        self.spin_window.setRange(100, 60000)
+        self.spin_window.setValue(1000.0)
+        self.spin_window.setSuffix(" ms")
+        self.spin_window.valueChanged.connect(self.update_time_window)
+        win_l.addRow("History:", self.spin_window)
+        left_layout.addWidget(win_group)
         
-        btn_scan = QPushButton("↻ Rescan"); btn_scan.clicked.connect(self.scan_for_devices)
-        sb_layout.addWidget(btn_scan)
+        # Tree View
+        left_layout.addWidget(QLabel("Available Sources:", styleSheet="color: #bbb; margin-top: 5px;"))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(15)
+        self.tree.setStyleSheet("""
+            QTreeWidget { background-color: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #eee; }
+            QTreeWidget::item { padding: 6px; border-bottom: 1px solid #2a2a2a; }
+            QTreeWidget::item:hover { background-color: #333; }
+            QTreeWidget::item:selected { background-color: #264f78; color: white; }
+        """)
+        self.tree.itemClicked.connect(self.on_tree_item_clicked)
+        left_layout.addWidget(self.tree)
         
-        sb_layout.addStretch()
-        layout.addWidget(sidebar)
+        # Settings
+        grp = QGroupBox("Control")
+        f = QFormLayout(grp)
+        btn_scan = QPushButton("↻ Rescan Sources")
+        btn_scan.setStyleSheet("background-color: #333; color: white; padding: 5px;")
+        btn_scan.clicked.connect(self.scan_for_devices)
+        f.addRow(btn_scan)
         
-        # --- Content (Scroll Area) ---
+        btn_clear = QPushButton("🗑 Clear Plots")
+        btn_clear.clicked.connect(self.close_all_plots)
+        f.addRow(btn_clear)
+        
+        left_layout.addWidget(grp)
+        layout.addWidget(left_container)
+        
+        # --- Rechte Seite: Plots ---
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet("border: none; background-color: #121212;")
-        
-        self.content = QWidget()
-        self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setSpacing(10)
-        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
-        self.scroll.setWidget(self.content)
+        self.plot_container = QWidget()
+        self.plot_container.setStyleSheet("background-color: #121212;")
+        self.plot_layout = QVBoxLayout(self.plot_container)
+        self.plot_layout.setContentsMargins(10, 10, 10, 50)
+        self.plot_layout.setSpacing(10)
+        self.plot_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(self.plot_container)
         layout.addWidget(self.scroll)
         
-        self.rescan_timer = QTimer(); self.rescan_timer.setSingleShot(True); self.rescan_timer.timeout.connect(self.scan_for_devices)
+        self.set_view_mode(0)
 
-    def on_start(self):
-        self.sigStartLive.emit(25.0, 5000.0) # Defaults
+    def update_time_window(self, val):
+        self.time_window = val
 
-    def on_reset(self):
-        keep = self.chk_keep.isChecked()
-        if keep:
-            max_t = 0
-            for w in self.plot_widgets_map.values():
-                if w.last_recorded_time > max_t: max_t = w.last_recorded_time
-            self.current_max_time = max_t
-        else:
-            self.current_max_time = 0
-            self.clear_all_plots()
+    def process_incoming_data(self, data_snapshot, current_time):
+        if not self.isVisible(): return
+        
+        # 1. Caching (Global)
+        for gid, events in data_snapshot.items():
+            if gid not in self.data_cache:
+                self.data_cache[gid] = {'times': [], 'senders': [], 'values': {}}
             
-        self.sigResetLive.emit(keep)
-        self.rescan_timer.start(200)
+            if 'times' in events:
+                self.data_cache[gid]['times'].extend(events['times'])
+            if 'senders' in events:
+                self.data_cache[gid]['senders'].extend(events['senders'])
+            
+            for k, v in events.items():
+                if k not in ['times', 'senders']:
+                    if k not in self.data_cache[gid]['values']:
+                        self.data_cache[gid]['values'][k] = []
+                    self.data_cache[gid]['values'][k].extend(v)
 
-    def clear_all_plots(self):
-        for w in self.plot_widgets_map.values(): w.clear_data()
-        self.current_max_time = 0
+        # 2. Widgets Updaten
+        # Da wir jetzt unterschiedliche Keys haben, müssen wir den GID-Lookup anpassen
+        for unique_key, w in self.active_plots_map.items():
+            events_accumulated = []
+            target_gids = []
+            
+            try:
+                if isinstance(w, PopulationRatePlot):
+                    for d in w.recorders_data:
+                        raw = d.get('nest_gid')
+                        if raw is not None:
+                            # Safe Access Logic
+                            if hasattr(raw, 'tolist'): target_gids.extend(raw.tolist())
+                            elif isinstance(raw, (list, tuple)): target_gids.extend(raw)
+                            else: target_gids.append(raw)
+                            
+                elif isinstance(w, LivePlotWidget):
+                    val = w.nest_gid
+                    if val is not None:
+                        if hasattr(val, 'tolist'): target_gids.extend(val.tolist())
+                        elif isinstance(val, (list, tuple)): target_gids.extend(val)
+                        else: target_gids.append(val)
+            except Exception: continue
+            
+            for gid in target_gids:
+                if gid in data_snapshot:
+                    events_accumulated.append(data_snapshot[gid])
+            
+            if events_accumulated:
+                if isinstance(w, PopulationRatePlot):
+                    w.update_from_recorders(events_accumulated, current_time)
+                elif isinstance(w, LivePlotWidget):
+                    w.update_data(events_accumulated[0], current_time)
+            
+            # 3. Synchrones Scrolling
+            min_t = max(0, current_time - self.time_window)
+            max_t = max(self.time_window, current_time)
+            w.set_view_range(min_t, max_t)
+
+    def clear_all_data(self):
+        self.data_cache.clear()
+        # Auch Plots leeren
+        for w in self.active_plots_map.values(): 
+            w.clear_data()
+            
+    def close_all_plots(self):
+        # Kopie der Keys, da wir das Dict während der Iteration verändern
+        for key in list(self.active_plots_map.keys()):
+            self._on_widget_closed(key)
+    
+    def reload_and_center(self):
+        self.scan_for_devices()
+
+    # --- GUI Logic ---
+    def _get_mode_btn_style(self, active=False):
+        if active: return "background-color: #2196F3; color: white; font-weight: bold; border: none;"
+        return "background-color: #333; color: #888; border: none;"
+
+    def set_view_mode(self, mode_idx):
+        self.current_view_mode = mode_idx
+        for i, btn in enumerate(self.mode_btns):
+            btn.setChecked(i == mode_idx)
+            btn.setStyleSheet(self._get_mode_btn_style(active=(i == mode_idx)))
+
+    def on_tree_item_clicked(self, item, column):
+        """
+        Der Kern der neuen Logik: Klick öffnet Fenster basierend auf Modus.
+        """
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data: return
+        
+        # Basis-Schlüssel (GraphID, NodeID, PopID/DevID)
+        base_key = data['key']
+        
+        # Entscheiden was passiert
+        if data['type'] == 'pop':
+            if self.current_view_mode == self.MODE_POP_ACTIVITY:
+                # RATE PLOT
+                unique_key = (*base_key, 'rate') # Tuple erweitern
+                if unique_key not in self.active_plots_map:
+                    self._add_pop_plot(data, unique_key)
+                else:
+                    print("Activity plot already open.")
+                    
+            elif self.current_view_mode == self.MODE_DEVICE_DETAIL:
+                # RASTER PLOT
+                unique_key = (*base_key, 'raster') # Tuple erweitern
+                if unique_key not in self.active_plots_map:
+                    self._add_pop_raster_plot(data, unique_key)
+                else:
+                    print("Raster plot already open.")
+        
+        elif data['type'] == 'dev':
+            # Einzelgeräte sind immer Detail
+            unique_key = (*base_key, 'dev_detail')
+            if unique_key not in self.active_plots_map:
+                self._add_dev_plot(data, unique_key)
 
     def scan_for_devices(self):
-        # 1. Bestehende Struktur prüfen
-        found_dev_keys = set()
+        # Keine Checkboxen mehr, wir scannen einfach neu
+        self.tree.clear()
         
         for graph in self.graph_list:
+            g_item = QTreeWidgetItem(self.tree)
+            g_item.setText(0, getattr(graph, 'graph_name', f"Graph {graph.graph_id}"))
+            g_item.setExpanded(True)
+            g_item.setForeground(0, QBrush(QColor("#87CEEB")))
+            
             for node in graph.node_list:
-                # Group Key
-                g_key = (graph.graph_id, node.id)
+                # Prüfen ob Devices existieren
+                has_devs = False
+                if hasattr(node, 'population'):
+                    for i, pop in enumerate(node.population):
+                        devs = getattr(node, 'devices', [])
+                        if not devs and 'devices' in node.parameters: devs = node.parameters['devices']
+                        relevant = [d for d in devs if d.get('target_pop_id') == i]
+                        if relevant: has_devs = True; break
                 
-                # Gruppe erstellen falls nicht existent
-                if g_key not in self.node_groups:
-                    model = node.neuron_models[0] if node.neuron_models else "unknown"
-                    color = neuron_colors.get(model, "#ffffff")
-                    
-                    group = NodeLiveGroup(graph.graph_id, node.id, node.name, model, color)
-                    self.content_layout.addWidget(group)
-                    self.node_groups[g_key] = group
+                if not has_devs: continue
+
+                n_item = QTreeWidgetItem(g_item)
+                n_item.setText(0, node.name)
+                n_item.setExpanded(True)
+                n_item.setForeground(0, QBrush(QColor("#FFD700")))
                 
-                group_widget = self.node_groups[g_key]
-                
-                # Devices scannen
-                devices = getattr(node, 'devices', [])
-                if not devices and 'devices' in node.parameters: devices = node.parameters['devices']
-                
-                for dev in devices:
-                    dtype = dev.get('model', '')
-                    if "recorder" in dtype or "meter" in dtype:
-                        dev_id = dev.get('id')
-                        d_key = (graph.graph_id, node.id, dev_id)
-                        found_dev_keys.add(d_key)
-                        nest_gid = dev.get('runtime_gid')
+                if hasattr(node, 'population'):
+                    for i, pop in enumerate(node.population):
+                        devs = getattr(node, 'devices', [])
+                        if not devs and 'devices' in node.parameters: devs = node.parameters['devices']
+                        pop_recorders = [d for d in devs if d.get('target_pop_id') == i]
                         
-                        if d_key in self.plot_widgets_map:
-                            # Update
-                            self.plot_widgets_map[d_key].nest_gid = nest_gid
-                            self.plot_widgets_map[d_key].set_time_offset(self.current_max_time)
-                        else:
-                            # Create
-                            model = node.neuron_models[0] if node.neuron_models else "unknown"
-                            c = neuron_colors.get(model, "#fff")
-                            info = {'name': node.name, 'color': c}
+                        if not pop_recorders: continue
+                        
+                        p_item = QTreeWidgetItem(n_item)
+                        model = node.neuron_models[i] if i < len(node.neuron_models) else "unknown"
+                        p_item.setText(0, f"Pop {i}: {model}")
+                        
+                        color = neuron_colors.get(model, "#ffffff")
+                        pop_key = (graph.graph_id, node.id, i)
+                        
+                        pop_data = {
+                            'type': 'pop', 
+                            'key': pop_key, 
+                            'info': {'name': f"{node.name}_P{i}", 'count': len(pop) if pop else 0, 'color': color}, 
+                            'recorders': []
+                        }
+                        p_item.setForeground(0, QBrush(QColor("#FFFFFF")))
+                        
+                        for dev in pop_recorders:
+                            d_item = QTreeWidgetItem(p_item)
+                            d_item.setText(0, f"{dev.get('model')} #{dev.get('id')}")
+                            dev_key = (graph.graph_id, node.id, dev.get('id'))
                             
-                            w = LivePlotWidget(dev_id, dtype, dev.get('params',{}), info)
-                            w.nest_gid = nest_gid
-                            w.set_time_offset(self.current_max_time)
+                            # Safe GID extraction
+                            raw_gid = dev.get('runtime_gid')
+                            safe_gid = None
+                            if hasattr(raw_gid, 'tolist'): 
+                                lst = raw_gid.tolist()
+                                if lst: safe_gid = lst[0]
+                            elif isinstance(raw_gid, (list, tuple)):
+                                if raw_gid: safe_gid = raw_gid[0]
+                            else:
+                                safe_gid = raw_gid 
+
+                            dev_data = {
+                                'type': 'dev', 
+                                'key': dev_key, 
+                                'nest_gid': safe_gid, 
+                                'params': dev.get('params', {}), 
+                                'model': dev.get('model'), 
+                                'info': {'name': node.name, 'color': color}
+                            }
+                            d_item.setData(0, Qt.ItemDataRole.UserRole, dev_data)
+                            pop_data['recorders'].append(dev_data)
+                            d_item.setForeground(0, QBrush(QColor("#aaaaaa")))
                             
-                            self.plot_widgets_map[d_key] = w
-                            group_widget.add_device_widget(w)
-        
-        # Cleanup orphans (Devices)
-        to_remove_devs = []
-        for k, w in self.plot_widgets_map.items():
-            if k not in found_dev_keys:
-                w.deleteLater()
-                to_remove_devs.append(k)
-        for k in to_remove_devs: del self.plot_widgets_map[k]
-        
-        # Cleanup empty groups
-        # (Optional: Gruppen löschen die keine Devices mehr haben)
+                        p_item.setData(0, Qt.ItemDataRole.UserRole, pop_data)
 
-    def update_plots(self):
-        if not self.isVisible(): return
-        for w in self.plot_widgets_map.values():
-            gid = w.nest_gid
-            if gid is None: continue
-            try:
-                status = nest.GetStatus(gid)[0]
-                if status.get('n_events', 0) > 0:
-                    w.update_data(status.get('events', {}))
-                    nest.SetStatus(gid, {'n_events': 0})
-            except: pass
-        
-        # Optional: Sum plots updaten
-        # for g in self.node_groups.values(): g.update_sum_plot()
+    # --- Plot Creators ---
+    
+    def _add_pop_plot(self, data, unique_key):
+        info = data['info']
+        w = PopulationRatePlot(str(unique_key), info['name'], info['count'], info['color'], parent=self.plot_container)
+        w.recorders_data = data['recorders']
+        w.closed.connect(lambda: self._on_widget_closed(unique_key))
+        self.plot_layout.addWidget(w)
+        self.active_plots_map[unique_key] = w
 
-    def get_all_data(self):
-        data = {}
-        for k, w in self.plot_widgets_map.items():
-            s = f"G{k[0]}_N{k[1]}_D{k[2]}"
-            data[s] = w.get_full_history()
-        return data
+    def _add_pop_raster_plot(self, data, unique_key):
+        info = data['info']
+        target_dev_data = None
+        # Finde Spike Recorder
+        for dev in data['recorders']:
+            if "spike_recorder" in dev['model']:
+                target_dev_data = dev
+                break
+        
+        if not target_dev_data:
+            print("No spike recorder found for raster.")
+            return
+
+        gid = target_dev_data['nest_gid']
+        w = LivePlotWidget(unique_key, "spike_recorder", target_dev_data['params'], info, parent=self.plot_container)
+        w.nest_gid = gid
+        
+        # Load Cache
+        if gid in self.data_cache:
+            cache = self.data_cache[gid]
+            w.update_data({'times': cache['times'], 'senders': cache['senders']})
+            
+        w.closed.connect(lambda: self._on_widget_closed(unique_key))
+        self.plot_layout.addWidget(w)
+        self.active_plots_map[unique_key] = w
+
+    def _add_dev_plot(self, data, unique_key):
+        gid = data['nest_gid']
+        w = LivePlotWidget(unique_key, data['model'], data['params'], data['info'], parent=self.plot_container)
+        w.nest_gid = gid
+        
+        # Load Cache
+        if gid in self.data_cache:
+            cache = self.data_cache[gid]
+            history = {'times': cache['times'], 'senders': cache['senders']}
+            for k, v in cache['values'].items(): history[k] = v
+            w.update_data(history)
+            
+        w.closed.connect(lambda: self._on_widget_closed(unique_key))
+        self.plot_layout.addWidget(w)
+        self.active_plots_map[unique_key] = w
+
+    def _on_widget_closed(self, unique_key):
+        if unique_key in self.active_plots_map:
+            w = self.active_plots_map.pop(unique_key)
+            w.setParent(None)
+            w.deleteLater()
+
+
+
+
+
+
+class PopulationRatePlot(QWidget):
+    """
+    Summenaktivität Plot. Schließen-Button feuert Signal 'closed'.
+    """
+    closed = pyqtSignal()
+
+    def __init__(self, plot_key, title, neuron_count, color_hex, max_points=2000, parent=None):
+        super().__init__(parent)
+        self.plot_key = plot_key; self.neuron_count = max(1, neuron_count); self.max_points = max_points
+        self.recorders_data = []
+        # Listen statt Numpy für effizientes Append
+        self.time_bins = []
+        self.rate_values = []
+        
+        self.setStyleSheet(f"background-color: #181818; border: 1px solid #444; border-left: 4px solid {color_hex}; border-radius: 4px;")
+        l = QVBoxLayout(self); l.setContentsMargins(0,0,0,0); l.setSpacing(0)
+        
+        h = QWidget(); h.setStyleSheet("background-color: #252525; border-bottom: 1px solid #333;")
+        hl = QHBoxLayout(h); hl.setContentsMargins(5,2,5,2)
+        hl.addWidget(QLabel(f"{title} (N={neuron_count})", styleSheet="color: #eee; font-weight: bold;"))
+        hl.addStretch()
+        
+        b = QPushButton("×"); b.setFixedSize(20,20)
+        b.setStyleSheet("border:none; color:#888; font-weight:bold; background: transparent;")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(self.closed.emit)
+        hl.addWidget(b); l.addWidget(h)
+        
+        self.pw = pg.PlotWidget(); self.pw.setBackground(None); self.pw.showGrid(x=True, y=True, alpha=0.2)
+        self.pw.setMinimumHeight(150); self.pw.setLabel('left', 'Rate', units='Hz')
+        self.pw.setMouseEnabled(x=True, y=True)
+        
+        c = QColor(color_hex)
+        self.curve = self.pw.plot(pen=pg.mkPen(c, width=2), fillLevel=0, brush=pg.mkBrush(c.red(), c.green(), c.blue(), 50))
+        l.addWidget(self.pw)
+
+    def update_from_recorders(self, events_list, current_time):
+        total_spikes = 0
+        for ev in events_list:
+            if 'times' in ev:
+                total_spikes += len(ev['times'])
+        
+        # Rate Schätzung über den aktuellen Zeitschritt
+        # Angenommen dt ~ 25ms. Für exakte Rate bräuchte man delta_t.
+        # Hier vereinfacht für visuelles Feedback.
+        sim_step = 0.025 # 25ms
+        hz = total_spikes / (self.neuron_count * sim_step)
+        
+        self.time_bins.append(current_time)
+        self.rate_values.append(hz)
+        
+        if len(self.time_bins) > self.max_points:
+            self.time_bins = self.time_bins[-self.max_points:]
+            self.rate_values = self.rate_values[-self.max_points:]
+            
+        self.curve.setData(self.time_bins, self.rate_values)
+
+    def set_view_range(self, t_min, t_max):
+        self.pw.setXRange(t_min, t_max, padding=0)
+
+    def center_view(self):
+        if self.time_bins:
+            last = self.time_bins[-1]
+            self.pw.setXRange(max(0, last - 1000), last + 100)
+
+    def clear_data(self):
+        self.time_bins = []; self.rate_values = []; self.curve.clear()
+
+
+
+class LivePlotWidget(QWidget):
+    """
+    Detail-Plot (Spikes/Analog). 
+    - Speichert Daten intern in Listen (schnelles Append).
+    - Initialisiert sich mit Historie.
+    - Flusht Speicher beim Schließen.
+    """
+    closed = pyqtSignal()
+
+    def __init__(self, device_id, device_type, params, node_info, max_points=100000, parent=None):
+        super().__init__(parent)
+        self.nest_gid = None
+        # Großes Limit für lokalen Puffer, damit Historie beim Scrollen sichtbar bleibt
+        self.max_points = max_points 
+        self.device_type = device_type
+        
+        # --- INTERNER PUFFER (Listen für Performance) ---
+        self.data_x = [] # Zeit
+        self.data_y = [] # Neuron ID (Raster) oder Wert (Analog)
+        
+        # Für Multimeter (mehrere Kurven)
+        self.curves = {} 
+        self.curve_data = {} # Key -> List
+        
+        self._init_ui(device_id, params, node_info)
+
+    def _init_ui(self, device_id, params, node_info):
+        self.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; border-radius: 4px;")
+        l = QVBoxLayout(self); l.setContentsMargins(0,0,0,0); l.setSpacing(0)
+        
+        # Header
+        h = QWidget(); h.setStyleSheet("background-color: #252525; border-bottom: 1px solid #333;")
+        hl = QHBoxLayout(h); hl.setContentsMargins(5,2,5,2)
+        c_hex = node_info.get('color', '#FFFFFF')
+        hl.addWidget(QLabel(f"<span style='color:{c_hex}'><b>{node_info.get('name')}</b></span>: {params.get('label', self.device_type)}"))
+        hl.addStretch()
+        
+        b = QPushButton("×"); b.setFixedSize(20,20)
+        b.setStyleSheet("background: transparent; color: #aaa; border: none; font-weight: bold;")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Signal für Schließen
+        b.clicked.connect(self.close_and_flush)
+        hl.addWidget(b); l.addWidget(h)
+        
+        # Plot
+        self.pw = pg.PlotWidget()
+        self.pw.setBackground('#121212')
+        self.pw.showGrid(x=True, y=True, alpha=0.3)
+        self.pw.setMouseEnabled(x=True, y=True)
+        self.pw.getAxis('bottom').setLabel('Time', units='ms')
+        l.addWidget(self.pw)
+        
+        c = QColor(c_hex)
+        self.scatter = None
+        
+        if "spike" in self.device_type:
+            self.pw.setLabel('left', 'Neuron ID')
+            # Raster Plot: Kleine Quadrate
+            self.scatter = pg.ScatterPlotItem(
+                size=3, pen=None, brush=pg.mkBrush(c), symbol='s', pxMode=True
+            )
+            self.pw.addItem(self.scatter)
+            
+        elif "meter" in self.device_type:
+            self.pw.setLabel('left', 'Value')
+            vars = params.get('record_from', ['V_m'])
+            if isinstance(vars, str): vars = [vars]
+            
+            for i, v in enumerate(vars):
+                pen_color = c if i==0 else c.lighter()
+                self.curves[v] = self.pw.plot(name=v, pen=pg.mkPen(pen_color, width=1.5))
+                self.curve_data[v] = []
+
+    def update_data(self, events, current_time=None):
+        """Fügt neue Daten zum internen Puffer hinzu und aktualisiert den Plot."""
+        if not events: return
+        
+        # NEST liefert oft Numpy, wir wollen Listen
+        new_times = events.get('times', [])
+        if hasattr(new_times, 'tolist'): new_times = new_times.tolist()
+        
+        if not new_times: return
+        
+        # --- A) SPIKE RECORDER ---
+        if self.scatter:
+            new_senders = events.get('senders', [])
+            if hasattr(new_senders, 'tolist'): new_senders = new_senders.tolist()
+            
+            if len(new_times) != len(new_senders): return 
+            
+            self.data_x.extend(new_times)
+            self.data_y.extend(new_senders)
+            
+            # Truncate (Ring Buffer Logic)
+            if len(self.data_x) > self.max_points:
+                cut = len(self.data_x) - self.max_points
+                self.data_x = self.data_x[cut:]
+                self.data_y = self.data_y[cut:]
+            
+            # Update Plot (Konvertierung zu Numpy für pyqtgraph)
+            self.scatter.setData(x=np.array(self.data_x), y=np.array(self.data_y))
+                
+        # --- B) MULTIMETER ---
+        elif self.curves:
+            self.data_x.extend(new_times)
+            if len(self.data_x) > self.max_points:
+                self.data_x = self.data_x[-self.max_points:]
+            
+            for k, curve in self.curves.items():
+                if k in events:
+                    vals = events[k]
+                    if hasattr(vals, 'tolist'): vals = vals.tolist()
+                    
+                    self.curve_data[k].extend(vals)
+                    if len(self.curve_data[k]) > self.max_points:
+                        self.curve_data[k] = self.curve_data[k][-self.max_points:]
+                    
+                    # Ensure alignment
+                    min_len = min(len(self.data_x), len(self.curve_data[k]))
+                    curve.setData(np.array(self.data_x[:min_len]), np.array(self.curve_data[k][:min_len]))
+
+    def set_view_range(self, t_min, t_max):
+        """Zwingt den Viewport auf das Zeitfenster (Scrolling)."""
+        self.pw.setXRange(t_min, t_max, padding=0)
+
+    def close_and_flush(self):
+        """Löscht interne Daten und sendet Close-Signal."""
+        self.clear_data() # Flush internal memory
+        self.closed.emit()
+
+    def clear_data(self):
+        """Leert den internen Puffer."""
+        self.data_x = []
+        self.data_y = []
+        for k in self.curve_data: self.curve_data[k] = []
+        if self.scatter: self.scatter.clear()
+        for c in self.curves.values(): c.clear()
+
 
 
 
@@ -10629,19 +10889,3 @@ class LiveConnectionController:
         if pid < len(node.population):
             return node.population[pid]
         return None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
