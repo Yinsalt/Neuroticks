@@ -2,13 +2,15 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSlider, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
-    QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator
+    QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator,QInputDialog
 )
+from ExtraTab import ExtraTabWidget
 import WidgetLib
 import pyqtgraph.dockarea as dock
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt,QSize
 import numpy as np
+
 import time
 from CustomExtension import CustomTabWidget
 import vtk
@@ -408,13 +410,13 @@ class MainWindow(QMainWindow):
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        settings_menu = menubar.addMenu("⚙️ Settings")
-        nest_menu = menubar.addMenu("⚙️ NEST Settings")
+        settings_menu = menubar.addMenu("Settings")
+        nest_menu = menubar.addMenu("NEST Settings")
         self.action_auto_save = QAction("Auto-Save Live History on Reset", self)
         self.action_auto_save.setCheckable(True)
         self.action_auto_save.setChecked(True)
         settings_menu.addAction(self.action_auto_save)
-        self.plasticity_action = QAction("🧠 Structural Plasticity", self)
+        self.plasticity_action = QAction("Structural Plasticity", self)
         self.plasticity_action.setCheckable(True)
         self.plasticity_action.setChecked(self.structural_plasticity_enabled)
         self.plasticity_action.triggered.connect(self.toggle_structural_plasticity)
@@ -422,12 +424,12 @@ class MainWindow(QMainWindow):
         
         nest_menu.addSeparator()
         
-        reset_action = QAction("🔄 Reset NEST Kernel", self)
+        reset_action = QAction("Reset NEST Kernel", self)
         reset_action.triggered.connect(self.manual_nest_reset)
         nest_menu.addAction(reset_action)
         
-        view_menu = menubar.addMenu("👁️ View")
-        refresh_action = QAction("🔄 Refresh Visualizations", self)
+        view_menu = menubar.addMenu("View")
+        refresh_action = QAction("Refresh Visualizations", self)
         refresh_action.triggered.connect(self.update_visualizations)
         view_menu.addAction(refresh_action)
 
@@ -749,12 +751,12 @@ class MainWindow(QMainWindow):
         self.view_switch_style_active = "QPushButton { background-color: #2196F3; color: white; font-weight: bold; border: none; border-radius: 4px; padding: 10px 30px; font-size: 14px; } QPushButton:hover { background-color: #42A5F5; }"
         self.view_switch_style_inactive = "QPushButton { background-color: #333; color: #aaa; font-weight: bold; border: 1px solid #555; border-radius: 4px; padding: 10px 30px; font-size: 14px; } QPushButton:hover { background-color: #444; color: white; }"
         
-        self.btn_view_editor = QPushButton(" EDITOR")
-        self.btn_view_simulation = QPushButton(" SIMULATION")
-        self.btn_view_data = QPushButton(" DATA")
-        self.btn_view_custom = QPushButton(" EXTENSION")
-        
-        for btn in [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom]:
+        self.btn_view_editor = QPushButton("EDITOR")
+        self.btn_view_simulation = QPushButton("INTERACTIVE")
+        self.btn_view_data = QPushButton("LIVE PLOTS")
+        self.btn_view_custom = QPushButton("HISTORY")
+        self.btn_view_extra = QPushButton("FUSION TOOL") 
+        for btn in [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom, self.btn_view_extra]: 
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(self.view_switch_style_inactive)
 
@@ -762,14 +764,21 @@ class MainWindow(QMainWindow):
         self.btn_view_simulation.clicked.connect(lambda: self._switch_main_view(1))
         self.btn_view_data.clicked.connect(lambda: self._switch_main_view(2))
         self.btn_view_custom.clicked.connect(lambda: self._switch_main_view(3))
+        self.btn_view_extra.clicked.connect(lambda: self._switch_main_view(4))
         
-        self.view_buttons = [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom]
+        self.view_buttons = [
+            self.btn_view_editor, 
+            self.btn_view_simulation, 
+            self.btn_view_data, 
+            self.btn_view_custom,
+            self.btn_view_extra
+        ]
         
         switch_layout.addWidget(self.btn_view_editor)
         switch_layout.addWidget(self.btn_view_simulation)
         switch_layout.addWidget(self.btn_view_data)
         switch_layout.addWidget(self.btn_view_custom)
-        switch_layout.addStretch()
+        switch_layout.addWidget(self.btn_view_extra) 
 
         self.global_sim_control = QWidget()
         self.global_sim_control.setStyleSheet("background-color: transparent;")
@@ -777,15 +786,19 @@ class MainWindow(QMainWindow):
         gsc_layout.setContentsMargins(0, 0, 0, 0)
         gsc_layout.setSpacing(8)
         
+        self.global_btn_save_data = QPushButton("Save Data")
+        self.global_btn_save_data.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.global_btn_save_data.setStyleSheet("""
+            QPushButton { background-color: #00897B; color: white; font-weight: bold; border: 1px solid #00695C; border-radius: 3px; padding: 5px 10px; }
+            QPushButton:hover { background-color: #26A69A; }
+        """)
+        self.global_btn_save_data.clicked.connect(self.manual_save_data_dialog)
+        gsc_layout.addWidget(self.global_btn_save_data)
+
         lbl_step = QLabel("Res:"); lbl_step.setStyleSheet("color:#888;")
         self.global_step_spin = QDoubleSpinBox()
         self.global_step_spin.setRange(0.1, 1000); self.global_step_spin.setValue(25.0); self.global_step_spin.setSuffix(" ms")
         self.global_step_spin.setFixedWidth(70); self.global_step_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
-        
-        lbl_dur = QLabel("Target:"); lbl_dur.setStyleSheet("color:#888;")
-        self.global_duration_spin = QDoubleSpinBox()
-        self.global_duration_spin.setRange(0, 1e7); self.global_duration_spin.setValue(1000.0); self.global_duration_spin.setSuffix(" ms")
-        self.global_duration_spin.setFixedWidth(90); self.global_duration_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
         
         self.global_time_label = QLabel("T: 0.0 ms")
         self.global_time_label.setFixedWidth(100)
@@ -795,6 +808,7 @@ class MainWindow(QMainWindow):
         btn_style = "font-weight: bold; border-radius: 3px; padding: 5px 10px;"
         
         self.global_btn_start = QPushButton("▶")
+        self.global_btn_start.setToolTip("Run Continuous")
         self.global_btn_start.setStyleSheet(f"{btn_style} background-color: #2E7D32; color: white;")
         self.global_btn_start.clicked.connect(self._global_start)
         
@@ -803,13 +817,12 @@ class MainWindow(QMainWindow):
         self.global_btn_pause.clicked.connect(self._global_pause)
         
         self.global_btn_reset = QPushButton("↺")
+        self.global_btn_reset.setToolTip("Reset Kernel & Visuals")
         self.global_btn_reset.setStyleSheet(f"{btn_style} background-color: #E65100; color: white;")
         self.global_btn_reset.clicked.connect(self._global_reset)
         
         gsc_layout.addWidget(lbl_step)
         gsc_layout.addWidget(self.global_step_spin)
-        gsc_layout.addWidget(lbl_dur)
-        gsc_layout.addWidget(self.global_duration_spin)
         gsc_layout.addWidget(self.global_time_label)
         gsc_layout.addWidget(self.global_btn_start)
         gsc_layout.addWidget(self.global_btn_pause)
@@ -823,26 +836,159 @@ class MainWindow(QMainWindow):
         self.simulation_view = SimulationViewWidget(graph_list, self)
         self.live_dashboard = LiveDataDashboard(graph_list, self)
         self.custom_tab = CustomTabWidget(graph_list, self)
-        self.data_view = self._create_data_view()
-        
-        self.main_stack.addWidget(self.editor_widget)
-        self.main_stack.addWidget(self.simulation_view)
-        self.main_stack.addWidget(self.live_dashboard)
-        self.main_stack.addWidget(self.custom_tab)
+        self.extra_tab = ExtraTabWidget(graph_list, self) 
+        self.data_view = self._create_data_view() 
+        self.main_stack.addWidget(self.editor_widget)   # Index 0
+        self.main_stack.addWidget(self.simulation_view) # Index 1
+        self.main_stack.addWidget(self.live_dashboard)  # Index 2
+        self.main_stack.addWidget(self.custom_tab)      # Index 3
+        self.main_stack.addWidget(self.extra_tab)       # Index 4 
         
         main_layout.addWidget(self.main_stack)
 
-        self.sim_dashboard.sigDurationChanged.connect(self.global_duration_spin.setValue)
-        self.global_duration_spin.valueChanged.connect(self.sim_dashboard.update_duration_from_external)
-        
         self.update_visualizations()
         self.init_simulation_timer()
         self._switch_main_view(0)
 
-
     def _create_data_view(self):
         self.data_dashboard = AnalysisDashboard(graph_list)
         return self.data_dashboard
+    def manual_save_data_dialog(self):
+        default_name = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        filename, ok = QInputDialog.getText(self, "Save Data", "Filename (without .json):", text=default_name)
+        
+        if ok and filename:
+            if not filename.endswith('.json'):
+                filename += ".json"
+            self.archive_live_data(filename)
+
+
+
+
+
+    def archive_live_data(self, custom_filename=None):
+
+        print("Archiving Simulation Data...")
+        try:
+            raw_live_data = self.live_dashboard.get_all_data()
+            
+            if not raw_live_data:
+                self.status_bar.show_error("No live data found to save.")
+                return
+
+            if custom_filename:
+                filename = custom_filename
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"history_live_{timestamp}.json"
+            
+            if not filename.endswith('.json'):
+                filename += '.json'
+            
+            output_dir = Path("Simulation_History")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            filepath = output_dir / filename
+
+            history_data = {
+                'meta': {
+                    'version': '3.0',
+                    'type': 'neuroticks_history',
+                    'timestamp': str(datetime.now()),
+                },
+                'graphs': []
+            }
+
+            total_measurements = 0
+
+            for graph in graph_list:
+                g_data = {
+                    'graph_id': graph.graph_id,
+                    'graph_name': getattr(graph, 'graph_name', f'Graph_{graph.graph_id}'),
+                    'nodes': []
+                }
+
+                for node in graph.node_list:
+                    n_data = {
+                        'id': node.id,
+                        'name': node.name,
+                        'neuron_models': getattr(node, 'neuron_models', []),
+                        'types': getattr(node, 'types', []),
+                        'devices': [],
+                        'results': {
+                            'history': []
+                        }
+                    }
+                    
+                    all_devices = getattr(node, 'devices', [])
+                    if not all_devices and hasattr(node, 'parameters') and 'devices' in node.parameters:
+                        all_devices = node.parameters['devices']
+                    
+                    run_entry = {'devices': {}}
+                    
+                    for dev in all_devices:
+                        dev_id = dev.get('id', 0)
+                        dev_model = dev.get('model', 'unknown')
+                        runtime_gid = dev.get('runtime_gid')
+                        
+                        dev_config = dev.copy()
+                        if 'runtime_gid' in dev_config:
+                            del dev_config['runtime_gid']
+                        if 'params' in dev_config:
+                            dev_config['params'] = _clean_params(dev_config['params'])
+                        n_data['devices'].append(dev_config)
+                        
+                        search_gid = None
+                        if runtime_gid is not None:
+                            try:
+                                if hasattr(runtime_gid, 'tolist'):
+                                    search_gid = runtime_gid.tolist()[0]
+                                elif isinstance(runtime_gid, list):
+                                    search_gid = runtime_gid[0]
+                                else:
+                                    search_gid = int(runtime_gid)
+                            except:
+                                pass
+                        
+                        if search_gid is not None and search_gid in raw_live_data:
+                            rec_data = raw_live_data[search_gid]
+                            
+                            clean_data = {}
+                            for k, v in rec_data.items():
+                                if k == 'values' and isinstance(v, dict):
+                                    for vk, vv in v.items():
+                                        clean_data[vk] = vv.tolist() if hasattr(vv, 'tolist') else list(vv) if hasattr(vv, '__iter__') and not isinstance(vv, str) else vv
+                                else:
+                                    clean_data[k] = v.tolist() if hasattr(v, 'tolist') else v
+                            
+                            run_entry['devices'][str(dev_id)] = {
+                                'model': dev_model,
+                                'data': clean_data
+                            }
+                            total_measurements += 1
+                    
+                    if run_entry['devices']:
+                        n_data['results']['history'].append(run_entry)
+                    
+                    g_data['nodes'].append(n_data)
+                
+                history_data['graphs'].append(g_data)
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(history_data, f, cls=NumpyEncoder, indent=2)
+                
+            self.status_bar.show_success(f"Saved {total_measurements} device recordings to {filename}")
+            print(f"Saved history with {total_measurements} device recordings.")
+            
+            if hasattr(self, 'custom_tab'):
+                self.custom_tab.refresh_history_list()
+            
+        except Exception as e:
+            print(f"Error archiving data: {e}")
+            import traceback
+            traceback.print_exc()
+            self.status_bar.show_error(f"Save Error: {e}")
+    
+    
     
     def _switch_main_view(self, index):
         self.main_stack.setCurrentIndex(index)
@@ -870,8 +1016,10 @@ class MainWindow(QMainWindow):
         if index == 3:
             if hasattr(self, 'custom_tab'):
                 self.custom_tab.on_tab_active()
-    
-    
+
+        if index == 4:
+            if hasattr(self, 'extra_tab'):
+                self.extra_tab.on_tab_active()
 
 
     def _create_editor_widget(self):
@@ -1047,8 +1195,10 @@ class MainWindow(QMainWindow):
         return layout
         
     
+
     def start_headless_simulation(self, duration):
-        print(f"\n>>> STARTING HEADLESS SIMULATION ({duration} ms) <<<")
+
+        print(f"\n>>> STARTING ROBUST HEADLESS SIMULATION ({duration} ms) <<<")
         
         self.sim_dashboard.set_ui_locked(True)
         self.simulation_view.setEnabled(False)
@@ -1056,18 +1206,33 @@ class MainWindow(QMainWindow):
         
         self.status_bar.set_status("HEADLESS SIMULATION RUNNING...", color="#E65100")
         self.status_bar.set_progress(0)
+        QApplication.processEvents()
         
-        self.headless_target_time = duration
-        self.headless_current_time = 0.0
-        
+        if hasattr(self, 'blink_widget') and self.blink_widget:
+            self.blink_widget.stop_simulation()
+            if hasattr(self.blink_widget, 'timer'): self.blink_widget.timer.stop()
+            
+        if hasattr(self, 'simulation_view') and self.simulation_view:
+            self.simulation_view.stop_rendering_safe()
+
         self._ensure_spike_recorders()
         
         try:
             kernel_time = nest.GetKernelStatus().get('time', 0.0)
-            self.headless_target_time += kernel_time
-        except: pass
+            self.headless_target_time = kernel_time + duration
+            self.headless_start_time = kernel_time
+        except: 
+            self.headless_target_time = duration
+            self.headless_start_time = 0.0
 
-        self.headless_step_size = 50.0
+
+        min_chunk = 50.0
+        max_chunk = 500.0
+        dynamic_chunk = duration / 50.0 
+        self.headless_step_size = max(min_chunk, min(max_chunk, dynamic_chunk))
+        
+        print(f"   -> Optimization: Chunk size set to {self.headless_step_size:.1f} ms")
+
         self.headless_timer = QTimer()
         self.headless_timer.timeout.connect(self.headless_loop_step)
         self.headless_timer.start(0)
@@ -1078,18 +1243,19 @@ class MainWindow(QMainWindow):
             
             remaining = self.headless_target_time - current_time
             
-            if remaining <= 0.0001:
+            if remaining <= 0.001:
                 self.finish_headless_simulation()
                 return
 
             step_to_take = min(self.headless_step_size, remaining)
 
             nest.Simulate(step_to_take)
-            
-            current_time = nest.GetKernelStatus().get('time', 0.0)
-            
-            prog = int((current_time % 1000) / 10)
-            self.status_bar.set_progress(prog)
+
+            total_duration = self.headless_target_time - self.headless_start_time
+            if total_duration > 0:
+                elapsed = current_time - self.headless_start_time + step_to_take
+                prog = int((elapsed / total_duration) * 100)
+                self.status_bar.set_progress(prog)
             
         except Exception as e:
             self.headless_timer.stop()
@@ -1107,15 +1273,22 @@ class MainWindow(QMainWindow):
         else:
             self.status_bar.set_status("Simulation stopped by user.", "#D32F2F")
             
-        self._restore_ui_after_headless()
         self.collect_simulation_results(0)
+        self._restore_ui_after_headless()
 
     def finish_headless_simulation(self):
         self.headless_timer.stop()
-        print(">>> Headless Simulation Finished.")
-        self.status_bar.show_success("Headless Simulation Complete!")
+        
+        final_time = nest.GetKernelStatus().get('time', 0.0)
+        self.update_global_time_display(final_time)
+        
+        print(f">>> Headless Simulation Finished at {final_time:.1f} ms.")
+        self.status_bar.set_status("Collecting Data...", "#1976D2")
+        QApplication.processEvents()
         
         self.collect_simulation_results(0)
+        
+        self.status_bar.show_success(f"Headless Run Complete ({final_time:.1f} ms). Check Data Tab.")
         self._restore_ui_after_headless()
 
     def _restore_ui_after_headless(self):
@@ -1123,7 +1296,11 @@ class MainWindow(QMainWindow):
         self.simulation_view.setEnabled(True)
         self.btn_view_simulation.setEnabled(True)
         self.status_bar.set_progress(100)
-
+        
+        if self.main_stack.currentIndex() == 1: 
+             if hasattr(self, 'blink_widget') and self.blink_widget:
+                 self.blink_widget.start_simulation()
+                 if hasattr(self.blink_widget, 'timer'): self.blink_widget.timer.start(30)
     
 
 
@@ -1138,29 +1315,7 @@ class MainWindow(QMainWindow):
         self.simulation_view.update_time_display(0.0)
 
 
-    def archive_live_data(self):
-        print("Archiving Live Data history...")
-        try:
-            data = self.live_dashboard.get_all_data()
-            if not data:
-                print("No data to save.")
-                return
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"history_live_{timestamp}.json"
-            
-            Path("sim_history").mkdir(exist_ok=True)
-            filepath = Path("sim_history") / filename
-            
-            with open(filepath, 'w') as f:
-                json.dump(data, f, cls=NumpyEncoder, indent=2)
-                
-            self.status_bar.show_success(f"History saved: {filename}")
-            print(f"Saved history to {filepath}")
-            
-        except Exception as e:
-            print(f"Error archiving data: {e}")
-            self.status_bar.show_error(f"Save Error: {e}")
+    
 
     
         
@@ -1611,6 +1766,105 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(main_container)
         
         return wrapper_layout
+    
+
+
+    def save_all_graphs_dialog(self):
+        if not graph_list:
+            QMessageBox.warning(self, "Save Error", "No graphs to save!")
+            return
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
+        )
+
+        if filepath:
+            if not filepath.endswith('.json'):
+                filepath += '.json'
+            
+            try:
+                project_data = {
+                    'meta': {
+                        'version': '2.1',
+                        'type': 'neuroticks_project',
+                        'timestamp': str(np.datetime64('now'))
+                    },
+                    'graphs': []
+                }
+
+                for graph in graph_list:
+                    nodes_data = []
+                    for node in graph.node_list:
+                        
+                        cleaned_devices = []
+                        source_devices = getattr(node, 'devices', [])
+                        if not source_devices and 'devices' in node.parameters:
+                            source_devices = node.parameters['devices']
+
+                        for dev in source_devices:
+                            dev_copy = dev.copy()
+                            if 'runtime_gid' in dev_copy: del dev_copy['runtime_gid']
+                            if 'params' in dev_copy: dev_copy['params'] = _clean_params(dev_copy['params'])
+                            cleaned_devices.append(dev_copy)
+
+                        safe_params = node.parameters.copy() if hasattr(node, 'parameters') else {}
+                        if 'devices' in safe_params: del safe_params['devices']
+
+                        parent_id = None
+                        if hasattr(node, 'parent') and node.parent is not None:
+                            parent_id = node.parent.id
+
+                        node_data = {
+                            'id': node.id,
+                            'name': node.name,
+                            'graph_id': graph.graph_id,
+                            'parameters': _clean_params(safe_params),
+                            
+                            'positions': [pos.tolist() if isinstance(pos, np.ndarray) else list(pos)
+                                          for pos in node.positions] if hasattr(node, 'positions') and node.positions else [],
+                            'center_of_mass': list(node.center_of_mass) if hasattr(node, 'center_of_mass') else [0,0,0],
+                            
+                            'connections': _serialize_connections(node.connections) if hasattr(node, 'connections') else [],
+                            'devices': cleaned_devices,
+                            
+                            'types': node.types if hasattr(node, 'types') else [],
+                            'neuron_models': node.neuron_models if hasattr(node, 'neuron_models') else [],
+                            'distribution': list(node.distribution) if hasattr(node, 'distribution') and node.distribution else [],
+                            
+                            'parent_id': parent_id,
+                            'next_ids': [n.id for n in node.next] if hasattr(node, 'next') else [],
+                            'prev_ids': [n.id for n in node.prev] if hasattr(node, 'prev') else [],
+                        }
+                        nodes_data.append(node_data)
+
+                    graph_data = {
+                        'graph_id': graph.graph_id,
+                        'graph_name': getattr(graph, 'graph_name', f'Graph_{graph.graph_id}'),
+                        'max_nodes': graph.max_nodes,
+                        'init_position': list(graph.init_position) if hasattr(graph, 'init_position') else [0,0,0],
+                        'polynom_max_power': graph.polynom_max_power if hasattr(graph, 'polynom_max_power') else 5,
+                        'polynom_decay': graph.polynom_decay if hasattr(graph, 'polynom_decay') else 0.8, 
+                        'nodes': nodes_data
+                    }
+                    project_data['graphs'].append(graph_data)
+
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(project_data, f, cls=NumpyEncoder, indent=2)
+                
+                self.status_bar.show_success(f"Project saved to {filepath}")
+                print(f"Project saved: {len(graph_list)} graphs.")
+
+            except Exception as e:
+                self.status_bar.show_error(f"Save failed: {e}")
+                print(f"Save failed: {e}")
+                import traceback
+                traceback.print_exc()
+
+
+
+
+
+
     def delete_device_wrapper(self, device_data):
         from PyQt6.QtWidgets import QMessageBox
         
@@ -1806,68 +2060,69 @@ class MainWindow(QMainWindow):
         
    
 
-
     def plot_graph_skeleton(self):
+
         self.graph_plotter.clear()
         
+        self.skeleton_info_map = {}
         self.highlighted_actor = None
         self.original_color = None
         self.original_opacity = None
         
-        self.skeleton_info_map = {}
-        
         self.tooltip_actor = vtk.vtkTextActor()
-        self.tooltip_actor.GetTextProperty().SetFontSize(16)
-        self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 0.0)
+        self.tooltip_actor.GetTextProperty().SetFontSize(14)
+        self.tooltip_actor.GetTextProperty().SetColor(1.0, 1.0, 1.0) 
+        self.tooltip_actor.GetTextProperty().SetBackgroundColor(0.0, 0.0, 0.0) 
+        self.tooltip_actor.GetTextProperty().SetBackgroundOpacity(0.7)
         self.tooltip_actor.GetTextProperty().SetFontFamilyToArial()
         self.tooltip_actor.GetTextProperty().BoldOn()
-        self.tooltip_actor.GetTextProperty().ShadowOn()
         self.tooltip_actor.SetVisibility(False)
         self.graph_plotter.renderer.AddViewProp(self.tooltip_actor)
         
         node_map = {}
         for graph in graph_list:
+            if graph.graph_id in self.hidden_graphs: continue
             for node in graph.node_list:
                 node_map[(graph.graph_id, node.id)] = node
 
         import random
+        import matplotlib.pyplot as plt
 
         for graph in graph_list:
+            if graph.graph_id in self.hidden_graphs: continue
+
             cmap = plt.get_cmap("tab20")
             rgba = cmap(graph.graph_id % 20)
-            graph_color = rgba[:3]
+            graph_node_color = rgba[:3] 
             
             for node in graph.node_list:
+                if (graph.graph_id, node.id) in self.hidden_nodes: continue
+
                 center = np.array(node.center_of_mass)
                 
-                sphere = pv.Sphere(radius=0.5, center=center)
+                sphere = pv.Sphere(radius=0.6, center=center)
                 node_actor = self.graph_plotter.add_mesh(
                     sphere,
-                    color=graph_color,
-                    opacity=0.8,
+                    color=graph_node_color,
+                    opacity=0.9,
                     smooth_shading=True,
                     pickable=True
                 )
                 
                 n_pops = len(node.population) if hasattr(node, 'population') and node.population else 0
-                info_text = f"NODE: {node.name} (ID: {node.id})\nGraph: {graph.graph_id}\nPops: {n_pops}"
+                dev_count = len(node.devices) if hasattr(node, 'devices') else 0
+                if not dev_count and 'devices' in node.parameters: dev_count = len(node.parameters['devices'])
+                
+                info_text = (f"NODE: {node.name}\n"
+                             f"ID: {node.id} (Graph {graph.graph_id})\n"
+                             f"Populations: {n_pops}\n"
+                             f"Devices: {dev_count}\n"
+                             f"Pos: {center.round(2)}")
                 self.skeleton_info_map[node_actor] = info_text
                 
-                has_devices = False
-                if hasattr(node, 'devices') and node.devices:
-                    has_devices = True
-                elif hasattr(node, 'parameters') and node.parameters.get('devices'):
-                    has_devices = True
-                
-                if has_devices:
+                if dev_count > 0:
                     aura = pv.Sphere(radius=0.9, center=center)
-                    self.graph_plotter.add_mesh(
-                        aura,
-                        color="#FF9800",
-                        opacity=0.15,
-                        pickable=False,
-                        smooth_shading=True
-                    )
+                    self.graph_plotter.add_mesh(aura, color="#FFD700", opacity=0.15, pickable=False)
 
                 if hasattr(node, 'connections') and node.connections:
                     for conn in node.connections:
@@ -1876,107 +2131,92 @@ class MainWindow(QMainWindow):
                             tgt_gid = int(target.get('graph_id'))
                             tgt_nid = int(target.get('node_id'))
                             
-                            target_node = node_map.get((tgt_gid, tgt_nid))
+                            if (tgt_gid, tgt_nid) not in node_map: continue
+                            if tgt_gid in self.hidden_graphs: continue
+                            if (tgt_gid, tgt_nid) in self.hidden_nodes: continue
                             
-                            if target_node:
-                                conn_name = conn.get('name', 'Connection')
-                                params = conn.get('params', {})
-                                weight = float(params.get('weight', 0.0))
-                                
-                                if weight > 0:
-                                    edge_color = "#FF3333"
-                                elif weight < 0:
-                                    edge_color = "#3366FF"
-                                else:
-                                    edge_color = "white"
-                                
-                                start = np.array(node.center_of_mass)
-                                end = np.array(target_node.center_of_mass)
-                                
-                                conn_info_text = (f"CONN: {conn_name}\n"
-                                                  f"{node.name} -> {target_node.name}\n"
-                                                  f"Weight: {weight}")
+                            target_node = node_map[(tgt_gid, tgt_nid)]
+                            
+                            params = conn.get('params', {})
+                            weight = float(params.get('weight', 1.0))
+                            conn_name = conn.get('name', 'Connection')
+                            
+                            if weight > 0:
+                                edge_color = "#FF3333" 
+                                conn_type = "Excitatory (+)"
+                            elif weight < 0:
+                                edge_color = "#3366FF" 
+                                conn_type = "Inhibitory (-)"
+                            else:
+                                edge_color = "#888888" 
+                                conn_type = "Silent (0)"
 
-                                if node == target_node:
-                                    torus = pv.ParametricTorus(ringradius=1.2, crosssectionradius=0.08)
-                                    torus.rotate_x(45)
-                                    torus.translate(start)
-                                    
-                                    actor_self = self.graph_plotter.add_mesh(
-                                        torus, color=edge_color, opacity=0.9, pickable=True
-                                    )
-                                    self.skeleton_info_map[actor_self] = conn_info_text + " (Self)"
+                            start = np.array(node.center_of_mass)
+                            end = np.array(target_node.center_of_mass)
+                            
+                            conn_info_text = (f"CONNECTION: {conn_name}\n"
+                                              f"Type: {conn_type}\n"
+                                              f"From: {node.name} (G{graph.graph_id})\n"
+                                              f"To:   {target_node.name} (G{tgt_gid})\n"
+                                              f"Weight: {weight}\n"
+                                              f"Model: {params.get('synapse_model', '?')}")
+
+                            if node == target_node:
+                                torus = pv.ParametricTorus(ringradius=1.2, crosssectionradius=0.08)
+                                torus.rotate_x(45)
+                                torus.translate(start)
+                                actor_self = self.graph_plotter.add_mesh(torus, color=edge_color, opacity=0.8, pickable=True)
+                                self.skeleton_info_map[actor_self] = conn_info_text + " (Self-Loop)"
+                            
+                            else:
+                                mid_point = (start + end) / 2.0
                                 
-                                else:
-                                    mid_point = (start + end) / 2.0
-                                    
-                                    seed = node.id * 100 + target_node.id
-                                    random.seed(seed)
-                                    
-                                    offset = np.array([
-                                        random.uniform(-3, 3),
-                                        random.uniform(-3, 3),
-                                        random.uniform(1, 4)
-                                    ])
-                                    control_point = mid_point + offset
-                                    
-                                    points = np.array([start, control_point, end])
-                                    spline = pv.Spline(points, n_points=20)
-                                    
-                                    actor_line = self.graph_plotter.add_mesh(
-                                        spline,
-                                        color=edge_color,
-                                        line_width=2.0,
-                                        render_lines_as_tubes=True,
-                                        pickable=False
-                                    )
-                                    
-                                    hitbox = spline.tube(radius=0.4)
-                                    actor_hitbox = self.graph_plotter.add_mesh(
-                                        hitbox,
-                                        color=edge_color,
-                                        opacity=0.0,
-                                        pickable=True
-                                    )
-                                    self.skeleton_info_map[actor_hitbox] = conn_info_text
-                                    
-                                    last_pt = spline.points[-1]
-                                    prev_pt = spline.points[-3]
-                                    direction = last_pt - prev_pt
-                                    norm = np.linalg.norm(direction)
-                                    if norm > 0: direction /= norm
-                                    
-                                    cone_pos = end - (direction * 0.5)
-                                    
-                                    arrow_head = pv.Cone(
-                                        center=cone_pos,
-                                        direction=direction,
-                                        height=0.6,
-                                        radius=0.25,
-                                        resolution=12
-                                    )
-                                    
-                                    actor_head = self.graph_plotter.add_mesh(
-                                        arrow_head,
-                                        color=edge_color,
-                                        pickable=False
-                                    )
+                                seed = node.id * 100 + target_node.id
+                                random.seed(seed)
+                                offset = np.array([
+                                    random.uniform(-1.5, 1.5),
+                                    random.uniform(-1.5, 1.5),
+                                    random.uniform(0.5, 2.0)
+                                ])
+                                control_point = mid_point + offset
+                                
+                                points = np.array([start, control_point, end])
+                                spline = pv.Spline(points, n_points=20)
+                                
+                                self.graph_plotter.add_mesh(
+                                    spline, color=edge_color, line_width=2.0, 
+                                    render_lines_as_tubes=True, pickable=False
+                                )
+                                
+                                hitbox = spline.tube(radius=0.3)
+                                actor_hitbox = self.graph_plotter.add_mesh(
+                                    hitbox, color=edge_color, opacity=0.0, pickable=True
+                                )
+                                self.skeleton_info_map[actor_hitbox] = conn_info_text
+                                
+                                last_pt = spline.points[-1]
+                                prev_pt = spline.points[-3]
+                                direction = last_pt - prev_pt
+                                norm = np.linalg.norm(direction)
+                                if norm > 0: direction /= norm
+                                
+                                cone_pos = end - (direction * 0.8) 
+                                arrow_head = pv.Cone(center=cone_pos, direction=direction, height=0.5, radius=0.2, resolution=12)
+                                self.graph_plotter.add_mesh(arrow_head, color=edge_color, pickable=False)
 
                         except Exception as e:
-                            print(f"Error plotting connection skeleton: {e}")
+                            print(f"Error plotting connection: {e}")
 
         try:
             self.graph_plotter.iren.remove_observer(self._observer_tag)
-        except:
-            pass
+        except: pass
+        
         self._observer_tag = self.graph_plotter.iren.add_observer(
             "MouseMoveEvent", self._on_skeleton_hover
         )
         
         self.graph_plotter.reset_camera()
         self.graph_plotter.update()
-
-
     def update_simulation_speed(self, value):
         
         delay = int((100 - value) * 2)
@@ -2000,10 +2240,9 @@ class MainWindow(QMainWindow):
         if self.highlighted_actor and self.highlighted_actor != actor:
             try:
                 prop = self.highlighted_actor.GetProperty()
-                prop.SetColor(self.original_color)
-                prop.SetOpacity(self.original_opacity)
-            except AttributeError:
-                pass
+                if self.original_color: prop.SetColor(self.original_color)
+                if self.original_opacity: prop.SetOpacity(self.original_opacity)
+            except AttributeError: pass
             self.highlighted_actor = None
             self.tooltip_actor.SetVisibility(False)
 
@@ -2017,7 +2256,6 @@ class MainWindow(QMainWindow):
                 
                 prop.SetColor(1.0, 1.0, 1.0)
                 prop.SetOpacity(1.0)
-                prop.SetLineWidth(3.0)
                 
                 text_content = self.skeleton_info_map[actor]
                 self.tooltip_actor.SetInput(text_content)
@@ -2029,7 +2267,6 @@ class MainWindow(QMainWindow):
             self.tooltip_actor.SetVisibility(False)
         
         interactor.Render()
-
 
     def open_live_spectator(self):
 
@@ -2082,24 +2319,56 @@ class MainWindow(QMainWindow):
         for graph in graph_list:
             for node in graph.node_list:
                 if hasattr(node, 'population'):
-                    for pop in node.population:
+                    for pop_idx, pop in enumerate(node.population):
                         if pop is None: continue
                         
                         try:
                             model = nest.GetStatus(pop, 'model')[0]
                             if model in non_spiking:
                                 continue
+                            
+
+                            if not hasattr(node, 'devices'): node.devices = []
+                            if 'devices' not in node.parameters: node.parameters['devices'] = []
+                            
+                            existing = [d for d in node.devices if d.get('target_pop_id') == pop_idx and d.get('is_auto', False)]
+                            
+                            if existing:
+                                rec_entry = existing[0]
+                                rec = rec_entry.get('runtime_gid')
+
+                                try:
+                                    nest.GetStatus(rec) 
+                                except:
+                                    rec = None
                                 
+                                if rec:
+                                    self.live_recorders.append(rec)
+                                    continue
+
                             rec = nest.Create("spike_recorder")
-                            
                             nest.SetStatus(rec, {"record_to": "memory"})
-                            
                             nest.Connect(pop, rec)
-                            
                             self.live_recorders.append(rec)
+                            
+                            auto_device_entry = {
+                                "id": f"auto_{graph.graph_id}_{node.id}_{pop_idx}", 
+                                "model": "spike_recorder",
+                                "target_pop_id": pop_idx,
+                                "params": {"label": "auto_visual_recorder"},
+                                "conn_params": {},
+                                "runtime_gid": rec,
+                                "is_auto": True 
+                            }
+                            
+                            node.devices.append(auto_device_entry)
+                            node.parameters['devices'].append(auto_device_entry)
                             
                         except Exception as e:
                             print(f"Warning creating live recorder: {e}")
+                            
+        if hasattr(self, 'live_dashboard'):
+            QTimer.singleShot(100, self.live_dashboard.scan_for_devices)
 
     def init_simulation_timer(self):
         self.sim_timer = QTimer()
@@ -2118,8 +2387,7 @@ class MainWindow(QMainWindow):
 
     def _global_start(self):
         step = self.global_step_spin.value()
-        duration = self.global_duration_spin.value()
-        self.start_continuous_simulation(step, duration)
+        self.start_continuous_simulation(step, max_duration=0)
         self._update_global_button_state('running')
     
     def _global_step(self):
@@ -2168,9 +2436,9 @@ class MainWindow(QMainWindow):
             self.sim_timer.setInterval(slider_value)
 
 
-    def start_continuous_simulation(self, step_size, max_duration):
+    def start_continuous_simulation(self, step_size, max_duration=None):
+
         step_val = self.global_step_spin.value()
-        duration_val = self.global_duration_spin.value()
         
         self.sim_mode = 'continuous'
         self.sim_step_size = step_val
@@ -2183,12 +2451,10 @@ class MainWindow(QMainWindow):
             
         print(f"Starting Continuous Run from {self.current_nest_time} ms")
 
-        if duration_val > 0:
-            self.sim_target_time = self.current_nest_time + duration_val
-            print(f"  -> Target set to {self.sim_target_time:.1f}ms (+{duration_val}ms)")
-        else:
-            self.sim_target_time = float('inf')
-            print("  -> Infinite Run (Duration = 0)")
+        self.sim_target_time = float('inf')
+        
+        if max_duration is not None and max_duration > 0:
+             self.sim_target_time = self.current_nest_time + max_duration
 
         self.status_bar.set_status("Running...", "#2E7D32")
         self._ensure_spike_recorders()
@@ -2324,7 +2590,7 @@ class MainWindow(QMainWindow):
             self.update_global_time_display(0.0)
             self._update_global_button_state('stopped')
             
-            print("=== RESET COMPLETE: TIME 0.0 ===")
+            print("RESET COMPLETE: TIME 0.0")
             for graph in graph_list:
                 for node in graph.node_list:
                     if not hasattr(node, 'positions') or not node.positions:
@@ -2357,46 +2623,85 @@ class MainWindow(QMainWindow):
  
 
 
+
+
     def _distribute_simulation_data(self):
+
         try:
             k_stat = nest.GetKernelStatus()
             sim_time = k_stat.get('time', k_stat.get('biological_time', 0.0))
         except:
             sim_time = 0.0
 
-        if hasattr(self, 'simulation_view') and self.simulation_view.isVisible():
-            if hasattr(self, 'live_recorders') and self.live_recorders:
-                visual_spikes_flat = []
-                
-                for rec in self.live_recorders:
-                    try:
-                        st = nest.GetStatus(rec)[0]
-                        
-                        if st.get('n_events', 0) > 0:
-                            events = st.get('events', {})
-                            if 'senders' in events:
-                                senders = events['senders']
-                                if hasattr(senders, 'tolist'):
-                                    visual_spikes_flat.extend(senders.tolist())
-                                else:
-                                    visual_spikes_flat.extend(senders)
-                            
-                            nest.SetStatus(rec, {'n_events': 0})
-                    except Exception:
-                        pass
+        visual_only = False
+        if hasattr(self, 'simulation_view') and self.simulation_view.chk_visual_only.isChecked():
+            visual_only = True
 
-                if visual_spikes_flat:
-                    self.simulation_view.feed_spikes(visual_spikes_flat)
-
+        all_events_cache = {}
+        recorders_to_clear = []
         
+        if hasattr(self, 'live_recorders') and self.live_recorders:
+            for rec in self.live_recorders:
+                try:
+                    status = nest.GetStatus(rec)[0]
+                    n_events = status.get('n_events', 0)
+                    if n_events > 0:
+                        events = status.get('events', {})
+                        events_copy = {}
+                        for k, v in events.items():
+                            if hasattr(v, 'copy'):
+                                events_copy[k] = v.copy()
+                            elif hasattr(v, 'tolist'):
+                                events_copy[k] = np.array(v)  
+                            else:
+                                events_copy[k] = v
+                        
+                        nest_id = rec.tolist()[0] if hasattr(rec, 'tolist') else int(rec[0]) if isinstance(rec, list) else int(rec)
+                        all_events_cache[nest_id] = events_copy
+                        recorders_to_clear.append(rec)
+                except Exception:
+                    pass
+
+        if hasattr(self, 'simulation_view') and self.simulation_view.isVisible():
+            visual_spikes_flat = []
+            for nest_id, events in all_events_cache.items():
+                if 'senders' in events:
+                    senders = events['senders']
+                    if hasattr(senders, 'tolist'):
+                        visual_spikes_flat.extend(senders.tolist())
+                    else:
+                        visual_spikes_flat.extend(list(senders))
+            
+            if visual_spikes_flat:
+                self.simulation_view.feed_spikes(visual_spikes_flat)
+
+        QApplication.processEvents()
+
+
+        for rec in recorders_to_clear:
+            try:
+                nest.SetStatus(rec, {'n_events': 0})
+            except:
+                pass
+
+        if visual_only:
+            return
+
         live_data_snapshot = {}
         has_dashboard_data = False
         
         graphs = getattr(self, 'active_graphs', {}).values()
-        if not graphs: graphs = graph_list
+        if not graphs: 
+            graphs = graph_list
+
+        process_counter = 0
 
         for graph in graphs:
             for node in graph.node_list:
+                process_counter += 1
+                if process_counter % 10 == 0:
+                    QApplication.processEvents()
+
                 if not hasattr(node, 'devices') or not node.devices:
                     continue
                 
@@ -2411,52 +2716,43 @@ class MainWindow(QMainWindow):
 
                 for dev in node.devices:
                     gid = dev.get('runtime_gid')
-                    model = dev.get('model', '')
                     dev_id = dev.get('id')
+                    model = dev.get('model', '')
                     
-                    if gid is None: continue
+                    if gid is None: 
+                        continue
                     
-                    if "recorder" in model or "meter" in model:
-                        try:
-                            nest_handle = gid
-                            dict_key = None
-                            
-                            if hasattr(gid, 'tolist'):
-                                vals = gid.tolist()
-                                dict_key = vals[0] if vals else None
-                            elif isinstance(gid, (list, tuple)):
-                                dict_key = gid[0] if gid else None
-                            else:
-                                dict_key = gid
-                                nest_handle = [gid]
-                                
-                            if dict_key is None: continue
+                    nest_id = gid
+                    if isinstance(gid, list) or hasattr(gid, 'tolist'):
+                        nest_id = gid[0] if isinstance(gid, list) else gid.tolist()[0]
 
-                            status = nest.GetStatus(nest_handle)[0]
-                            if status.get('n_events', 0) > 0:
-                                events = status.get('events', {})
-                                
-                                clean_events = {k: (v.tolist() if hasattr(v, 'tolist') else v) for k, v in events.items()}
-                                
-                                step_record["devices"][str(dev_id)] = {
-                                    "type": model,
-                                    "events": clean_events
-                                }
-                                data_in_step = True
-                                
-                                live_data_snapshot[dict_key] = events
-                                has_dashboard_data = True
-                                
-                                nest.SetStatus(nest_handle, {'n_events': 0})
-                                
-                        except Exception:
-                            pass
+                    if "recorder" in model or "meter" in model:
+                        if nest_id in all_events_cache:
+                            events = all_events_cache[nest_id]
+                            
+                            clean_events = {}
+                            for k, v in events.items():
+                                if hasattr(v, 'tolist'): 
+                                    clean_events[k] = v.tolist()
+                                else: 
+                                    clean_events[k] = list(v) if hasattr(v, '__iter__') else v
+                            
+                            step_record["devices"][str(dev_id)] = {
+                                "type": model,
+                                "events": clean_events
+                            }
+                            data_in_step = True
+                            
+                            live_data_snapshot[nest_id] = events
+                            has_dashboard_data = True
                 
                 if data_in_step:
                     node.results["history"].append(step_record)
 
         if has_dashboard_data and hasattr(self, 'live_dashboard'):
             self.live_dashboard.process_incoming_data(live_data_snapshot, sim_time)
+
+
 
 
     def rebuild_all_graphs(
@@ -2581,7 +2877,11 @@ class MainWindow(QMainWindow):
         print("Simulation stopped")
         self.status_bar.set_status("Simulation stopped", color="#F44336")
 
-    def save_all_graphs_dialog(self):
+
+
+
+    def fixed_save_all_graphs_dialog(self):
+        """Korrigierte Version der save_all_graphs_dialog Methode."""
         if not graph_list:
             QMessageBox.warning(self, "Save Error", "No graphs to save!")
             return
@@ -2597,7 +2897,7 @@ class MainWindow(QMainWindow):
             try:
                 project_data = {
                     'meta': {
-                        'version': '2.0',
+                        'version': '2.1', 
                         'type': 'neuroticks_project',
                         'timestamp': str(np.datetime64('now'))
                     },
@@ -2628,10 +2928,16 @@ class MainWindow(QMainWindow):
                             'graph_id': graph.graph_id,
                             'parameters': _clean_params(safe_params),
                             'positions': [pos.tolist() if isinstance(pos, np.ndarray) else list(pos)
-                                          for pos in node.positions] if node.positions else [],
+                                        for pos in node.positions] if node.positions else [],
                             'center_of_mass': list(node.center_of_mass),
                             'connections': _serialize_connections(node.connections),
-                            'devices': cleaned_devices
+                            'devices': cleaned_devices,
+                            'types': node.types if hasattr(node, 'types') else [],
+                            'neuron_models': node.neuron_models if hasattr(node, 'neuron_models') else [],
+                            'distribution': list(node.distribution) if hasattr(node, 'distribution') and node.distribution else [],
+                            'parent_id': node.parent.id if hasattr(node, 'parent') and node.parent else None,
+                            'next_ids': [n.id for n in node.next] if hasattr(node, 'next') else [],
+                            'prev_ids': [n.id for n in node.prev] if hasattr(node, 'prev') else [],
                         }
                         nodes_data.append(node_data)
 
@@ -2641,6 +2947,7 @@ class MainWindow(QMainWindow):
                         'max_nodes': graph.max_nodes,
                         'init_position': list(graph.init_position),
                         'polynom_max_power': graph.polynom_max_power,
+                        'polynom_decay': graph.polynom_decay if hasattr(graph, 'polynom_decay') else 0.8, 
                         'nodes': nodes_data
                     }
                     project_data['graphs'].append(graph_data)
@@ -2656,6 +2963,17 @@ class MainWindow(QMainWindow):
                 print(f"Save failed: {e}")
                 import traceback
                 traceback.print_exc()
+
+
+
+
+
+
+
+
+
+
+
 
     def load_all_graphs_dialog(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -2713,6 +3031,10 @@ class MainWindow(QMainWindow):
                     params['graph_id'] = nd['graph_id']
                     params['connections'] = nd.get('connections', [])
                     
+                    if 'types' in nd and 'types' not in params:
+                        params['types'] = nd['types']
+                    if 'neuron_models' in nd and 'neuron_models' not in params:
+                        params['neuron_models'] = nd['neuron_models']
 
                     if 'devices' in nd:
                         params['devices'] = nd['devices']
@@ -2729,10 +3051,51 @@ class MainWindow(QMainWindow):
                     if nd.get('positions'):
                         new_node.positions = [np.array(pos) for pos in nd['positions']]
                     
+                    if nd.get('distribution'):
+                        new_node.distribution = nd['distribution']
+                    
                     new_node.populate_node()
 
                 graph_list.append(graph)
-                print(f"Graph '{graph.graph_name}' loaded (ID: {gid}). Next ID set to: {WidgetLib.next_graph_id}")
+                print(f"Graph '{graph.graph_name}' loaded (ID: {gid}).")
+
+
+            print("Reconstructing graph topology...")
+            for g_data in project_data['graphs']:
+                gid = g_data['graph_id']
+                current_graph_obj = next((g for g in graph_list if g.graph_id == gid), None)
+                
+                if not current_graph_obj:
+                    continue
+                
+                node_map = {n.id: n for n in current_graph_obj.node_list}
+
+                for nd in g_data['nodes']:
+                    node_id = nd['id']
+                    node_obj = node_map.get(node_id)
+                    
+                    if not node_obj: continue
+
+                    parent_id = nd.get('parent_id')
+                    if parent_id is not None and parent_id in node_map:
+                        node_obj.parent = node_map[parent_id]
+
+
+                    for nid in nd.get('next_ids', []):
+                        if nid in node_map:
+                            target_node = node_map[nid]
+                            if target_node not in node_obj.next:
+                                node_obj.next.append(target_node)
+                            if node_obj not in target_node.prev:
+                                target_node.prev.append(node_obj)
+
+                    for pid in nd.get('prev_ids', []):
+                        if pid in node_map:
+                            source_node = node_map[pid]
+                            if source_node not in node_obj.prev:
+                                node_obj.prev.append(source_node)
+                            if node_obj not in source_node.next:
+                                source_node.next.append(node_obj)
 
 
             if hasattr(self, 'tools_widget'):
@@ -2775,8 +3138,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Error", str(e))
 
 
+
     def merge_graphs_dialog(self):
-        
+
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Merge Graphs (Add to existing)", "",
             "JSON Files (*.json);;All Files (*)"
@@ -2797,12 +3161,10 @@ class MainWindow(QMainWindow):
             
             if 'graphs' in project_data:
                 graphs_to_load = project_data['graphs']
-                print(f"Found project with {len(graphs_to_load)} graph(s)")
             elif 'graph' in project_data:
                 single_graph = project_data['graph'].copy()
                 single_graph['nodes'] = project_data.get('nodes', [])
                 graphs_to_load = [single_graph]
-                print("Found single graph format")
             else:
                 raise ValueError("Invalid file format: no 'graph' or 'graphs' key")
 
@@ -2816,15 +3178,11 @@ class MainWindow(QMainWindow):
             else:
                 id_offset = 0
             
-            print(f"MERGE GRAPHS")
-            print(f"   Existing graphs: {len(graph_list)}")
-            print(f"   Graphs to merge: {len(graphs_to_load)}")
-            print(f"   ID offset: {id_offset}")
+            print(f"MERGE GRAPHS (Offset: {id_offset})")
 
             self.status_bar.set_status(f"Merging {len(graphs_to_load)} graph(s)...", color="#9C27B0")
             self.status_bar.set_progress(15)
             QApplication.processEvents()
-
 
             id_mapping = {}
             for g_data in graphs_to_load:
@@ -2832,32 +3190,25 @@ class MainWindow(QMainWindow):
                 new_id = old_id + id_offset
                 id_mapping[old_id] = new_id
             
-            print(f"\nID Mapping:")
-            for old, new in id_mapping.items():
-                print(f"   Graph {old} → Graph {new}")
-
-            total_graphs = len(graphs_to_load)
             merged_graphs = []
             total_nodes = 0
             total_connections = 0
 
             for i, g_data in enumerate(graphs_to_load):
-                self.status_bar.set_status(f"Building Graph {i+1}/{total_graphs}...")
-                self.status_bar.set_progress(20 + int(50 * (i / total_graphs)))
+                self.status_bar.set_status(f"Building Graph {i+1}/{len(graphs_to_load)}...")
                 QApplication.processEvents()
 
                 old_graph_id = g_data.get('graph_id', i)
                 new_graph_id = id_mapping[old_graph_id]
                 
                 graph_name = g_data.get('graph_name', f'MergedGraph_{new_graph_id}')
-                print(f"\n[{i+1}/{total_graphs}] {graph_name}")
-                print(f"   Old ID: {old_graph_id} → New ID: {new_graph_id}")
-
+                
                 graph = Graph(
                     graph_name=graph_name,
                     graph_id=new_graph_id,
                     parameter_list=[],
                     polynom_max_power=g_data.get('polynom_max_power', 5),
+                    polynom_decay=g_data.get('polynom_decay', 0.8), 
                     position=g_data.get('init_position', [0, 0, 0]),
                     max_nodes=g_data.get('max_nodes', 100)
                 )
@@ -2879,29 +3230,33 @@ class MainWindow(QMainWindow):
                     adjusted_connections = []
                     
                     for conn in original_connections:
-                        new_conn = {
-                            'id': conn.get('id'),
-                            'name': conn.get('name'),
-                            'source': conn.get('source', {}).copy(),
-                            'target': conn.get('target', {}).copy(),
-                            'params': conn.get('params', {}).copy()
-                        }
+                        new_conn = copy.deepcopy(conn)
                         
                         if 'source' in new_conn and new_conn['source']:
-                            old_src_gid = new_conn['source'].get('graph_id')
-                            if old_src_gid in id_mapping:
-                                new_conn['source']['graph_id'] = id_mapping[old_src_gid]
+                            old_src = new_conn['source'].get('graph_id')
+                            if old_src in id_mapping: new_conn['source']['graph_id'] = id_mapping[old_src]
                         
                         if 'target' in new_conn and new_conn['target']:
-                            old_tgt_gid = new_conn['target'].get('graph_id')
-                            if old_tgt_gid in id_mapping:
-                                new_conn['target']['graph_id'] = id_mapping[old_tgt_gid]
+                            old_tgt = new_conn['target'].get('graph_id')
+                            if old_tgt in id_mapping: new_conn['target']['graph_id'] = id_mapping[old_tgt]
                         
                         adjusted_connections.append(new_conn)
                         total_connections += 1
                     
                     params['connections'] = adjusted_connections
                     
+
+                    devices_data = nd.get('devices', [])
+
+                    cleaned_devices = []
+                    for dev in devices_data:
+                        d_copy = copy.deepcopy(dev)
+                        d_copy['runtime_gid'] = None 
+                        cleaned_devices.append(d_copy)
+                    
+                    params['devices'] = cleaned_devices
+
+
                     is_root = (nd.get('id', 0) == 0)
                     parent_id = nd.get('parent_id')
                     parent = graph.get_node(parent_id) if parent_id is not None else None
@@ -2918,27 +3273,28 @@ class MainWindow(QMainWindow):
                         if 'center_of_mass' in nd:
                             new_node.center_of_mass = np.array(nd['center_of_mass'])
                     
-                    total_nodes += 1
+                    new_node.devices = cleaned_devices
+                    new_node.connections = adjusted_connections
                     
-                    n_conns = len(adjusted_connections)
-                    print(f" ✓ Node {nd.get('id')}: {nd.get('name', 'unnamed')} ({n_conns} connections adjusted)")
+                    if 'neuron_models' in nd:
+                        new_node.neuron_models = nd['neuron_models']
+                    if 'types' in nd:
+                        new_node.types = nd['types']
+                        new_node.population = [None] * len(nd['types'])
+
+                    total_nodes += 1
 
                 for nd in nodes_data:
                     node = graph.get_node(nd.get('id'))
-                    if not node:
-                        continue
-                    
+                    if not node: continue
                     for next_id in nd.get('next_ids', []):
-                        next_node = graph.get_node(next_id)
-                        if next_node and next_node not in node.next:
-                            node.next.append(next_node)
-                    
+                        nxt = graph.get_node(next_id)
+                        if nxt and nxt not in node.next: node.next.append(nxt)
                     for prev_id in nd.get('prev_ids', []):
-                        prev_node = graph.get_node(prev_id)
-                        if prev_node and prev_node not in node.prev:
-                            node.prev.append(prev_node)
+                        prv = graph.get_node(prev_id)
+                        if prv and prv not in node.prev: node.prev.append(prv)
 
-                print(f"   Populating NEST neurons...")
+                print(f"   Populating NEST neurons for {graph_name}...")
                 for node in graph.node_list:
                     if not hasattr(node, 'positions') or not node.positions:
                         node.build()
@@ -2949,133 +3305,55 @@ class MainWindow(QMainWindow):
 
                 graph_list.append(graph)
                 merged_graphs.append(graph)
-                print(f"   Graph '{graph_name}' merged successfully!")
+
             if hasattr(self, 'tools_widget'):
                 self.tools_widget.update_graphs(graph_list)
+            
+            if graph_list:
+                WidgetLib.next_graph_id = max(g.graph_id for g in graph_list) + 1
+
             self.status_bar.set_status("Creating NEST connections...", color="#9C27B0")
-            self.status_bar.set_progress(80)
             QApplication.processEvents()
 
-            print(f"\nCreating NEST connections for merged graphs...")
-            
             conn_created = 0
             conn_failed = 0
             
-            for graph in merged_graphs:
-                for node in graph.node_list:
-                    if not hasattr(node, 'connections') or not node.connections:
-                        continue
-                    
-                    for conn in node.connections:
-                        try:
-                            source = conn.get('source', {})
-                            target = conn.get('target', {})
-                            params = conn.get('params', {})
-                            
-                            src_graph = next((g for g in graph_list if g.graph_id == source.get('graph_id')), None)
-                            if not src_graph:
-                                raise ValueError(f"Source graph {source.get('graph_id')} not found")
-                            
-                            src_node = next((n for n in src_graph.node_list if n.id == source.get('node_id')), None)
-                            if not src_node:
-                                raise ValueError(f"Source node {source.get('node_id')} not found")
-                            
-                            if source.get('pop_id') >= len(src_node.population):
-                                raise ValueError(f"Source pop {source.get('pop_id')} out of range")
-                            
-                            src_pop = src_node.population[source.get('pop_id')]
-                            if src_pop is None or len(src_pop) == 0:
-                                raise ValueError("Source population empty")
-                            
-                            tgt_graph = next((g for g in graph_list if g.graph_id == target.get('graph_id')), None)
-                            if not tgt_graph:
-                                raise ValueError(f"Target graph {target.get('graph_id')} not found")
-                            
-                            tgt_node = next((n for n in tgt_graph.node_list if n.id == target.get('node_id')), None)
-                            if not tgt_node:
-                                raise ValueError(f"Target node {target.get('node_id')} not found")
-                            
-                            if target.get('pop_id') >= len(tgt_node.population):
-                                raise ValueError(f"Target pop {target.get('pop_id')} out of range")
-                            
-                            tgt_pop = tgt_node.population[target.get('pop_id')]
-                            if tgt_pop is None or len(tgt_pop) == 0:
-                                raise ValueError("Target population empty")
-                            
-                            rule = params.get('rule', 'all_to_all')
-                            conn_spec = {'rule': rule}
-                            
-                            if 'indegree' in params:
-                                conn_spec['indegree'] = params['indegree']
-                            if 'outdegree' in params:
-                                conn_spec['outdegree'] = params['outdegree']
-                            if 'N' in params:
-                                conn_spec['N'] = params['N']
-                            if 'p' in params:
-                                conn_spec['p'] = params['p']
-                            
-                            conn_spec['allow_autapses'] = params.get('allow_autapses', False)
-                            conn_spec['allow_multapses'] = params.get('allow_multapses', True)
-                            
-                            syn_spec = {
-                                'synapse_model': params.get('synapse_model', 'static_synapse'),
-                                'weight': params.get('weight', 1.0),
-                                'delay': max(params.get('delay', 1.0), nest.resolution)
-                            }
-                            
-                            if rule == 'one_to_one' and len(src_pop) != len(tgt_pop):
-                                raise ValueError(f"one_to_one: size mismatch ({len(src_pop)} vs {len(tgt_pop)})")
-                            
-                            nest.Connect(src_pop, tgt_pop, conn_spec, syn_spec)
-                            conn_created += 1
-                            
-                        except Exception as e:
-                            conn_failed += 1
-                            print(f"   ⚠ Connection failed: {conn.get('name', '?')}: {e}")
+            graphs_dict = {g.graph_id: g for g in graph_list}
+            executor = ConnectionExecutor(graphs_dict)
+            
+            all_new_conns = []
+            for g in merged_graphs:
+                for n in g.node_list:
+                    if hasattr(n, 'connections'):
+                        all_new_conns.extend(n.connections)
+            
+            success, fail, _ = executor.execute_all(all_new_conns)
+            conn_created = success
+            conn_failed = fail
 
-            print(f"\n   Connections: {conn_created} created, {conn_failed} failed")
-
+            # Refresh UI
             self.status_bar.set_status("Refreshing view...", color="#9C27B0")
-            self.status_bar.set_progress(95)
-            QApplication.processEvents()
-
             self.update_visualizations()
             self.graph_overview.update_tree()
             self.connection_tool.refresh()
             self.graph_editor.refresh_graph_list()
-            self.blink_widget.build_scene()
-
-            print(f"MERGE COMPLETE!")
-            print(f"   Graphs merged: {len(merged_graphs)}")
-            print(f"   Nodes added: {total_nodes}")
-            print(f"   Connections: {conn_created} created, {conn_failed} failed")
-            print(f"   Total graphs now: {len(graph_list)}")
-            if graph_list:
-                current_max_id = max(g.graph_id for g in graph_list)
-                if current_max_id >= WidgetLib.next_graph_id:
-                    WidgetLib.next_graph_id = current_max_id + 1
             
-            if hasattr(self, 'graph_builder'):
-                self.graph_builder.reset()
-            self.status_bar.show_success(f"Merged {len(merged_graphs)} graph(s)!")
-            
-            QMessageBox.information(
-                self, "Merge Complete",
-                f"Successfully merged:\n\n"
-                f"• {len(merged_graphs)} graph(s)\n"
-                f"• {total_nodes} node(s)\n"
-                f"• {conn_created} connection(s) created\n"
-                f"• {conn_failed} connection(s) failed\n\n"
-                f"New Graph IDs: {[g.graph_id for g in merged_graphs]}\n"
-                f"Total graphs now: {len(graph_list)}"
-            )
+            if hasattr(self, 'blink_widget'):
+                self.blink_widget.build_scene()
 
+            msg = f"Merged {len(merged_graphs)} graphs. Devices restored. {conn_created} connections created."
+            self.status_bar.show_success(msg)
+            print(msg)
+            
         except Exception as e:
             self.status_bar.show_error(f"Merge failed: {e}")
             print(f"Merge failed: {e}")
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Merge Error", str(e))
+    
+    
+    
     def collect_simulation_results(self, duration):
         print(f"\n>>> COLLECTING & FLUSHING DATA <<<")
         timestamp = datetime.now().isoformat()
@@ -3138,6 +3416,35 @@ class MainWindow(QMainWindow):
             print(">>> Data collection complete.")
             if hasattr(self, 'status_bar'):
                 self.status_bar.show_success("Simulation data collected & flushed.")
+
+
+
+
+
+from pathlib import Path
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (np.int64, np.int32)): return int(obj)
+        if isinstance(obj, (np.float64, np.float32)): return float(obj)
+        return super().default(obj)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
