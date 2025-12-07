@@ -1,51 +1,70 @@
 # Neuroticks
 
-Neural network simulation GUI built on [NEST Simulator](https://www.nest-simulator.org/).
+A GUI for NEST-based neural network simulations. Built with PyQt6 and PyVista.
 
-![Python](https://img.shields.io/badge/Python-3.12-blue)
-![NEST](https://img.shields.io/badge/NEST-3.9-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+## What is this?
+
+Neuroticks lets you visually assemble, simulate, and analyze spiking neural networks — without writing code for every little thing. Click together populations, connect them, hit play, watch spikes fly.
+
+Built as a research tool for exploring network dynamics and testing hypotheses quickly.
+
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![NEST](https://img.shields.io/badge/NEST-3.x-green)
+![License](https://img.shields.io/badge/License-GPL--3.0-orange)
 
 ## Features
 
-- Visual neural network editor with 3D spatial positioning
-- Real-time simulation with live spike visualization
-- Multiple neuron models (LIF, AdEx, Hodgkin-Huxley, ...)
-- Configurable synaptic connections and stimulation
-- History recording and analysis dashboard
+- **3D visualization** of network structure via PyVista
+- **Graph editor** for neuron populations with drag & drop
+- **Live simulation** with real-time spike visualization
+- **Recording devices** (spike recorder, voltmeter, etc.) attachable directly in the GUI
+- **Simulation history** — reload and analyze past runs
+- **Wave Function Collapse** for procedural neuron clustering
 
-## Quick Start (Docker)
+## Installation
 
 ```bash
-# Download and run
-curl -O https://raw.githubusercontent.com/YOURUSER/neuroticks/main/run_neuroticks.sh
-chmod +x run_neuroticks.sh
-./run_neuroticks.sh
+pip install pyqt6 pyvista pyvistaqt nest-simulator numpy pyqtgraph
 ```
 
-First run pulls the image (~2-3 GB). Data is saved to `~/neuroticks_data/`.
-
-## Manual Installation
-
-Requires: Python 3.12, NEST Simulator 3.9+
+Then:
 
 ```bash
-# Install dependencies
-pip install PyQt6 pyqtgraph pyvista pyvistaqt numpy scipy matplotlib
-
-# Run
 python CleanAlpha.py
 ```
 
-## Data Storage
+## Dependencies
+
+- Python ≥ 3.10
+- NEST Simulator 3.x
+- PyQt6
+- PyVista + pyvistaqt
+- NumPy, Matplotlib, pyqtgraph
+
+## Structure
 
 ```
-~/neuroticks_data/
-├── Simulation_History/   # Recorded simulation data
-├── projects/             # Saved network graphs
-└── exports/              # Screenshots, exports
+├── CleanAlpha.py        # Main window & entry point
+├── neuron_toolbox.py    # Graph/Node classes, NEST wrappers
+├── WidgetLib.py         # UI components, analysis dashboard
+├── CustomExtension.py   # History browser tab
+├── ExtraTab.py          # Additional tools
+└── functional_models.json
 ```
+
+## Usage
+
+1. **Create graph** → Right-click in editor
+2. **Add nodes** → Neuron populations with parameters
+3. **Connect** → Use connection tool for synapses
+4. **Attach devices** → Spike recorder, voltmeter
+5. **Simulate** → Hit play, collect data
+6. **Analyze** → History tab for past runs
+
+## Status
+
+Work in progress. Runs, but expect rough edges.
 
 ## License
 
-MIT
+GPL-3.0
