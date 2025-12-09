@@ -35,11 +35,51 @@ python Main.py
 
 ## Dependencies
 
-- Python ≥ 3.10
-- NEST Simulator 3.x
-- PyQt6
-- PyVista + pyvistaqt
-- NumPy, Matplotlib, pyqtgraph
+  NEST Simulator       3.9.0-post0.dev0
+  NumPy                2.2.6
+  SciPy                1.16.3
+
+GUI DEPENDENCIES
+----------------------------------------
+  PyQt6                installed (version unknown)
+  PyQtGraph            0.13.7
+  PyVista              0.46.4
+  PyVistaQt            0.11.3
+  VTK                  9.5.2
+    └─ Qt Version:     6.10.0
+    └─ PyQt Version:   6.10.0
+
+VISUALIZATION
+----------------------------------------
+  Matplotlib           3.10.7
+  PyOpenGL             3.1.10
+
+OPTIONAL
+----------------------------------------
+  Pillow               12.0.0
+  Pandas               2.3.3
+  NetworkX             3.5
+
+============================================================
+
+PIP FREEZE (relevante Pakete):
+----------------------------------------
+  matplotlib==3.10.7
+  matplotlib-inline==0.2.1
+  nest-asyncio==1.6.0
+  nest-desktop==4.2.0
+  nest-neat==1.0
+  numpy==2.2.6
+  PyOpenGL==3.1.10
+  PyQt6==6.10.0
+  PyQt6-Qt6==6.10.0
+  PyQt6_sip==13.10.2
+  pyqtgraph==0.13.7
+  pyvista==0.46.4
+  pyvistaqt==0.11.3
+  scipy==1.16.3
+  trame-vtk==2.10.0
+  vtk==9.5.2
 
 ## Structure
 
