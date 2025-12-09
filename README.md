@@ -30,7 +30,7 @@ pip install pyqt6 pyvista pyvistaqt nest-simulator numpy pyqtgraph
 Then:
 
 ```bash
-python CleanAlpha.py
+python Main.py
 ```
 
 ## Dependencies
@@ -44,7 +44,7 @@ python CleanAlpha.py
 ## Structure
 
 ```
-├── CleanAlpha.py        # Main window & entry point
+├── Main.py        # Main window & entry point
 ├── neuron_toolbox.py    # Graph/Node classes, NEST wrappers
 ├── WidgetLib.py         # UI components, analysis dashboard
 ├── CustomExtension.py   # History browser tab
