@@ -2499,6 +2499,7 @@ class GraphCreatorWidget(QWidget):
             'populations': clean_populations
         }
         
+        import copy
         new_node_data = copy.deepcopy(data_to_copy)
         
         current_pos = source_node['params'].get('center_of_mass', [0,0,0])
@@ -2795,17 +2796,20 @@ class GraphCreatorWidget(QWidget):
             
         node = self.node_list[self.current_node_idx]
         
-        node['populations'].pop(self.current_pop_idx)
+        if len(node['populations']) <= 1:
+            QMessageBox.warning(self, "Cannot Delete", "Cannot delete the last population of a node.")
+            return
         
         prob_vec = node['params'].get('probability_vector', [])
+        deleted_prob = 0.0
         if len(prob_vec) > self.current_pop_idx:
-            prob_vec.pop(self.current_pop_idx)
-            total = sum(prob_vec)
-            if total > 0:
-                node['params']['probability_vector'] = [p/total for p in prob_vec]
-            else:
-                if prob_vec:
-                    node['params']['probability_vector'] = [1.0/len(prob_vec)] * len(prob_vec)
+            deleted_prob = prob_vec.pop(self.current_pop_idx)
+        
+        if prob_vec and deleted_prob > 0:
+            add_each = deleted_prob / len(prob_vec)
+            node['params']['probability_vector'] = [p + add_each for p in prob_vec]
+        
+        node['populations'].pop(self.current_pop_idx)
         
         self.update_population_list()
         
@@ -3437,6 +3441,20 @@ class EditGraphWidget(QWidget):
             return
             
         node_wrapper = self.node_list[self.current_node_idx]
+        
+        if len(node_wrapper['populations']) <= 1:
+            QMessageBox.warning(self, "Cannot Delete", "Cannot delete the last population of a node.")
+            return
+        
+        prob_vec = node_wrapper['params'].get('probability_vector', [])
+        deleted_prob = 0.0
+        if len(prob_vec) > self.current_pop_idx:
+            deleted_prob = prob_vec.pop(self.current_pop_idx)
+        
+        if prob_vec and deleted_prob > 0:
+            add_each = deleted_prob / len(prob_vec)
+            node_wrapper['params']['probability_vector'] = [p + add_each for p in prob_vec]
+        
         node_wrapper['populations'].pop(self.current_pop_idx)
         
         if node_wrapper.get('original_node'):
@@ -3465,6 +3483,20 @@ class EditGraphWidget(QWidget):
                         tgt_node = tgt_graph.get_node(nid)
                         if tgt_node:
                             node_obj.remove_neighbor_if_isolated(tgt_node)
+        
+        self.update_population_list()
+        
+        num_pops = len(node_wrapper['populations'])
+        self.node_param_widget.set_population_count(num_pops)
+        self.node_param_widget.load_data(node_wrapper['params'])
+        
+        if num_pops > 0:
+            new_idx = max(0, self.current_pop_idx - 1)
+            self.select_population(new_idx)
+        else:
+            self.current_pop_idx = None
+            self.remove_pop_btn.setEnabled(False)
+            self.editor_stack.setCurrentIndex(1)
 
     def refresh_graph_list(self):
         current_graph_id = self.graph_selector.currentData()
@@ -3703,6 +3735,7 @@ class EditGraphWidget(QWidget):
         if pop['params']:
             self.pop_param_widget.model_combo.setCurrentText(pop['model'])
         self.editor_stack.setCurrentIndex(2)
+        self.remove_pop_btn.setEnabled(True)
 
     def create_twin_node(self):
         import copy
@@ -4004,7 +4037,7 @@ class EditGraphWidget(QWidget):
         new_models = [pop['model'] for pop in node_data['populations']]
         if old_models != new_models:
             any_change = True
-            structural_changed = True # NEST Reset nötig
+            structural_changed = True 
 
         if 'population_nest_params' in old_params:
             old_nest_params = old_params['population_nest_params']
@@ -9569,6 +9602,7 @@ class GraphInfoWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
         
         sel_layout = QHBoxLayout()
         lbl = QLabel("Select Graph:")
@@ -9579,6 +9613,7 @@ class GraphInfoWidget(QWidget):
         self.combo.setStyleSheet("background-color: #333; color: white; border: 1px solid #555;")
         self.combo.currentIndexChanged.connect(self.generate_report)
         sel_layout.addWidget(self.combo)
+        sel_layout.addStretch()
         layout.addLayout(sel_layout)
         
         self.scroll = QScrollArea()
@@ -9589,7 +9624,8 @@ class GraphInfoWidget(QWidget):
         self.content_widget = QWidget()
         self.content_widget.setStyleSheet("background-color: #1e1e1e;")
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setSpacing(20)
+        self.content_layout.setSpacing(15)
+        self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         self.scroll.setWidget(self.content_widget)
         layout.addWidget(self.scroll)
@@ -9606,90 +9642,184 @@ class GraphInfoWidget(QWidget):
         if self.combo.count() > 0:
             self.generate_report()
 
+    def _create_section(self, title, color="#FF9800"):
+        frame = QFrame()
+        frame.setStyleSheet(f"background-color: #2b2b2b; border: 1px solid #444; border-radius: 5px;")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(15, 10, 15, 15)
+        layout.setSpacing(8)
+        
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 14px; border: none; padding-bottom: 5px;")
+        layout.addWidget(lbl_title)
+        
+        return frame, layout
+
+    def _add_info_row(self, layout, label, value, value_color="#00E5FF"):
+        row = QHBoxLayout()
+        lbl = QLabel(f"{label}:")
+        lbl.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        lbl.setFixedWidth(180)
+        
+        val = QLabel(str(value))
+        val.setStyleSheet(f"color: {value_color}; font-size: 12px; font-weight: bold; border: none;")
+        val.setWordWrap(True)
+        
+        row.addWidget(lbl)
+        row.addWidget(val, 1)
+        layout.addLayout(row)
+
     def generate_report(self):
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+            if item.widget(): 
+                item.widget().deleteLater()
         
         graph = self.combo.currentData()
-        if not graph: return
+        if not graph: 
+            return
 
         total_nodes = len(graph.node_list)
         total_conns = sum(len(n.connections) for n in graph.node_list if hasattr(n, 'connections'))
         
-        info_group = QFrame()
-        info_group.setStyleSheet("background-color: #2b2b2b; border: 1px solid #444; border-radius: 5px; padding: 15px;")
-        ig_layout = QVBoxLayout(info_group)
+        gen_frame, gen_layout = self._create_section("GENERAL INFORMATION", "#00E5FF")
+        self._add_info_row(gen_layout, "Graph Name", getattr(graph, 'graph_name', 'Unknown'))
+        self._add_info_row(gen_layout, "Graph ID", graph.graph_id)
+        self._add_info_row(gen_layout, "Total Nodes", total_nodes)
+        self._add_info_row(gen_layout, "Total Connections", total_conns)
+        self.content_layout.addWidget(gen_frame)
         
-        lbl_name = QLabel(getattr(graph, 'graph_name', 'Unknown Graph'))
-        lbl_name.setStyleSheet("font-size: 20px; font-weight: bold; color: #00E5FF;")
-        lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pop_frame, pop_layout = self._create_section("POPULATION DISTRIBUTION", "#E91E63")
         
-        lbl_stats = QLabel(f"Nodes: {total_nodes}  |  Connections: {total_conns}")
-        lbl_stats.setStyleSheet("font-size: 14px; color: #ccc; margin-top: 5px;")
-        lbl_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        model_counts = {}
+        total_neurons = 0
+        for node in graph.node_list:
+            if hasattr(node, 'neuron_models') and node.neuron_models:
+                for model in node.neuron_models:
+                    model_counts[model] = model_counts.get(model, 0) + 1
+            if hasattr(node, 'positions') and node.positions:
+                for pos_list in node.positions:
+                    if pos_list is not None:
+                        total_neurons += len(pos_list)
         
-        ig_layout.addWidget(lbl_name)
-        ig_layout.addWidget(lbl_stats)
-        self.content_layout.addWidget(info_group)
-
-        skel_container = QFrame()
-        skel_container.setStyleSheet("background-color: #2b2b2b; border: 1px solid #444; border-radius: 5px;")
-        skel_layout = QVBoxLayout(skel_container)
-        skel_layout.addWidget(QLabel("Graph Topology", styleSheet="color: #FF9800; font-weight: bold; font-size: 14px; padding: 5px;"))
+        self._add_info_row(pop_layout, "Total Neuron Count", total_neurons, "#4CAF50")
+        self._add_info_row(pop_layout, "Unique Models", len(model_counts))
         
-        fig_skel = Figure(figsize=(5, 5), facecolor='white')
-        canvas_skel = FigureCanvas(fig_skel)
-        ax_skel = fig_skel.add_subplot(111, projection='3d')
+        if model_counts:
+            lbl_dist = QLabel("Model Distribution:")
+            lbl_dist.setStyleSheet("color: #888; font-size: 12px; border: none; margin-top: 5px;")
+            pop_layout.addWidget(lbl_dist)
+            
+            for model, count in sorted(model_counts.items(), key=lambda x: -x[1]):
+                row = QHBoxLayout()
+                model_lbl = QLabel(f"  • {model}")
+                model_lbl.setStyleSheet("color: #ccc; font-size: 11px; border: none;")
+                count_lbl = QLabel(f"{count} population(s)")
+                count_lbl.setStyleSheet("color: #FF9800; font-size: 11px; border: none;")
+                row.addWidget(model_lbl)
+                row.addStretch()
+                row.addWidget(count_lbl)
+                pop_layout.addLayout(row)
         
+        self.content_layout.addWidget(pop_frame)
         
-        centers = np.array([n.center_of_mass for n in graph.node_list])
-        if len(centers) > 0:
-            ax_skel.scatter(centers[:,0], centers[:,1], centers[:,2], c='darkred', s=50, edgecolors='black', alpha=0.8)
+        dev_frame, dev_layout = self._create_section("RECORDING DEVICES", "#9C27B0")
+        
+        device_counts = {}
+        total_devices = 0
+        for node in graph.node_list:
+            if hasattr(node, 'devices') and node.devices:
+                for dev in node.devices:
+                    model = dev.get('model', 'unknown')
+                    device_counts[model] = device_counts.get(model, 0) + 1
+                    total_devices += 1
+        
+        self._add_info_row(dev_layout, "Total Devices", total_devices, "#4CAF50")
+        
+        if device_counts:
+            for dev_type, count in sorted(device_counts.items(), key=lambda x: -x[1]):
+                row = QHBoxLayout()
+                dev_lbl = QLabel(f"  • {dev_type}")
+                dev_lbl.setStyleSheet("color: #ccc; font-size: 11px; border: none;")
+                count_lbl = QLabel(f"{count}x")
+                count_lbl.setStyleSheet("color: #FF9800; font-size: 11px; border: none;")
+                row.addWidget(dev_lbl)
+                row.addStretch()
+                row.addWidget(count_lbl)
+                dev_layout.addLayout(row)
+        else:
+            no_dev = QLabel("  No devices found")
+            no_dev.setStyleSheet("color: #666; font-style: italic; font-size: 11px; border: none;")
+            dev_layout.addWidget(no_dev)
+        
+        self.content_layout.addWidget(dev_frame)
+        
+        if total_nodes > 0:
+            node_frame, node_layout = self._create_section("NODE DETAILS", "#FF9800")
             
             for node in graph.node_list:
-                start = node.center_of_mass
-                if hasattr(node, 'next'):
-                    for neighbor in node.next:
-                        end = neighbor.center_of_mass
-                        ax_skel.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], c='#333333', alpha=0.6, linewidth=1.5)
-        
-        ax_skel.set_xlabel('X')
-        ax_skel.set_ylabel('Y')
-        ax_skel.set_zlabel('Z')
-        
-        skel_layout.addWidget(canvas_skel)
-        self.content_layout.addWidget(skel_container)
-
-        if total_nodes > 0:
-            grid_container = QFrame()
-            grid_container.setStyleSheet("background-color: #2b2b2b; border: 1px solid #444; border-radius: 5px;")
-            gc_layout = QVBoxLayout(grid_container)
-            gc_layout.addWidget(QLabel("Node Populations", styleSheet="color: #E91E63; font-weight: bold; font-size: 14px; padding: 5px;"))
-            
-            cols = 4
-            rows = int(np.ceil(total_nodes / cols))
-            fig_height = max(4, rows * 3)
-            
-            fig_grid = Figure(figsize=(10, fig_height), facecolor='white')
-            canvas_grid = FigureCanvas(fig_grid)
-            
-            for i, node in enumerate(graph.node_list):
-                ax = fig_grid.add_subplot(rows, cols, i+1, projection='3d')
-                ax.set_title(f"Node {node.id}: {node.name}", color='black', fontsize=9, fontweight='bold')
+                node_box = QFrame()
+                node_box.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; border-radius: 3px; margin: 2px;")
+                nb_layout = QVBoxLayout(node_box)
+                nb_layout.setContentsMargins(10, 8, 10, 8)
+                nb_layout.setSpacing(4)
                 
+                header = QLabel(f"Node {node.id}: {node.name}")
+                header.setStyleSheet("color: #00E5FF; font-weight: bold; font-size: 12px; border: none;")
+                nb_layout.addWidget(header)
+                
+                details = []
+                
+                if hasattr(node, 'center_of_mass'):
+                    com = node.center_of_mass
+                    details.append(f"Position: [{com[0]:.1f}, {com[1]:.1f}, {com[2]:.1f}]")
+                
+                pop_count = 0
+                neuron_count = 0
                 if hasattr(node, 'positions') and node.positions:
-                    for j, cluster in enumerate(node.positions):
-                        if cluster is not None and len(cluster) > 0:
-                            cmap = plt.get_cmap("tab10")
-                            color = cmap(j % 10)
-                            ax.scatter(cluster[:,0], cluster[:,1], cluster[:,2], color=color, s=2, alpha=0.6)
+                    pop_count = len([p for p in node.positions if p is not None])
+                    neuron_count = sum(len(p) for p in node.positions if p is not None)
+                details.append(f"Populations: {pop_count}  |  Neurons: {neuron_count}")
                 
-                ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
-
-            fig_grid.tight_layout()
-            gc_layout.addWidget(canvas_grid)
-            self.content_layout.addWidget(grid_container)
+                if hasattr(node, 'neuron_models') and node.neuron_models:
+                    models_str = ", ".join(node.neuron_models[:3])
+                    if len(node.neuron_models) > 3:
+                        models_str += f" (+{len(node.neuron_models)-3} more)"
+                    details.append(f"Models: {models_str}")
+                
+                if hasattr(node, 'connections'):
+                    details.append(f"Connections: {len(node.connections)}")
+                
+                dev_count = len(node.devices) if hasattr(node, 'devices') else 0
+                if dev_count > 0:
+                    details.append(f"Devices: {dev_count}")
+                
+                for detail in details:
+                    d_lbl = QLabel(detail)
+                    d_lbl.setStyleSheet("color: #888; font-size: 11px; border: none; padding-left: 10px;")
+                    nb_layout.addWidget(d_lbl)
+                
+                node_layout.addWidget(node_box)
+            
+            self.content_layout.addWidget(node_frame)
+        
+        hist_frame, hist_layout = self._create_section("SIMULATION HISTORY", "#4CAF50")
+        
+        total_runs = 0
+        total_recordings = 0
+        for node in graph.node_list:
+            if hasattr(node, 'results') and 'history' in node.results:
+                for run in node.results['history']:
+                    total_runs += 1
+                    if 'devices' in run:
+                        total_recordings += len(run['devices'])
+        
+        self._add_info_row(hist_layout, "Simulation Runs", total_runs)
+        self._add_info_row(hist_layout, "Total Recordings", total_recordings)
+        
+        self.content_layout.addWidget(hist_frame)
+        
+        self.content_layout.addStretch()
 
 
 class TimeSeriesPlotWidget(QWidget):
@@ -10707,6 +10837,11 @@ class LiveDataDashboard(QWidget):
                 for pid, d_list in pop_map.items():
                     model = node.neuron_models[pid] if hasattr(node, 'neuron_models') and pid < len(node.neuron_models) else 'unknown'
                     
+                    neuron_count = 0
+                    if hasattr(node, 'positions') and node.positions and pid < len(node.positions):
+                        if node.positions[pid] is not None:
+                            neuron_count = len(node.positions[pid])
+                    
                     p_item = QTreeWidgetItem(n_item)
                     p_item.setText(0, f"Pop {pid}: {model}")
                     p_item.setForeground(0, QBrush(QColor("#FFD700")))
@@ -10716,6 +10851,7 @@ class LiveDataDashboard(QWidget):
                         'type': 'pop', 
                         'key': pop_key, 
                         'info': {'name': f"{node.name}_P{pid}", 'color': neuron_colors.get(model, '#fff')}, 
+                        'neuron_count': neuron_count,
                         'recorders': []
                     }
                     
@@ -10789,7 +10925,8 @@ class LiveDataDashboard(QWidget):
         recorders = data.get('recorders', [])
         if not recorders: return
         info = data['info']
-        w = PopulationRatePlot(str(ukey), info['name'], 100, info['color'], view_window=self.view_window, buffer_window=self.buffer_window, parent=self.plot_container)
+        neuron_count = data.get('neuron_count', 100)
+        w = PopulationRatePlot(str(ukey), info['name'], neuron_count, info['color'], view_window=self.view_window, buffer_window=self.buffer_window, parent=self.plot_container)
         w.recorders_data = recorders
         w.closed.connect(lambda: self._on_widget_closed(ukey))
         self.plot_layout.addWidget(w); self.active_plots_map[ukey] = w; self.plot_container.adjustSize()
@@ -10869,12 +11006,23 @@ class LiveDataDashboard(QWidget):
 class PopulationRatePlot(QWidget):
     closed = pyqtSignal()
 
-    def __init__(self, plot_key, title, neuron_count, color_hex, view_window=1000.0, buffer_window=5000.0, parent=None):
+    def __init__(self, plot_key, title, neuron_count, color_hex, view_window=1000.0, buffer_window=5000.0, resolution=None, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(200)
         
         self.plot_key = plot_key
         self.neuron_count = max(1, neuron_count)
+        
+        self.view_window = view_window
+        self.buffer_window = buffer_window
+        
+        if resolution is None:
+            try:
+                self.resolution = nest.resolution
+            except:
+                self.resolution = 0.1
+        else:
+            self.resolution = resolution
         
         self.view_window = view_window
         self.buffer_window = buffer_window
@@ -10921,8 +11069,7 @@ class PopulationRatePlot(QWidget):
         for ev in events_list:
             if 'times' in ev: total_spikes += len(ev['times'])
         
-        dt_approx = 0.025 
-        hz = total_spikes / (self.neuron_count * dt_approx)
+        hz = total_spikes / (self.neuron_count * self.resolution)
         
         self.time_bins.append(current_time)
         self.rate_values.append(hz)
