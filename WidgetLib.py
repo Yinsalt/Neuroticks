@@ -4,6 +4,8 @@ from PyQt6.QtWidgets import QSizePolicy,QListWidgetItem, QFrame,QPushButton,QLab
 from PyQt6.QtGui import QColor, QPalette, QAction,QIcon,QBrush,QMatrix4x4
 from PyQt6.QtCore import QSize, Qt, pyqtSignal,QTimer
 import code
+import os
+import shutil
 import time
 import pyvista as pv
 import scipy.ndimage as ndimage
@@ -9209,24 +9211,39 @@ class SimulationDashboardWidget(QWidget):
         duration = self.duration_spin.value()
         self.requestStartSimulation.emit(duration)
     def export_script_dialog(self):
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "Export Python Script", "simulation_run.py", "Python Files (*.py)"
+        parent_dir = QFileDialog.getExistingDirectory(
+            self, "Select Destination Folder for Export"
         )
-        if filepath:
+        
+        if not parent_dir:
+            return
+
+        default_name = f"Neuroticks_Project_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        project_name, ok = QInputDialog.getText(
+            self, "Project Name", "Enter name for the export folder:", text=default_name
+        )
+        
+        if ok and project_name:
+            safe_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '_', '-')).strip()
+            if not safe_name:
+                safe_name = "Unnamed_Project"
+
             exporter = ScriptExporter(self.graph_list)
-            
             duration = self.duration_spin.value()
             
-            success = exporter.export(filepath, duration=duration)
+            success = exporter.export_project(parent_dir, safe_name, duration=duration)
             
             if success:
+                full_path = os.path.join(parent_dir, safe_name)
                 QMessageBox.information(self, "Export Successful", 
-                    f"Standalone script generated:\n{filepath}\n\n"
-                    "You can now run this script on a cluster with:\n"
-                    "python3 simulation_run.py")
+                    f"Project exported successfully to:\n{full_path}\n\n"
+                    "Files created:\n"
+                    "- run.py\n"
+                    "- graphs.json\n"
+                    "- neuron_toolbox.py")
             else:
                 QMessageBox.critical(self, "Export Failed", 
-                    "Could not generate the script. Check console for details.")
+                    "Could not export the project. Check console for errors.")
     def set_ui_locked(self, locked):
         self.btn_start.setEnabled(not locked)
         self.btn_reset.setEnabled(not locked)
@@ -9313,25 +9330,83 @@ def build_gid_to_meta_map(graph_list):
     return gid_map
 
 
+
+
 class ScriptExporter:
     def __init__(self, graph_list):
         self.graph_list = graph_list
 
-    def export(self, filepath, duration=1000.0, threads=4):
-        project_data = self._serialize_graphs()
-        
-        json_data_str = json.dumps(project_data, cls=NumpyEncoder, indent=2)
-        
-        script_content = self._get_template(json_data_str, duration, threads)
-        
+    def export_project(self, parent_dir, folder_name, duration=1000.0, threads=1):
+        # 1. Create Project Directory
+        base_path = os.path.join(parent_dir, folder_name)
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(script_content)
-            print(f"Export successful: {filepath}")
-            return True
+            os.makedirs(base_path, exist_ok=True)
         except Exception as e:
-            print(f"Export failed: {e}")
+            print(f"Error creating directory: {e}")
             return False
+
+        # 2. Define File Paths
+        json_filename = "graphs.json"
+        script_filename = "run.py"
+        toolbox_filename = "neuron_toolbox.py"
+        models_filename = "functional_models.json"
+        
+        json_path = os.path.join(base_path, json_filename)
+        script_path = os.path.join(base_path, script_filename)
+        toolbox_dest_path = os.path.join(base_path, toolbox_filename)
+        models_dest_path = os.path.join(base_path, models_filename)
+
+        # 3. Serialize and Write JSON
+        project_data = self._serialize_graphs()
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                # Local import to ensure encoder is available
+                from WidgetLib import NumpyEncoder 
+                json.dump(project_data, f, cls=NumpyEncoder, indent=2)
+        except Exception as e:
+            print(f"Error saving JSON: {e}")
+            return False
+
+        # 4. Copy Auxiliary Files (Toolbox & Models)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Copy neuron_toolbox.py
+        try:
+            src_path = "neuron_toolbox.py"
+            if not os.path.exists(src_path):
+                src_path = os.path.join(current_dir, "neuron_toolbox.py")
+
+            if os.path.exists(src_path):
+                shutil.copy(src_path, toolbox_dest_path)
+            else:
+                print(f"Warning: neuron_toolbox.py not found.")
+        except Exception as e:
+            print(f"Error copying toolbox: {e}")
+
+        # Copy functional_models.json
+        try:
+            mod_path = "functional_models.json"
+            if not os.path.exists(mod_path):
+                mod_path = os.path.join(current_dir, "functional_models.json")
+            
+            if os.path.exists(mod_path):
+                shutil.copy(mod_path, models_dest_path)
+            else:
+                print("Warning: functional_models.json not found.")
+        except Exception as e:
+            print(f"Error copying models json: {e}")
+
+        # 5. Generate and Write Python Script
+        script_content = self._get_template(json_filename, duration, threads)
+        try:
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(script_content)
+        except Exception as e:
+            print(f"Error saving script: {e}")
+            return False
+
+        print(f"Export successful to: {base_path}")
+        return True
 
     def _serialize_graphs(self):
         from WidgetLib import _clean_params, _serialize_connections
@@ -9371,225 +9446,254 @@ class ScriptExporter:
                     'tool_type': safe_params.get('tool_type', 'custom'),
                     'parameters': safe_params
                 }
+                
+                if hasattr(node, 'center_of_mass'):
+                    node_data['center_of_mass'] = list(node.center_of_mass) if isinstance(node.center_of_mass, np.ndarray) else node.center_of_mass
+                if hasattr(node, 'types'):
+                    node_data['types'] = list(node.types)
+
                 nodes_data.append(node_data)
             
             data['graphs'].append({
                 'graph_id': graph.graph_id,
+                'graph_name': getattr(graph, 'graph_name', f'Graph_{graph.graph_id}'),
+                'max_nodes': graph.max_nodes,
+                'init_position': list(graph.init_position) if hasattr(graph, 'init_position') else [0,0,0],
+                'polynom_max_power': getattr(graph, 'polynom_max_power', 5),
+                'polynom_decay': getattr(graph, 'polynom_decay', 0.8),
                 'nodes': nodes_data
             })
         return data
 
-    def _get_template(self, json_data, duration, threads):
-        return f'''#!/usr/bin/env python3
-# Auto-generated NEST Simulation Script
-# Generated: {datetime.now().isoformat()}
-
+    def _get_template(self, json_filename, duration, threads):
+        return f"""
 import nest
 import numpy as np
 import json
-import time
 import os
+import sys
+from pathlib import Path
+from datetime import datetime
+from neuron_toolbox import Graph, Node, PolynomGenerator
 
-# ==========================================
-# 1. SETUP & CONFIGURATION
-# ==========================================
-
-# Define output directory
-OUTPUT_DIR = "Simulation History"
-
-# Create directory if it does not exist
-if not os.path.exists(OUTPUT_DIR):
-    try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        print(f"Created output directory: {{os.path.abspath(OUTPUT_DIR)}}")
-    except Exception as e:
-        print(f"Warning: Could not create output directory: {{e}}")
-        OUTPUT_DIR = "." # Fallback to current dir
-
-SIM_CONFIG = json.loads(r"""
-{json_data}
-""")
-
+# === CONFIGURATION ===
+JSON_FILENAME = "{json_filename}"
 SIM_DURATION = {duration}
-NUM_THREADS = {threads}
+DUMP_INTERVAL = 2000.0
+OUTPUT_DIR = Path("Headless_Runs")
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
+class NumpyNestEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if hasattr(obj, 'tolist'): return obj.tolist()
+        if isinstance(obj, (np.int64, np.int32, np.integer)): return int(obj)
+        if isinstance(obj, (np.float64, np.float32, np.floating)): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        return super().default(obj)
 
-def create_nest_mask(mask_type, params):
-    """Recreates spatial masks (Fixed for 3D Doughnut)"""
-    try:
-        r_outer = float(params.get('mask_radius', params.get('radius', 1.0)))
-        r_inner = float(params.get('mask_inner_radius', params.get('inner', 0.0)))
+def load_and_build():
+    print("Initializing NEST...")
+    nest.ResetKernel()
+    nest.SetKernelStatus({{
+        'resolution': 0.1, 
+        'print_time': False, 
+        'local_num_threads': 1  
+    }})
+    nest.EnableStructuralPlasticity()
 
-        if mask_type in ('sphere', 'spherical'):
-            return nest.CreateMask('spherical', {{'radius': r_outer}})
-            
-        elif mask_type in ('box', 'rectangular'):
-            s = r_outer
-            return nest.CreateMask('rectangular', {{
-                'lower_left': [-s, -s, -s], 'upper_right': [s, s, s]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(script_dir, JSON_FILENAME)
+    
+    if not os.path.exists(json_path):
+        print(f"CRITICAL ERROR: JSON file not found: {{json_path}}")
+        sys.exit(1)
+
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+
+    graphs = {{}}
+    print(f"Loading {{len(data.get('graphs', []))}} graphs...")
+    
+    for g_data in data.get('graphs', []):
+        g_id = g_data['graph_id']
+        graph = Graph(
+            graph_name=g_data.get('graph_name', f'Graph_{{g_id}}'),
+            graph_id=g_id,
+            max_nodes=g_data.get('max_nodes', 100),
+            position=g_data.get('init_position', [0, 0, 0]),
+            polynom_max_power=g_data.get('polynom_max_power', 5),
+            polynom_decay=g_data.get('polynom_decay', 0.8)
+        )
+
+        sorted_nodes = sorted(g_data.get('nodes', []), key=lambda x: x.get('id', 0))
+        for nd in sorted_nodes:
+            params = nd.get('parameters', {{}}).copy()
+            devs = nd.get('devices', [])
+            params.update({{
+                'id': nd['id'],
+                'name': nd['name'],
+                'graph_id': g_id,
+                'connections': nd.get('connections', []),
+                'devices': devs, 
+                'neuron_models': nd.get('neuron_models', ['iaf_psc_alpha']),
+                'types': nd.get('types', [0])
             }})
             
-        elif mask_type == 'doughnut':
-            m_outer = nest.CreateMask('spherical', {{'radius': r_outer}})
-            if r_inner > 0:
-                m_inner = nest.CreateMask('spherical', {{'radius': r_inner}})
-                return m_outer & ~m_inner
-            return m_outer
+            if 'positions' in nd and nd['positions']:
+                params['positions'] = [np.array(p) for p in nd['positions']]
+
+            node = graph.create_node(parameters=params, is_root=(nd['id']==0), auto_build=False)
             
-    except Exception as e:
-        print(f"Mask Warning: {{e}}")
-    return None
+            if 'center_of_mass' in nd: node.center_of_mass = np.array(nd['center_of_mass'])
+            if 'positions' in params: node.positions = params['positions']
+            
+            node.connections = nd.get('connections', [])
+            node.devices = devs 
+            
+            node.populate_node()
+        
+        graphs[g_id] = graph
 
-def create_distance_dependent_weight(base_weight, factor=1.0, offset=0.0):
-    return float(base_weight) + (nest.spatial.distance * float(factor)) + float(offset)
-
-def compute_angular_similarity_weights(local_points, weight_ex, weight_in, bidirectional=True):
-    pts = np.array(local_points)
-    if pts.shape[1] < 2: return np.array([])
-    angles = np.arctan2(pts[:, 1], pts[:, 0])
-    delta_theta = angles[None, :] - angles[:, None]
-    delta_theta = (delta_theta + np.pi) % (2 * np.pi) - np.pi
-    if bidirectional: similarity = np.cos(delta_theta)
-    else: similarity = np.cos(delta_theta - np.pi/4.0)
-    weights = np.zeros_like(similarity)
-    weights[similarity > 0] = similarity[similarity > 0] * weight_ex
-    weights[similarity < 0] = similarity[similarity < 0] * weight_in
-    return weights.flatten()
-
-def apply_internal_tool_connections(pop, positions, params):
-    tool_type = params.get('tool_type')
-    if tool_type not in ['CCW', 'Cone']: return
-    print(f"   -> Internal wiring for {{tool_type}}...")
-    try:
-        w_ex = float(params.get('ccw_weight_ex', 30.0))
-        w_in = -abs(w_ex)
-        bidirectional = bool(params.get('bidirectional', False))
-        pts = np.array(positions); center = np.mean(pts, axis=0); local_pts = pts - center
-        weights = compute_angular_similarity_weights(local_pts, w_ex, w_in, bidirectional)
-        gids = np.array(pop.tolist()); N = len(gids)
-        sources = np.repeat(gids, N); targets = np.tile(gids, N)
-        mask = sources != targets
-        w_masked = weights[mask]; valid_w = np.abs(w_masked) > 0.001
-        if np.sum(valid_w) > 0:
-            nest.Connect(sources[mask][valid_w], targets[mask][valid_w], 
-                         {{'rule': 'one_to_one'}}, 
-                         {{'weight': w_masked[valid_w], 'delay': 1.0, 'synapse_model': 'static_synapse'}})
-    except Exception as e: print(f"Tool wiring error: {{e}}")
-
-# ==========================================
-# 3. BUILD NETWORK
-# ==========================================
-
-def build_network():
-    print(f"Initializing NEST...")
-    nest.ResetKernel()
+    all_graphs_map = {{g.graph_id: g for g in graphs.values()}}
     
-    # Configure NEST to write data to the specific history folder
-    nest.SetKernelStatus({{
-        "local_num_threads": NUM_THREADS, 
-        "resolution": 0.1, 
-        "overwrite_files": True,
-        "data_path": OUTPUT_DIR  # <--- Data saved here
-    }})
-    
-    population_map = {{}}
-    
-    print("Creating Populations...")
-    for graph in SIM_CONFIG['graphs']:
-        gid = graph['graph_id']
-        for node in graph['nodes']:
-            nid = node['id']
-            for i, pos_list in enumerate(node['positions']):
-                if not pos_list: continue
-                model = node['neuron_models'][i] if i < len(node['neuron_models']) else 'iaf_psc_alpha'
-                n_params = node['population_nest_params'][i] if i < len(node.get('population_nest_params',[])) else {{}}
-                try:
-                    pop = nest.Create(model, positions=nest.spatial.free(pos=pos_list), params=n_params)
-                    population_map[(gid, nid, i)] = pop
-                    apply_internal_tool_connections(pop, pos_list, node.get('parameters', {{}}))
-                except Exception as e: print(f"Error creating pop: {{e}}")
+    print("Building Connections...")
+    for graph in graphs.values():
+        graph.build_connections(external_graphs=all_graphs_map)
 
-    print("Creating Devices...")
-    for graph in SIM_CONFIG['graphs']:
-        gid = graph['graph_id']
-        for node in graph['nodes']:
-            if 'devices' not in node: continue
-            for dev in node['devices']:
-                try:
-                    # Enforce ASCII output for cluster readability
-                    if "recorder" in dev['model']: 
-                        dev['params']["record_to"] = "ascii"
-                        # Unique label: Graph_Node_Pop_Model
-                        dev['params']["label"] = f"G{{gid}}_N{{node['id']}}_P{{dev.get('target_pop_id',0)}}_{{dev['model']}}"
-                    
-                    rec = nest.Create(dev['model'], params=dev.get('params', {{}}))
-                    
-                    target_key = (gid, node['id'], dev.get('target_pop_id', 0))
-                    if target_key in population_map:
-                        pop = population_map[target_key]
-                        syn = {{'weight': float(dev.get('conn_params',{{}}).get('weight',1.0)), 'delay': 1.0}}
-                        if any(x in dev['model'] for x in ["generator", "stimulator", "meter"]): nest.Connect(rec, pop, syn_spec=syn)
-                        else: nest.Connect(pop, rec, syn_spec=syn)
-                except Exception as e: print(f"Device error: {{e}}")
+    return graphs
 
-    print("Connecting Populations...")
-    for graph in SIM_CONFIG['graphs']:
-        gid = graph['graph_id']
-        for node in graph['nodes']:
-            for conn in node.get('connections', []):
+def cache_active_recorders(graphs):
+    \"\"\"
+    Erstellt eine flache Liste aller aktiven Recorder.
+    Wrappt IDs direkt in NodeCollection für NEST 3.x Kompatibilität.
+    \"\"\"
+    active_recorders = []
+    
+    for graph in graphs.values():
+        for node in graph.node_list:
+            if not hasattr(node, 'devices'): continue
+            
+            for dev in node.devices:
+                gid_col = dev.get('runtime_gid')
+                if gid_col is None: continue
+                
+                # 1. GID extrahieren
                 try:
-                    src = conn['source']; tgt = conn['target']; p = conn['params']
-                    s_key = (src['graph_id'], src['node_id'], src['pop_id'])
-                    t_key = (tgt['graph_id'], tgt['node_id'], tgt['pop_id'])
-                    if s_key not in population_map or t_key not in population_map: continue
-                    
-                    conn_spec = {{'rule': p.get('rule', 'all_to_all'), 
-                                 'allow_autapses': p.get('allow_autapses', False), 
-                                 'allow_multapses': p.get('allow_multapses', True)}}
-                    for k in ['indegree', 'outdegree', 'N']: 
-                        if k in p: conn_spec[k] = int(p[k])
-                    if 'p' in p: conn_spec['p'] = float(p['p'])
-                    
-                    if p.get('use_spatial'):
-                        mask = create_nest_mask(p.get('mask_type'), p)
-                        if mask: conn_spec['mask'] = mask
+                    if hasattr(gid_col, 'tolist'): gid_int = int(gid_col.tolist()[0])
+                    elif isinstance(gid_col, list): gid_int = int(gid_col[0])
+                    else: gid_int = int(gid_col)
+                except:
+                    continue
+
+                model = dev.get('model', '')
+                if 'recorder' in model or 'meter' in model:
+                    try:
+                        # 2. FIX: NodeCollection erstellen und cachen
+                        node_handle = nest.NodeCollection([gid_int])
                         
-                    syn_spec = {{'synapse_model': p.get('synapse_model', 'static_synapse'), 
-                                'weight': float(p.get('weight', 1.0)), 
-                                'delay': max(float(p.get('delay', 1.0)), 0.1)}}
-                                
-                    if p.get('use_spatial') and p.get('distance_dependent_weight'):
-                        syn_spec['weight'] = create_distance_dependent_weight(syn_spec['weight'], p.get('dist_factor', 1.0), p.get('dist_offset', 0.0))
-                    
-                    if 'receptor_type' in p and p['receptor_type'] != 0:
-                        syn_spec['receptor_type'] = int(p['receptor_type'])
+                        active_recorders.append({{
+                            'handle': node_handle,
+                            'graph_id': graph.graph_id,
+                            'node_id': node.id,
+                            'device_id': str(dev['id']),
+                            'model': model
+                        }})
+                    except Exception as e:
+                        print(f"Error caching device {{gid_int}}: {{e}}")
+    
+    print(f"Cached {{len(active_recorders)}} active recording devices.")
+    return active_recorders
 
-                    nest.Connect(population_map[s_key], population_map[t_key], conn_spec, syn_spec)
-                except Exception as e: print(f"Conn error: {{e}}")
+def collect_data_optimized(active_recorders):
+    \"\"\"
+    Iteriert nur über die vorgefertigte Liste von Recordern.
+    \"\"\"
+    snapshot = {{}}
+    total_events = 0
+    
+    for rec in active_recorders:
+        try:
+            # Daten holen (Handle ist schon NodeCollection)
+            status = nest.GetStatus(rec['handle'])[0]
+            n_events = status.get('n_events', 0)
+            
+            if n_events > 0:
+                events = status.get('events', {{}})
+                
+                # Struktur initialisieren falls nötig
+                gid, nid = rec['graph_id'], rec['node_id']
+                if gid not in snapshot: snapshot[gid] = {{}}
+                if nid not in snapshot[gid]: snapshot[gid][nid] = {{}}
+                
+                # Numpy Arrays zu Listen konvertieren
+                clean_events = {{k: v.tolist() if isinstance(v, np.ndarray) else list(v) 
+                              for k, v in events.items()}}
+                
+                snapshot[gid][nid][rec['device_id']] = {{
+                    'model': rec['model'],
+                    'events': clean_events,
+                    'n_events': n_events
+                }}
+                
+                total_events += n_events
+                
+                # Speicher leeren
+                nest.SetStatus(rec['handle'], {{'n_events': 0}})
+                
+        except Exception as e:
+            print(f"Read error on device {{rec['device_id']}}: {{e}}")
 
-# ==========================================
-# 4. RUN SIMULATION
-# ==========================================
+    return snapshot
+
+def main():
+    run_name = datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S")
+    run_dir = OUTPUT_DIR / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Simulation START. Output: {{run_dir}}")
+    
+    # 1. Aufbauen
+    graphs = load_and_build()
+    
+    # 2. Cachen (Optimierung)
+    recorders = cache_active_recorders(graphs)
+    
+    current_time = 0.0
+    dump_count = 0
+    
+    print(f"Simulating {{SIM_DURATION}} ms...")
+    
+    while current_time < SIM_DURATION:
+        step = min(DUMP_INTERVAL, SIM_DURATION - current_time)
+        nest.Simulate(step)
+        current_time += step
+        
+        # 3. Optimiertes Sammeln
+        data = collect_data_optimized(recorders)
+        
+        filename = f"step_{{dump_count:04d}}_{{int(current_time)}}ms.json"
+        filepath = run_dir / filename
+        
+        # Auch leere Files speichern um den Timestamp zu garantieren.
+        with open(filepath, 'w') as f:
+            dump_obj = {{
+                'time': current_time,
+                'graphs': data
+            }}
+            json.dump(dump_obj, f, cls=NumpyNestEncoder)
+        
+        if data:
+            print(f"  Step {{dump_count}}: {{current_time}}ms -> Dumped active data")
+        else:
+            print(f"  Step {{dump_count}}: {{current_time}}ms -> (no spikes)")
+            
+        dump_count += 1
+
+    print("Simulation FINISHED.")
 
 if __name__ == "__main__":
-    try:
-        build_network()
-        print(f"\\n>>> STARTING SIMULATION ({{SIM_DURATION}} ms) <<<")
-        print(f"    Outputs will be saved to: {{os.path.abspath(OUTPUT_DIR)}}")
-        
-        start_t = time.time()
-        nest.Simulate(SIM_DURATION)
-        end_t = time.time()
-        
-        print(f">>> SIMULATION FINISHED in {{end_t - start_t:.2f}}s.")
-    except Exception as e:
-        print(f"CRITICAL ERROR: {{e}}")
-        import traceback
-        traceback.print_exc()
-'''
+    main()
+"""
+
 
 
 

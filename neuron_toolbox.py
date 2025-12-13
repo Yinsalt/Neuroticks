@@ -2938,7 +2938,6 @@ class Node:
         self.connections = self.parameters.get('connections', [])
         self.devices = self.parameters.get("devices", [])
         
-        # Initialisierung
         self.center_of_mass = np.array(self.parameters.get("m", [0,0,0]), dtype=float)
         self.old_center_of_mass = self.center_of_mass.copy()
         
@@ -3291,7 +3290,147 @@ class Node:
             if pop is None: print(f"Node {self.id} Pop {i}: Creation failed")
             elif verbose: print(f"Node {self.id} Pop {i}: OK")
 
+    def connect(self, graph_registry=None):
+        """
+        Erstellt NEST-Verbindungen basierend auf self.connections.
+        
+        Args:
+            graph_registry: Dict[graph_id -> Graph] für Cross-Graph Connections.
+        """
+        if not self.connections:
+            return
+        
+        print(f"  Connecting Node {self.id} ({len(self.connections)} connections)...")
+        
+        for conn in self.connections:
+            try:
+                self._build_single_connection(conn, graph_registry)
+            except Exception as e:
+                print(f"    ⚠ Connection {conn.get('id', '?')}: {e}")
 
+    def _build_single_connection(self, conn: dict, graph_registry=None):
+        """Baut eine einzelne NEST-Verbindung auf."""
+        src_info = conn.get('source', {})
+        tgt_info = conn.get('target', {})
+        params = conn.get('params', {})
+        
+        src_graph_id = src_info.get('graph_id', self.graph_id)
+        src_node_id = src_info.get('node_id', self.id)
+        src_pop_id = src_info.get('pop_id', 0)
+        
+        tgt_graph_id = tgt_info.get('graph_id', self.graph_id)
+        tgt_node_id = tgt_info.get('node_id', self.id)
+        tgt_pop_id = tgt_info.get('pop_id', 0)
+        
+        # Source Population finden
+        if src_graph_id == self.graph_id and src_node_id == self.id:
+            if src_pop_id >= len(self.population) or self.population[src_pop_id] is None:
+                return
+            src_pop = self.population[src_pop_id]
+        elif graph_registry:
+            src_graph = graph_registry.get(src_graph_id)
+            if not src_graph:
+                return
+            src_node = src_graph.get_node(src_node_id)
+            if not src_node or src_pop_id >= len(src_node.population):
+                return
+            src_pop = src_node.population[src_pop_id]
+        else:
+            return
+        
+        # Target Population finden
+        if tgt_graph_id == self.graph_id and tgt_node_id == self.id:
+            if tgt_pop_id >= len(self.population) or self.population[tgt_pop_id] is None:
+                return
+            tgt_pop = self.population[tgt_pop_id]
+        elif graph_registry:
+            tgt_graph = graph_registry.get(tgt_graph_id)
+            if not tgt_graph:
+                return
+            tgt_node = tgt_graph.get_node(tgt_node_id)
+            if not tgt_node or tgt_pop_id >= len(tgt_node.population):
+                return
+            tgt_pop = tgt_node.population[tgt_pop_id]
+        else:
+            return
+        
+        if src_pop is None or tgt_pop is None:
+            return
+        
+        self._nest_connect(src_pop, tgt_pop, params)
+
+    def _nest_connect(self, src_pop, tgt_pop, params: dict):
+        """Führt den eigentlichen NEST Connect aus."""
+        rule = params.get('rule', 'all_to_all')
+        syn_model = params.get('synapse_model', 'static_synapse')
+        weight = params.get('weight', 1.0)
+        delay = max(params.get('delay', 1.0), 0.1)
+        
+        # Synapse Spec
+        syn_spec = {
+            'synapse_model': syn_model,
+            'weight': weight,
+            'delay': delay
+        }
+        
+        # STDP Parameter
+        if syn_model == 'stdp_synapse':
+            if 'tau_plus' in params: syn_spec['tau_plus'] = params['tau_plus']
+            if 'lambda' in params: syn_spec['lambda_'] = params['lambda']
+            if 'alpha' in params: syn_spec['alpha'] = params['alpha']
+            if 'mu_plus' in params: syn_spec['mu_plus'] = params['mu_plus']
+            if 'mu_minus' in params: syn_spec['mu_minus'] = params['mu_minus']
+            if 'Wmax' in params: syn_spec['Wmax'] = params['Wmax']
+        
+        # Bernoulli Synapse
+        if syn_model == 'bernoulli_synapse' and 'p_transmit' in params:
+            syn_spec['p_transmit'] = params['p_transmit']
+        
+        # Connection Spec
+        use_spatial = params.get('use_spatial', False)
+        
+        if use_spatial:
+            conn_spec = self._build_spatial_conn_spec(params)
+        else:
+            conn_spec = {'rule': rule}
+            if rule == 'fixed_indegree':
+                conn_spec['indegree'] = int(params.get('indegree', 10))
+            elif rule == 'fixed_outdegree':
+                conn_spec['outdegree'] = int(params.get('outdegree', 10))
+            elif rule == 'pairwise_bernoulli':
+                conn_spec['p'] = float(params.get('p', 0.1))
+            conn_spec['allow_autapses'] = params.get('allow_autapses', True)
+            conn_spec['allow_multapses'] = params.get('allow_multapses', True)
+        
+        nest.Connect(src_pop, tgt_pop, conn_spec, syn_spec)
+
+    def _build_spatial_conn_spec(self, params: dict) -> dict:
+        """Baut Connection Spec mit räumlicher Maske."""
+        mask_type = params.get('mask_type', 'sphere')
+        mask_radius = float(params.get('mask_radius', 1.0))
+        inner_radius = float(params.get('mask_inner_radius', 0.0))
+        
+        if mask_type == 'sphere':
+            if inner_radius > 0:
+                mask = (nest.spatial.distance.euclidean < mask_radius) & \
+                       (nest.spatial.distance.euclidean > inner_radius)
+            else:
+                mask = nest.spatial.distance.euclidean < mask_radius
+        elif mask_type == 'box':
+            half = mask_radius
+            mask = (nest.spatial.distance.x < half) & (nest.spatial.distance.x > -half) & \
+                   (nest.spatial.distance.y < half) & (nest.spatial.distance.y > -half) & \
+                   (nest.spatial.distance.z < half) & (nest.spatial.distance.z > -half)
+        else:
+            mask = nest.spatial.distance.euclidean < mask_radius
+        
+        return {
+            'rule': 'pairwise_bernoulli',
+            'p': float(params.get('p', 1.0)),
+            'mask': mask,
+            'allow_autapses': params.get('allow_autapses', True),
+            'allow_multapses': params.get('allow_multapses', True)
+        }
 
 
 
@@ -3625,9 +3764,20 @@ class Graph:
                 break
 
 
-    def build_connections(self):
+    def build_connections(self, external_graphs=None):
+        """
+        Erstellt alle Verbindungen für alle Nodes.
+        
+        Args:
+            external_graphs: Dict[graph_id -> Graph] für Multi-Graph Setups
+        """
+        # Graph Registry für Cross-Graph Connections
+        graph_registry = {self.graph_id: self}
+        if external_graphs:
+            graph_registry.update(external_graphs)
+        
         for node in self.node_list:
-            node.connect()
+            node.connect(graph_registry)
                 
     def build_all(self):
         for i, node in enumerate(self.node_list, 1):
