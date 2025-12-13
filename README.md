@@ -4,7 +4,7 @@
 
 - **Language:** Python  
 - **Backend:** NEST Simulator  
-- **License:** —  
+- **License:** GPL-3.0 
 - **Status:** Research Prototype / Work in Progress  
 
 ---
