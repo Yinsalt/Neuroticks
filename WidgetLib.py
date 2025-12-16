@@ -8197,8 +8197,13 @@ class SimulationViewWidget(QWidget):
 
     def project_point_to_screen(self, vec3):
         view_matrix = self.view.viewMatrix()
-        proj_matrix = self.view.projectionMatrix()
-        w = self.view.width(); h = self.view.height()
+        w = self.view.width()
+        h = self.view.height()
+        # Fallunterscheidung für verschiedene PyQtGraph-Versionen
+        try:
+            proj_matrix = self.view.projectionMatrix()
+        except TypeError:
+            proj_matrix = self.view.projectionMatrix(region=None, viewport=(0, 0, w, h))
         mvp = proj_matrix * view_matrix
         screen_vec = mvp.map(QVector3D(vec3[0], vec3[1], vec3[2]))
         x = (screen_vec.x() + 1.0) * w / 2.0
