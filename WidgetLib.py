@@ -8196,16 +8196,25 @@ class SimulationViewWidget(QWidget):
             self.lbl_conn_status.setText("")
 
     def project_point_to_screen(self, vec3):
-        view_matrix = self.view.viewMatrix()
+
+        try:
+            view_matrix = self.view.viewMatrix()
+        except TypeError:
+            view_matrix = self.view.viewMatrix(None, None)
+
         w = self.view.width()
         h = self.view.height()
-        # Fallunterscheidung für verschiedene PyQtGraph-Versionen
+        
         try:
             proj_matrix = self.view.projectionMatrix()
         except TypeError:
-            proj_matrix = self.view.projectionMatrix(region=None, viewport=(0, 0, w, h))
+            # Newer PyQtGraph versions need region and viewport parameters
+            region = (0, 0, w, h)
+            proj_matrix = self.view.projectionMatrix(region, (0, 0, w, h))
+        
         mvp = proj_matrix * view_matrix
         screen_vec = mvp.map(QVector3D(vec3[0], vec3[1], vec3[2]))
+        
         x = (screen_vec.x() + 1.0) * w / 2.0
         y = (1.0 - screen_vec.y()) * h / 2.0
         return x, y
