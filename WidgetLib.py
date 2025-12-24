@@ -8196,25 +8196,16 @@ class SimulationViewWidget(QWidget):
             self.lbl_conn_status.setText("")
 
     def project_point_to_screen(self, vec3):
-
-        try:
-            view_matrix = self.view.viewMatrix()
-        except TypeError:
-            view_matrix = self.view.viewMatrix(None, None)
-
+        view_matrix = self.view.viewMatrix()
         w = self.view.width()
         h = self.view.height()
-        
+        # Fallunterscheidung für verschiedene PyQtGraph-Versionen
         try:
             proj_matrix = self.view.projectionMatrix()
         except TypeError:
-            # Newer PyQtGraph versions need region and viewport parameters
-            region = (0, 0, w, h)
-            proj_matrix = self.view.projectionMatrix(region, (0, 0, w, h))
-        
+            proj_matrix = self.view.projectionMatrix(region=None, viewport=(0, 0, w, h))
         mvp = proj_matrix * view_matrix
         screen_vec = mvp.map(QVector3D(vec3[0], vec3[1], vec3[2]))
-        
         x = (screen_vec.x() + 1.0) * w / 2.0
         y = (1.0 - screen_vec.y()) * h / 2.0
         return x, y
@@ -9478,7 +9469,6 @@ class ScriptExporter:
                 'nodes': nodes_data
             })
         return data
-
     def _get_template(self, json_filename, duration, threads):
         return f"""
 import nest
@@ -9510,7 +9500,7 @@ def load_and_build():
     nest.SetKernelStatus({{
         'resolution': 0.1, 
         'print_time': False, 
-        'local_num_threads': 1  
+        'local_num_threads': {threads}  
     }})
     nest.EnableStructuralPlasticity()
 
@@ -9542,6 +9532,10 @@ def load_and_build():
         for nd in sorted_nodes:
             params = nd.get('parameters', {{}}).copy()
             devs = nd.get('devices', [])
+            
+            # === FIX: population_nest_params laden ===
+            pop_nest_params = nd.get('population_nest_params', [])
+            
             params.update({{
                 'id': nd['id'],
                 'name': nd['name'],
@@ -9549,7 +9543,8 @@ def load_and_build():
                 'connections': nd.get('connections', []),
                 'devices': devs, 
                 'neuron_models': nd.get('neuron_models', ['iaf_psc_alpha']),
-                'types': nd.get('types', [0])
+                'types': nd.get('types', [0]),
+                'population_nest_params': pop_nest_params  # FIX: NEST-Parameter übergeben
             }})
             
             if 'positions' in nd and nd['positions']:
@@ -9561,7 +9556,10 @@ def load_and_build():
             if 'positions' in params: node.positions = params['positions']
             
             node.connections = nd.get('connections', [])
-            node.devices = devs 
+            node.devices = devs
+            
+            # === FIX: population_nest_params auch direkt am Node setzen ===
+            node.population_nest_params = pop_nest_params
             
             node.populate_node()
         
@@ -9707,7 +9705,6 @@ def main():
 if __name__ == "__main__":
     main()
 """
-
 
 
 

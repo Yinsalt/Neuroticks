@@ -3365,6 +3365,7 @@ class Node:
         syn_model = params.get('synapse_model', 'static_synapse')
         weight = params.get('weight', 1.0)
         delay = max(params.get('delay', 1.0), 0.1)
+        use_spatial = params.get('use_spatial', False)
         
         # Synapse Spec
         syn_spec = {
@@ -3382,13 +3383,11 @@ class Node:
             if 'mu_minus' in params: syn_spec['mu_minus'] = params['mu_minus']
             if 'Wmax' in params: syn_spec['Wmax'] = params['Wmax']
         
-        # Bernoulli Synapse
-        if syn_model == 'bernoulli_synapse' and 'p_transmit' in params:
+        # Bernoulli Synapse - NUR wenn NICHT spatial (NEST erlaubt p_transmit nicht mit mask/kernel)
+        if syn_model == 'bernoulli_synapse' and 'p_transmit' in params and not use_spatial:
             syn_spec['p_transmit'] = params['p_transmit']
         
         # Connection Spec
-        use_spatial = params.get('use_spatial', False)
-        
         if use_spatial:
             conn_spec = self._build_spatial_conn_spec(params)
         else:
@@ -3405,24 +3404,26 @@ class Node:
         nest.Connect(src_pop, tgt_pop, conn_spec, syn_spec)
 
     def _build_spatial_conn_spec(self, params: dict) -> dict:
-        """Baut Connection Spec mit räumlicher Maske."""
+        """Baut Connection Spec mit räumlicher Maske (NEST 3.x kompatibel)."""
         mask_type = params.get('mask_type', 'sphere')
         mask_radius = float(params.get('mask_radius', 1.0))
         inner_radius = float(params.get('mask_inner_radius', 0.0))
         
-        if mask_type == 'sphere':
+        # NEST 3.x API: nest.CreateMask verwenden
+        if mask_type in ('sphere', 'spherical'):
+            mask = nest.CreateMask('spherical', {'radius': mask_radius})
             if inner_radius > 0:
-                mask = (nest.spatial.distance.euclidean < mask_radius) & \
-                       (nest.spatial.distance.euclidean > inner_radius)
-            else:
-                mask = nest.spatial.distance.euclidean < mask_radius
-        elif mask_type == 'box':
+                inner_mask = nest.CreateMask('spherical', {'radius': inner_radius})
+                mask = mask & ~inner_mask  # Doughnut/Ring
+        elif mask_type in ('box', 'rectangular'):
             half = mask_radius
-            mask = (nest.spatial.distance.x < half) & (nest.spatial.distance.x > -half) & \
-                   (nest.spatial.distance.y < half) & (nest.spatial.distance.y > -half) & \
-                   (nest.spatial.distance.z < half) & (nest.spatial.distance.z > -half)
+            mask = nest.CreateMask('rectangular', {
+                'lower_left': [-half, -half, -half],
+                'upper_right': [half, half, half]
+            })
         else:
-            mask = nest.spatial.distance.euclidean < mask_radius
+            # Default: spherical
+            mask = nest.CreateMask('spherical', {'radius': mask_radius})
         
         return {
             'rule': 'pairwise_bernoulli',
@@ -3431,6 +3432,7 @@ class Node:
             'allow_autapses': params.get('allow_autapses', True),
             'allow_multapses': params.get('allow_multapses', True)
         }
+
 
 
 
