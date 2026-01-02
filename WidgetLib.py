@@ -3486,6 +3486,66 @@ class EditGraphWidget(QWidget):
                         if tgt_node:
                             node_obj.remove_neighbor_if_isolated(tgt_node)
         
+            # ---------------------------------------------------------
+            # FIX: Update INCOMING connections from other nodes
+            # ---------------------------------------------------------
+            
+            # 1. Identifiziere relevante Quell-Nodes (Effizienz: O(1) wenn prev existiert)
+            source_nodes = []
+            if hasattr(node_obj, 'prev') and node_obj.prev:
+                source_nodes = list(node_obj.prev)
+            else:
+                # FALLBACK: Wenn prev leer ist (z.B. vor Simulationsstart)
+                for graph in self.graph_list:
+                    for other_node in graph.node_list:
+                        if other_node == node_obj: 
+                            continue
+                        is_source = False
+                        if hasattr(other_node, 'connections'):
+                            for conn in other_node.connections:
+                                tgt = conn.get('target', {})
+                                if (tgt.get('graph_id') == node_obj.graph_id and 
+                                    tgt.get('node_id') == node_obj.id):
+                                    is_source = True
+                                    break
+                        if is_source:
+                            source_nodes.append(other_node)
+
+            # 2. Update connections in den gefundenen Source-Nodes
+            deleted_pop_idx = self.current_pop_idx
+            
+            for src_node in source_nodes:
+                if not hasattr(src_node, 'connections'): 
+                    continue
+                
+                new_conns = []
+                modified = False
+                
+                for conn in src_node.connections:
+                    tgt = conn.get('target', {})
+                    
+                    if (tgt.get('graph_id') == node_obj.graph_id and 
+                        tgt.get('node_id') == node_obj.id):
+                        
+                        target_pop_id = tgt.get('pop_id', 0)
+                        
+                        if target_pop_id == deleted_pop_idx:
+                            print(f"⚠ Auto-Removing incoming connection from '{src_node.name}' to deleted population on '{node_obj.name}'")
+                            modified = True
+                            continue
+                            
+                        elif target_pop_id > deleted_pop_idx:
+                            tgt['pop_id'] -= 1
+                            modified = True
+                            
+                    new_conns.append(conn)
+                
+                if modified:
+                    src_node.connections = new_conns
+            # ---------------------------------------------------------
+            # FIX END
+            # ---------------------------------------------------------
+        
         self.update_population_list()
         
         num_pops = len(node_wrapper['populations'])
