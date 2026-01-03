@@ -3509,38 +3509,7 @@ class EditGraphWidget(QWidget):
                         tgt_node = tgt_graph.get_node(nid)
                         if tgt_node:
                             node_obj.remove_neighbor_if_isolated(tgt_node)
-            source_nodes = []
-            if hasattr(node_obj, 'prev') and node_obj.prev:
-                source_nodes = list(node_obj.prev)
-            else:
-                for graph in self.graph_list:
-                    for other_node in graph.node_list:
-                        if other_node == node_obj: 
-                            continue
-                        if hasattr(other_node, 'connections'):
-                            for conn in other_node.connections:
-                                tgt = conn.get('target', {})
-                                if (tgt.get('graph_id') == node_obj.graph_id and 
-                                    tgt.get('node_id') == node_obj.id):
-                                    source_nodes.append(other_node)
-                                    break
-
-            deleted_pop_idx = self.current_pop_idx
-            for src_node in source_nodes:
-                if not hasattr(src_node, 'connections'): 
-                    continue
-                new_conns = []
-                for conn in src_node.connections:
-                    tgt = conn.get('target', {})
-                    if (tgt.get('graph_id') == node_obj.graph_id and 
-                        tgt.get('node_id') == node_obj.id):
-                        if tgt.get('pop_id') == deleted_pop_idx:
-                            print(f"⚠ Auto-Removing incoming connection from '{src_node.name}'")
-                            continue
-                        elif tgt.get('pop_id') > deleted_pop_idx:
-                            tgt['pop_id'] -= 1
-                    new_conns.append(conn)
-                src_node.connections = new_conns
+        
         self.update_population_list()
         
         num_pops = len(node_wrapper['populations'])
