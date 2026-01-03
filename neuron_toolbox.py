@@ -28,6 +28,27 @@ dt = 0.01
 positions=[np.zeros(3)]
 gsl = 8
 
+# Multi-Compartment Neuron Models - require special handling
+MC_MODELS = {'iaf_cond_alpha_mc', 'cm_default', 'cm_main', 'iaf_cond_beta_mc'}
+
+def get_mc_recordables(model_name: str) -> list:
+    """
+    Returns appropriate recordables for multi-compartment models.
+    Standard models use ['V_m'], MC models use compartment-specific variables.
+    """
+    if model_name in MC_MODELS:
+        return ['V_m_s']  # Soma membrane potential
+    return ['V_m']
+
+def get_receptor_type_for_model(model_name: str, excitatory: bool = True) -> int:
+    """
+    Returns appropriate receptor_type for multi-compartment models.
+    For standard models returns 0 (default).
+    """
+    if model_name in MC_MODELS:
+        return 1 if excitatory else 2  # soma_exc or soma_inh
+    return 0
+
 
 area2models = {
     
@@ -3219,11 +3240,12 @@ class Node:
                         has_multi = any(d.get('model') == 'multimeter' and d.get('target_pop_id') == pop_idx for d in self.parameters['devices'])
                         if not has_multi:
                             print(f"  + Auto-Adding Multimeter to Pop {pop_idx}")
+                            recordables = get_mc_recordables(model)
                             self.parameters['devices'].append({
                                 "id": len(self.parameters['devices']),
                                 "model": "multimeter",
                                 "target_pop_id": pop_idx,
-                                "params": {"interval": 1.0, "record_from": ["V_m"]},
+                                "params": {"interval": 1.0, "record_from": recordables},
                                 "conn_params": {"weight": 1.0, "delay": 1.0},
                                 "runtime_gid": None
                             })
@@ -3265,17 +3287,47 @@ class Node:
         for dev_conf in self.devices:
             try:
                 model = dev_conf['model']
-                d_params = dev_conf.get('params', {})
+                d_params = dev_conf.get('params', {}).copy()  # Copy to avoid modifying original
+                
+                idx = dev_conf.get('target_pop_id', 0)
+                target_model = None
+                
+                # Get target model for MC detection
+                if idx < len(self.population) and self.population[idx]:
+                    try:
+                        target_model = nest.GetStatus(self.population[idx][0], 'model')[0]
+                    except:
+                        pass
+                
+                # Fix recordables for multimeters targeting MC models
+                if 'multimeter' in model and target_model in MC_MODELS:
+                    record_from = d_params.get('record_from', ['V_m'])
+                    if isinstance(record_from, str):
+                        record_from = [record_from]
+                    # Replace V_m with V_m_s for MC models
+                    fixed_recordables = []
+                    for r in record_from:
+                        if r == 'V_m':
+                            fixed_recordables.append('V_m_s')
+                        else:
+                            fixed_recordables.append(r)
+                    d_params['record_from'] = fixed_recordables
+                
                 nest_dev = nest.Create(model, params=d_params)
                 dev_conf['runtime_gid'] = nest_dev
                 
-                idx = dev_conf.get('target_pop_id', 0)
                 if idx < len(self.population) and self.population[idx]:
                     target = self.population[idx]
                     cp = dev_conf.get('conn_params', {})
                     w = float(cp.get('weight', 1.0))
                     d = max(float(cp.get('delay', 1.0)), 0.1)
                     syn = {'weight': w, 'delay': d}
+                    
+                    # Auto-detect MC models for generators
+                    if "generator" in model and target_model in MC_MODELS:
+                        receptor = get_receptor_type_for_model(target_model, excitatory=(w >= 0))
+                        if receptor > 0:
+                            syn['receptor_type'] = receptor
                     
                     if "generator" in model or "meter" in model: 
                         nest.Connect(nest_dev, target, syn_spec=syn)

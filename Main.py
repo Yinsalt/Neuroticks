@@ -462,6 +462,10 @@ class MainWindow(QMainWindow):
     def reset_application(self):
         self.status_bar.set_status("Cleaning up for new project...", color="#FF5722")
         QApplication.processEvents()
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.stop()
+        if hasattr(self, 'simulation_view'):
+            self.simulation_view.stop_rendering_safe()
         
         try:
             global graph_list
@@ -549,7 +553,10 @@ class MainWindow(QMainWindow):
         if not self.active_graphs:
             print("No active graphs to rebuild")
             return
-        
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.stop()
+        if hasattr(self, 'simulation_view'):
+            self.simulation_view.stop_rendering_safe()
         graph = list(self.active_graphs.values())[-1]
         
         if node_idx >= len(graph.node_list):

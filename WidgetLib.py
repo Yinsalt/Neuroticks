@@ -86,6 +86,30 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtWidgets import QScrollArea, QInputDialog, QLayout, QWidgetItem
 from PyQt6.QtCore import QRect, QPoint
 
+# Multi-Compartment Neuron Models - require explicit receptor_type
+MC_MODELS = {'iaf_cond_alpha_mc', 'cm_default', 'cm_main', 'iaf_cond_beta_mc'}
+
+def get_receptor_type_for_model(model_name: str, excitatory: bool = True) -> int:
+    """
+    Returns appropriate receptor_type for multi-compartment models.
+    For standard models returns 0 (default).
+    
+    iaf_cond_alpha_mc receptors:
+        1: soma_exc, 2: soma_inh, 3: prox_exc, 4: prox_inh, 5: dist_exc, 6: dist_inh
+    """
+    if model_name in MC_MODELS:
+        return 1 if excitatory else 2  # soma_exc or soma_inh
+    return 0
+
+def get_mc_recordables(model_name: str) -> list:
+    """
+    Returns appropriate recordables for multi-compartment models.
+    Standard models use ['V_m'], MC models use compartment-specific variables.
+    """
+    if model_name in MC_MODELS:
+        return ['V_m_s']  # Soma membrane potential
+    return ['V_m']
+
 
 class FlowLayout(QLayout):
 
@@ -3485,67 +3509,38 @@ class EditGraphWidget(QWidget):
                         tgt_node = tgt_graph.get_node(nid)
                         if tgt_node:
                             node_obj.remove_neighbor_if_isolated(tgt_node)
-        
-            # ---------------------------------------------------------
-            # FIX: Update INCOMING connections from other nodes
-            # ---------------------------------------------------------
-            
-            # 1. Identifiziere relevante Quell-Nodes (Effizienz: O(1) wenn prev existiert)
             source_nodes = []
             if hasattr(node_obj, 'prev') and node_obj.prev:
                 source_nodes = list(node_obj.prev)
             else:
-                # FALLBACK: Wenn prev leer ist (z.B. vor Simulationsstart)
                 for graph in self.graph_list:
                     for other_node in graph.node_list:
                         if other_node == node_obj: 
                             continue
-                        is_source = False
                         if hasattr(other_node, 'connections'):
                             for conn in other_node.connections:
                                 tgt = conn.get('target', {})
                                 if (tgt.get('graph_id') == node_obj.graph_id and 
                                     tgt.get('node_id') == node_obj.id):
-                                    is_source = True
+                                    source_nodes.append(other_node)
                                     break
-                        if is_source:
-                            source_nodes.append(other_node)
 
-            # 2. Update connections in den gefundenen Source-Nodes
             deleted_pop_idx = self.current_pop_idx
-            
             for src_node in source_nodes:
                 if not hasattr(src_node, 'connections'): 
                     continue
-                
                 new_conns = []
-                modified = False
-                
                 for conn in src_node.connections:
                     tgt = conn.get('target', {})
-                    
                     if (tgt.get('graph_id') == node_obj.graph_id and 
                         tgt.get('node_id') == node_obj.id):
-                        
-                        target_pop_id = tgt.get('pop_id', 0)
-                        
-                        if target_pop_id == deleted_pop_idx:
-                            print(f"⚠ Auto-Removing incoming connection from '{src_node.name}' to deleted population on '{node_obj.name}'")
-                            modified = True
+                        if tgt.get('pop_id') == deleted_pop_idx:
+                            print(f"⚠ Auto-Removing incoming connection from '{src_node.name}'")
                             continue
-                            
-                        elif target_pop_id > deleted_pop_idx:
+                        elif tgt.get('pop_id') > deleted_pop_idx:
                             tgt['pop_id'] -= 1
-                            modified = True
-                            
                     new_conns.append(conn)
-                
-                if modified:
-                    src_node.connections = new_conns
-            # ---------------------------------------------------------
-            # FIX END
-            # ---------------------------------------------------------
-        
+                src_node.connections = new_conns
         self.update_population_list()
         
         num_pops = len(node_wrapper['populations'])
@@ -5467,6 +5462,15 @@ class ConnectionExecutor:
             receptor = params.get('receptor_type')
             if receptor is not None and receptor != 0:
                 syn_spec['receptor_type'] = receptor
+            else:
+                # Auto-detect MC models
+                try:
+                    target_model = nest.GetStatus(tgt_pop[0], 'model')[0]
+                    auto_receptor = get_receptor_type_for_model(target_model, excitatory=(weight >= 0))
+                    if auto_receptor > 0:
+                        syn_spec['receptor_type'] = auto_receptor
+                except:
+                    pass
             
             if rule == 'one_to_one' and len(src_pop) != len(tgt_pop):
                 return False, f"one_to_one size mismatch: {len(src_pop)} vs {len(tgt_pop)}"
@@ -8306,7 +8310,34 @@ class SimulationViewWidget(QWidget):
                 sg = nest.Create('spike_generator')
             
             targets_sorted = sorted(target_gids.tolist())
-            nest.Connect(sg, nest.NodeCollection(targets_sorted), conn_spec={'rule': 'all_to_all'}, syn_spec={'weight': w, 'delay': d})
+            target_nc = nest.NodeCollection(targets_sorted)
+            
+            # Group targets by model to handle MC models correctly
+            model_groups = {}
+            for gid in targets_sorted:
+                try:
+                    model = nest.GetStatus(nest.NodeCollection([gid]), 'model')[0]
+                    if model not in model_groups:
+                        model_groups[model] = []
+                    model_groups[model].append(gid)
+                except:
+                    if 'unknown' not in model_groups:
+                        model_groups['unknown'] = []
+                    model_groups['unknown'].append(gid)
+            
+            # Connect each group with appropriate receptor_type
+            total_connected = 0
+            for model, gids in model_groups.items():
+                syn_spec = {'weight': w, 'delay': d}
+                receptor = get_receptor_type_for_model(model, excitatory=(w >= 0))
+                if receptor > 0:
+                    syn_spec['receptor_type'] = receptor
+                
+                try:
+                    nest.Connect(sg, nest.NodeCollection(gids), conn_spec={'rule': 'all_to_all'}, syn_spec=syn_spec)
+                    total_connected += len(gids)
+                except Exception as e:
+                    print(f"  Skipping {len(gids)} {model} neurons: {e}")
             
             gen_gid = sg.tolist()[0]
             elec_id = self.next_electrode_id; self.next_electrode_id += 1
@@ -8327,7 +8358,7 @@ class SimulationViewWidget(QWidget):
                 'letter': letter
             }
             self.lbl_tool_status.setText(f"Injector {letter} added!")
-            print(f"Created {gen_type} {letter} connected to {len(target_gids)} neurons.")
+            print(f"Created {gen_type} {letter} connected to {total_connected}/{len(target_gids)} neurons.")
             
         except Exception as e:
             print(f"Injection err: {e}")
@@ -8368,20 +8399,45 @@ class SimulationViewWidget(QWidget):
                     tgt_sorted = sorted(target_gids)
                     
                     src_collection = nest.NodeCollection(src_sorted)
-                    tgt_collection = nest.NodeCollection(tgt_sorted)
                     
                     conn_spec = self._build_conn_spec()
-                    syn_spec = self._build_syn_spec()
+                    base_syn_spec = self._build_syn_spec()
+                    weight = base_syn_spec.get('weight', 1.0)
                     
-                    nest.Connect(src_collection, tgt_collection, conn_spec, syn_spec)
+                    # Group targets by model
+                    model_groups = {}
+                    for gid in tgt_sorted:
+                        try:
+                            model = nest.GetStatus(nest.NodeCollection([gid]), 'model')[0]
+                            if model not in model_groups:
+                                model_groups[model] = []
+                            model_groups[model].append(gid)
+                        except:
+                            if 'unknown' not in model_groups:
+                                model_groups['unknown'] = []
+                            model_groups['unknown'].append(gid)
+                    
+                    # Connect to each model group with appropriate receptor_type
+                    total_connected = 0
+                    for model, gids in model_groups.items():
+                        syn_spec = base_syn_spec.copy()
+                        receptor = get_receptor_type_for_model(model, excitatory=(weight >= 0))
+                        if receptor > 0:
+                            syn_spec['receptor_type'] = receptor
+                        
+                        try:
+                            nest.Connect(src_collection, nest.NodeCollection(gids), conn_spec, syn_spec)
+                            total_connected += len(gids)
+                        except Exception as e:
+                            print(f"  Skipping {len(gids)} {model} targets: {e}")
                     
                     self.anim_rg[target_indices] = 5.0
                     
                     n_src = len(self.conn_source_gids)
                     n_tgt = len(target_gids)
-                    print(f"🔗 Connected {n_src} -> {n_tgt} neurons")
-                    self.lbl_tool_status.setText(f"Connected {n_src}→{n_tgt}! Next Source?")
-                    self.lbl_conn_status.setText(f"✓ {n_src} → {n_tgt}")
+                    print(f"🔗 Connected {n_src} -> {total_connected}/{n_tgt} neurons")
+                    self.lbl_tool_status.setText(f"Connected {n_src}→{total_connected}! Next Source?")
+                    self.lbl_conn_status.setText(f"✓ {n_src} → {total_connected}")
                     
                 except Exception as e:
                     print(f"Connection Error: {e}")
