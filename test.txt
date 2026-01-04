@@ -1,39 +1,62 @@
 #!/bin/bash
 
-# --- 1. SYSTEM PREPARATION ---
-echo ">>> [1/5] Updating System and installing dependencies..."
+# --- 1. SYSTEM PREPARATION (Build Tools) ---
+echo ">>> [1/6] Installing Build Dependencies (This creates the foundation)..."
 sudo apt update
 sudo apt install -y \
     python3-venv python3-pip python3-dev \
     build-essential cmake git \
+    libltdl-dev libreadline-dev libncurses-dev libgsl-dev \
     libgl1 libegl1 libgl1-mesa-glx \
     libxcb-xinerama0 libxcb-cursor0 \
     libxkbcommon-x11-0 libdbus-1-3 \
     libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
     libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
-    mesa-utils libqt6gui6
+    mesa-utils libqt6gui6 \
+    doxygen  # Optional, but good for NEST build
 
 # --- 2. VIRTUAL ENV SETUP ---
-echo ">>> [2/5] Setting up Virtual Environment (nest_env)..."
+echo ">>> [2/6] Setting up Virtual Environment (nest_env)..."
 cd ~
-# Falls alte Env existiert, löschen (für sauberen Neustart)
 rm -rf nest_env
 python3 -m venv nest_env
 source nest_env/bin/activate
 
-echo ">>> Upgrading pip..."
+echo ">>> Upgrading pip and installing Build-Requirements..."
 pip install --upgrade pip
+# WICHTIG: NEST braucht NumPy und Cython VOR dem Kompilieren!
+pip install "numpy<2.0" cython
 
-# --- 3. PYTHON LIBRARIES INSTALLATION ---
-echo ">>> [3/5] Installing Python Libraries..."
-# HINWEIS: Wir installieren ohne starre Versionen, damit die Installation 
-# nicht fehlschlägt. Pip sucht automatisch die kompatiblen Versionen.
-# 'numpy<2' ist oft wichtig für NEST-Stabilität.
+# --- 3. CLONE & COMPILE NEST (The "Hard" Part) ---
+echo ">>> [3/6] Cloning NEST Simulator (Master Branch)..."
+cd ~
+rm -rf nest-simulator
+# Wir klonen den aktuellen Master-Branch (entspricht deiner dev0 Version)
+git clone https://github.com/nest/nest-simulator.git
 
-pip install "numpy<2.0" 
+echo ">>> [3/6] Compiling NEST (Grab a coffee, this takes time)..."
+cd nest-simulator
+mkdir -p build && cd build
 
+# CMake Konfiguration: Installiert NEST direkt in das Virtual Environment!
+cmake \
+    -DCMAKE_INSTALL_PREFIX:PATH=$VIRTUAL_ENV \
+    -Dwith-python=3 \
+    -Dwith-openmp=ON \
+    ..
+
+# Kompilieren mit allen verfügbaren CPU-Kernen
+make -j$(nproc)
+make install
+
+# Testen ob NEST da ist
+echo ">>> Testing NEST installation..."
+python3 -c "import nest; print(f'NEST Version installed: {nest.version()}')"
+
+# --- 4. PYTHON LIBRARIES INSTALLATION ---
+echo ">>> [4/6] Installing GUI Dependencies..."
+# NEST und Numpy sind schon da. Jetzt der Rest.
 pip install \
-    nest-simulator \
     pandas \
     scipy \
     networkx \
@@ -44,21 +67,18 @@ pip install \
     pyvistaqt \
     vtk
 
-# --- 4. CLONE NEUROTICKS ---
-echo ">>> [4/5] Cloning NeuroTicks from GitHub..."
+# --- 5. CLONE NEUROTICKS ---
+echo ">>> [5/6] Cloning NeuroTicks..."
 cd ~
-# Falls Ordner schon da ist, löschen und neu holen
 rm -rf NeuroTicks
 git clone https://github.com/yinsalt/NeuroTicks.git
 
-# --- 5. STARTING APPLICATION (VM FIXES) ---
-echo ">>> [5/5] Starting NeuroTicks..."
+# --- 6. STARTING APPLICATION ---
+echo ">>> [6/6] Starting NeuroTicks..."
 cd NeuroTicks
 
-# WICHTIG FÜR VM: Software Rendering erzwingen (verhindert schwarzes Fenster)
+# VM Fixes (Software Rendering & X11)
 export LIBGL_ALWAYS_SOFTWARE=1
-# WICHTIG FÜR UBUNTU 24.04: X11 Backend erzwingen (verhindert Wayland-Fehler)
 export QT_QPA_PLATFORM=xcb
 
-echo ">>> Launching Main.py..."
 python3 Main.py
