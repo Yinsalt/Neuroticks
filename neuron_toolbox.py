@@ -2952,7 +2952,6 @@ class Node:
         }
         self.parameters = parameters if parameters else default_params.copy()
         
-        # Sicherstellen, dass Defaults gesetzt sind
         if 'auto_spike_recorder' not in self.parameters: self.parameters['auto_spike_recorder'] = False
         if 'auto_multimeter' not in self.parameters: self.parameters['auto_multimeter'] = False
         
@@ -2987,20 +2986,12 @@ class Node:
         else: self.function_generator = PolynomGenerator(n=n); self.coefficients = self.function_generator.coefficients.copy()
 
     def build(self):
-        """
-        Generiert die Positionen der Neuronen mit der Logik:
-        1. Lokaler Ursprung 'm' definiert das Zentrum des Flow Fields.
-        2. Flow Field wird angewendet.
-        3. Drift-Korrektur: Die Wolke wird zurück auf 'm' zentriert.
-        4. Globales Displacement wird addiert.
-        """
+
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
         
-        # 1. Lokales Zentrum für Flow-Berechnung (Basis-Parameter 'm')
         local_center_pos = np.array(params.get('m', [0.0, 0.0, 0.0]), dtype=float)
         
-        # 2. Globales Displacement (Verschiebung NACH der Berechnung)
         raw_disp = np.array(params.get('displacement', [0.0, 0.0, 0.0]), dtype=float)
         disp_factor = float(params.get('displacement_factor', 1.0))
         final_displacement_vector = raw_disp * disp_factor
@@ -3016,7 +3007,6 @@ class Node:
         transform_matrix = np.diag([sx, sy, sz])
         self.parameters['transform_matrix'] = transform_matrix.tolist()
 
-        # --- GENERIERUNG (LOKAL) ---
         generated_positions = []
 
         if tool_type == 'custom':
@@ -3024,7 +3014,6 @@ class Node:
             num_types = len(types)
             grid_size = tuple(params.get('grid_size', [10, 10, 10]))
             
-            # Flow Functions vorbereiten
             encoded_per_type = params.get("encoded_polynoms_per_type", None)
             if encoded_per_type:
                 if len(encoded_per_type) != num_types:
@@ -3048,7 +3037,6 @@ class Node:
             })
 
             try:
-                # Punkte werden um local_center_pos generiert
                 generated_positions = cluster_and_flow(
                     grid_size=grid_size,
                     m=local_center_pos,
@@ -3068,7 +3056,7 @@ class Node:
                 print(f"    ⚠ WFC Generation Failed: {e}. Creating fallback blob.")
                 generated_positions = [blob_positions(n=100, m=local_center_pos, r=2.0, plot=False) for _ in types]
 
-        else: # Standard Shapes
+        else: 
             types = params.get('types', [0])
             generated_positions = []
             for i in range(len(types)):
@@ -3083,24 +3071,15 @@ class Node:
                 )
                 generated_positions.append(final_points)
 
-        # --- KORREKTUR & VERSCHIEBUNG ---
-        
-        # 1. Drift-Korrektur:
-        # Flow Fields verschieben oft den Schwerpunkt der Punkte.
-        # Wir wollen aber, dass "m" der lokale Schwerpunkt bleibt.
-        # Also berechnen wir den aktuellen Schwerpunkt und schieben alles zurück.
-        
+
         all_points_flat = [p for p in generated_positions if p is not None and len(p) > 0]
         
         if all_points_flat:
             combined = np.vstack(all_points_flat)
             current_centroid = np.mean(combined, axis=0)
             
-            # Vektor um zurück zu 'm' zu kommen
             drift_correction = local_center_pos - current_centroid
-            
-            # Wende Drift-Korrektur UND Globales Displacement an
-            # Formel: Neuer Punkt = Alter Punkt + (Zurück zu m) + (Verschiebung im Raum)
+
             total_shift = drift_correction + final_displacement_vector
             
             self.positions = []
@@ -3110,24 +3089,19 @@ class Node:
                 else:
                     self.positions.append(cluster)
                     
-            # 2. Update der visuellen Position für das Graph-Skelett
-            # Das Skelett soll dort enden, wo die Neuronen jetzt tatsächlich sind.
-            # Das ist exakt: Lokales m + Displacement
+
             self.center_of_mass = local_center_pos + final_displacement_vector
             
         else:
             self.positions = generated_positions
             self.center_of_mass = local_center_pos + final_displacement_vector
 
-        # Parameter synchronisieren, aber Trennung wahren:
-        # 'm' bleibt der Ursprung für die Generierung (wichtig für Flow Field Konsistenz)
-        # 'center_of_mass' ist das Ergebnis (wichtig für Visualisierung)
+
         self.parameters['m'] = local_center_pos.tolist() 
         self.parameters['center_of_mass'] = self.center_of_mass.tolist()
         self.parameters['old_center_of_mass'] = self.center_of_mass.tolist()
 
     def populate_node(self):
-        # [Unveränderter Code von populate_node ...]
         print(f"\nPopulating Node {self.id} ({self.name})...")
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
@@ -3140,23 +3114,14 @@ class Node:
         
         k_val = float(params.get('k', 10.0))
         use_index = params.get('old', False)
-        # HIER WICHTIG: Wir nutzen self.positions, die in build() bereits korrekt verschoben wurden.
-        # Center pos für Tools wie CCW wird nur als Referenz für die Rotation genutzt
+
         center_pos = self.center_of_mass 
         
         try:
             if tool_type == 'CCW':
                 for i, _ in enumerate(self.positions):
                     mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                    # CCW und Cone erstellen Punkte intern neu basierend auf center.
-                    # Da wir Positionen aber schon in build() haben, ist es effizienter,
-                    # clusters_to_neurons zu nutzen, WENN wir die exakten Positionen wollen.
-                    # ABER: CCW hat spezielle Topologie.
-                    # Wenn wir die Positionen aus build() nutzen wollen (mit Displacement),
-                    # müssen wir sicherstellen, dass create_CCW diese annimmt oder wir die Parameter anpassen.
-                    
-                    # Workaround für CCW/Cone: Da diese Funktionen Positionen basierend auf Parametern neu berechnen,
-                    # übergeben wir das neue 'center' (was self.center_of_mass ist).
+
                     
                     pop = create_CCW(
                         model=mod, neuron_params=neuron_params,
@@ -3343,12 +3308,7 @@ class Node:
             elif verbose: print(f"Node {self.id} Pop {i}: OK")
 
     def connect(self, graph_registry=None):
-        """
-        Erstellt NEST-Verbindungen basierend auf self.connections.
-        
-        Args:
-            graph_registry: Dict[graph_id -> Graph] für Cross-Graph Connections.
-        """
+
         if not self.connections:
             return
         
@@ -3361,7 +3321,6 @@ class Node:
                 print(f"    ⚠ Connection {conn.get('id', '?')}: {e}")
 
     def _build_single_connection(self, conn: dict, graph_registry=None):
-        """Baut eine einzelne NEST-Verbindung auf."""
         src_info = conn.get('source', {})
         tgt_info = conn.get('target', {})
         params = conn.get('params', {})
@@ -3374,7 +3333,6 @@ class Node:
         tgt_node_id = tgt_info.get('node_id', self.id)
         tgt_pop_id = tgt_info.get('pop_id', 0)
         
-        # Source Population finden
         if src_graph_id == self.graph_id and src_node_id == self.id:
             if src_pop_id >= len(self.population) or self.population[src_pop_id] is None:
                 return
@@ -3390,7 +3348,6 @@ class Node:
         else:
             return
         
-        # Target Population finden
         if tgt_graph_id == self.graph_id and tgt_node_id == self.id:
             if tgt_pop_id >= len(self.population) or self.population[tgt_pop_id] is None:
                 return
@@ -3412,34 +3369,29 @@ class Node:
         self._nest_connect(src_pop, tgt_pop, params)
 
     def _nest_connect(self, src_pop, tgt_pop, params: dict):
-        """Führt den eigentlichen NEST Connect aus."""
         rule = params.get('rule', 'all_to_all')
         syn_model = params.get('synapse_model', 'static_synapse')
         weight = params.get('weight', 1.0)
         delay = max(params.get('delay', 1.0), 0.1)
         use_spatial = params.get('use_spatial', False)
         
-        # Synapse Spec
         syn_spec = {
             'synapse_model': syn_model,
             'weight': weight,
             'delay': delay
         }
         
-        # STDP Parameter
         if syn_model == 'stdp_synapse':
             if 'tau_plus' in params: syn_spec['tau_plus'] = params['tau_plus']
-            if 'lambda' in params: syn_spec['lambda_'] = params['lambda']
+            if 'lambda' in params: syn_spec['lambda'] = params['lambda']  
             if 'alpha' in params: syn_spec['alpha'] = params['alpha']
             if 'mu_plus' in params: syn_spec['mu_plus'] = params['mu_plus']
             if 'mu_minus' in params: syn_spec['mu_minus'] = params['mu_minus']
             if 'Wmax' in params: syn_spec['Wmax'] = params['Wmax']
         
-        # Bernoulli Synapse - NUR wenn NICHT spatial (NEST erlaubt p_transmit nicht mit mask/kernel)
         if syn_model == 'bernoulli_synapse' and 'p_transmit' in params and not use_spatial:
             syn_spec['p_transmit'] = params['p_transmit']
         
-        # Connection Spec
         if use_spatial:
             conn_spec = self._build_spatial_conn_spec(params)
         else:
@@ -3461,12 +3413,11 @@ class Node:
         mask_radius = float(params.get('mask_radius', 1.0))
         inner_radius = float(params.get('mask_inner_radius', 0.0))
         
-        # NEST 3.x API: nest.CreateMask verwenden
         if mask_type in ('sphere', 'spherical'):
             mask = nest.CreateMask('spherical', {'radius': mask_radius})
             if inner_radius > 0:
                 inner_mask = nest.CreateMask('spherical', {'radius': inner_radius})
-                mask = mask & ~inner_mask  # Doughnut/Ring
+                mask = mask & ~inner_mask  
         elif mask_type in ('box', 'rectangular'):
             half = mask_radius
             mask = nest.CreateMask('rectangular', {
@@ -3474,7 +3425,6 @@ class Node:
                 'upper_right': [half, half, half]
             })
         else:
-            # Default: spherical
             mask = nest.CreateMask('spherical', {'radius': mask_radius})
         
         return {
@@ -3819,13 +3769,7 @@ class Graph:
 
 
     def build_connections(self, external_graphs=None):
-        """
-        Erstellt alle Verbindungen für alle Nodes.
-        
-        Args:
-            external_graphs: Dict[graph_id -> Graph] für Multi-Graph Setups
-        """
-        # Graph Registry für Cross-Graph Connections
+
         graph_registry = {self.graph_id: self}
         if external_graphs:
             graph_registry.update(external_graphs)
@@ -3995,10 +3939,7 @@ def get_connection_snapshot(population):
     return set(zip(sources, targets))
 
 def sync_node_attributes_to_parameters(node):
-    """
-    Synchronisiert Node-Attribute zurück in node.parameters.
-    Aufruf vor dem Speichern empfohlen.
-    """
+
     if hasattr(node, 'types'):
         node.parameters['types'] = node.types
     if hasattr(node, 'neuron_models'):

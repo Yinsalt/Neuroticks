@@ -89,6 +89,26 @@ from PyQt6.QtCore import QRect, QPoint
 # Multi-Compartment Neuron Models - require explicit receptor_type
 MC_MODELS = {'iaf_cond_alpha_mc', 'cm_default', 'cm_main', 'iaf_cond_beta_mc'}
 
+def safe_get_model(population, default='unknown'):
+    """Safely get model name from a NEST population."""
+    try:
+        if population is None or len(population) == 0:
+            return default
+        return nest.GetStatus(population, 'model')[0]
+    except Exception:
+        return default
+
+def safe_get_status(population, key=None):
+    """Safely get status from a NEST population. Returns None on error."""
+    try:
+        if population is None or len(population) == 0:
+            return None
+        if key:
+            return nest.GetStatus(population, key)
+        return nest.GetStatus(population)
+    except Exception:
+        return None
+
 def get_receptor_type_for_model(model_name: str, excitatory: bool = True) -> int:
     """
     Returns appropriate receptor_type for multi-compartment models.
@@ -2970,8 +2990,8 @@ class GraphCreatorWidget(QWidget):
             
             node['params']['id'] = i
             
-            try: node['button'].clicked.disconnect()
-            except: pass
+            try: node['button'].clicked.disconnect()  # May not be connected
+            except RuntimeError: pass  # No connections
             node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
 
         if self.node_list:
@@ -3544,8 +3564,8 @@ class EditGraphWidget(QWidget):
             if old_name.startswith("Node_"):
                 node['params']['name'] = f"Node_{i}"
             node['button'].setText(f"Node {i + 1}: {node['params']['name']}")
-            try: node['button'].clicked.disconnect()
-            except: pass
+            try: node['button'].clicked.disconnect()  # May not be connected
+            except RuntimeError: pass  # No connections
             node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
 
         if self.node_list:
@@ -3718,10 +3738,10 @@ class EditGraphWidget(QWidget):
             for pop_idx, nest_pop in enumerate(node.population):
                 if nest_pop is None or len(nest_pop) == 0: continue
                 
-                model = nest.GetStatus(nest_pop, 'model')[0]
+                model = safe_get_model(nest_pop, 'unknown')
                 params = {}
                 try:
-                    status = nest.GetStatus(nest_pop)
+                    status = safe_get_status(nest_pop)
                     if status:
                         first_neuron = status[0]
                         param_keys = ['V_m', 'E_L', 'tau_m', 'C_m', 'V_th', 't_ref', 'V_reset', 'I_e', 'tau_syn_ex', 'tau_syn_in']
@@ -4471,7 +4491,7 @@ class ConnectionTargetRow(QWidget):
             node = next((n for n in graph.node_list if n.id == node_id), None)
             if node and hasattr(node, 'population'):
                 for i, pop in enumerate(node.population):
-                    model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                    model = safe_get_model(pop, "empty")
                     self.combo_pop.addItem(f"Pop {i}: {model}", i)
 
     def get_selection(self):
@@ -4721,7 +4741,7 @@ class ConnectionTool(QWidget):
         if not node: return
         if hasattr(node, 'population') and node.population:
             for i, pop in enumerate(node.population):
-                model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                model = safe_get_model(pop, "empty")
                 self.source_pop_combo.addItem(f"Pop {i}: {model}", i)
 
     def add_connection(self):
@@ -5299,7 +5319,7 @@ def validate_delay(delay: float, resolution: float = None) -> float:
     if resolution is None:
         try:
             resolution = nest.resolution
-        except:
+        except Exception:
             resolution = 0.1
     
     if delay < resolution:
@@ -5481,7 +5501,7 @@ class ConnectionExecutor:
             
             try:
                 target_model = nest.GetStatus(tgt_pop, 'model')[0]
-            except:
+            except Exception:
                 target_model = 'unknown'
             
             if 'ht_neuron' in str(target_model):
@@ -5579,8 +5599,7 @@ class ConnectionExecutor:
                     auto_receptor = get_receptor_type_for_model(target_model, excitatory=(weight >= 0))
                     if auto_receptor > 0:
                         syn_spec['receptor_type'] = auto_receptor
-                except:
-                    pass
+                except Exception: pass  # Model may not support receptor_type
             
             if rule == 'one_to_one' and len(src_pop) != len(tgt_pop):
                 return False, f"one_to_one size mismatch: {len(src_pop)} vs {len(tgt_pop)}"
@@ -6767,7 +6786,7 @@ class ConnectionParamWidget(QWidget):
                 try:
                     if isinstance(widget, DoubleInputField): widget.spinbox.setValue(float(val))
                     elif isinstance(widget, IntegerInputField): widget.spinbox.setValue(int(val))
-                except: pass
+                except (ValueError, TypeError): pass
 
     def _on_rule_changed(self, rule_name):
         while self.rule_param_layout.count():
@@ -6894,7 +6913,7 @@ class DeviceTargetSelector(QGroupBox):
             node = next((n for n in graph.node_list if n.id == node_id), None)
             if node and hasattr(node, 'population'):
                 for i, pop in enumerate(node.population):
-                    model = nest.GetStatus(pop, 'model')[0] if len(pop) > 0 else "empty"
+                    model = safe_get_model(pop, "empty")
                     self.combo_pop.addItem(f"Pop {i}: {model}", i)
 
     def get_selection(self):
@@ -7053,7 +7072,7 @@ class DeviceConfigPage(QWidget):
                 val = all_data[key]
                 if isinstance(widget, QDoubleSpinBox):
                     try: widget.setValue(float(val))
-                    except: pass
+                    except (ValueError, TypeError): pass
                 elif isinstance(widget, QLineEdit):
                     if isinstance(val, list):
                         widget.setText(", ".join(map(str, val)))
@@ -7229,7 +7248,7 @@ class DeviceConfigPage(QWidget):
             cleaned = text.replace('[', '').replace(']', '')
             parts = cleaned.split(',')
             return [dtype(p.strip()) for p in parts if p.strip()]
-        except: return []
+        except (ValueError, TypeError): return []
 
 
 class ToolsWidget(QWidget):
@@ -8286,7 +8305,7 @@ class SimulationViewWidget(QWidget):
                 if self.view.isValid():
                     self.view.makeCurrent()
                     self.view.removeItem(self.scatter_item)
-            except: pass
+            except Exception: pass  # Item may already be removed
         self.scatter_item = None; self.scene_loaded = False
 
     def feed_spikes(self, gids):
@@ -8430,7 +8449,7 @@ class SimulationViewWidget(QWidget):
                     if model not in model_groups:
                         model_groups[model] = []
                     model_groups[model].append(gid)
-                except:
+                except Exception:
                     if 'unknown' not in model_groups:
                         model_groups['unknown'] = []
                     model_groups['unknown'].append(gid)
@@ -8522,7 +8541,7 @@ class SimulationViewWidget(QWidget):
                             if model not in model_groups:
                                 model_groups[model] = []
                             model_groups[model].append(gid)
-                        except:
+                        except Exception:
                             if 'unknown' not in model_groups:
                                 model_groups['unknown'] = []
                             model_groups['unknown'].append(gid)
@@ -8832,7 +8851,7 @@ class SimulationViewWidget(QWidget):
         else:
             try:
                 base_time = nest.GetKernelStatus().get('time', 0.0)
-            except:
+            except Exception:
                 base_time = 0.0
         
         start = self.spin_spike_start.value()
@@ -8865,8 +8884,7 @@ class SimulationViewWidget(QWidget):
                     return []
                 times = [base_time + float(t.strip()) for t in text.split(",") if t.strip()]
                 return sorted(times)
-            except:
-                return []
+            except (ValueError, TypeError): return []
         
         return []
 
@@ -9819,7 +9837,7 @@ def cache_active_recorders(graphs):
                     if hasattr(gid_col, 'tolist'): gid_int = int(gid_col.tolist()[0])
                     elif isinstance(gid_col, list): gid_int = int(gid_col[0])
                     else: gid_int = int(gid_col)
-                except:
+                except (ValueError, TypeError, IndexError):
                     continue
 
                 model = dev.get('model', '')
@@ -9839,6 +9857,12 @@ def cache_active_recorders(graphs):
                         print(f"Error caching device {{gid_int}}: {{e}}")
     
     print(f"Cached {{len(active_recorders)}} active recording devices.")
+    
+    if len(active_recorders) == 0:
+        print("⚠ WARNING: No spike_recorders or multimeters found!")
+        print("  → Simulation will run but NO DATA will be collected.")
+        print("  → Add devices with 'spike_recorder' or 'multimeter' model to record data.")
+    
     return active_recorders
 
 def collect_data_optimized(active_recorders):
@@ -10268,12 +10292,12 @@ class TimeSeriesPlotWidget(QWidget):
                             did = int(did_str)
                             if did not in known_devices:
                                 known_devices[did] = info.get('model', 'unknown')
-                        except: pass
+                        except (ValueError, TypeError): pass
         
         def safe_sort_key(k):
             try:
                 return (0, int(k))
-            except:
+            except (ValueError, TypeError):
                 return (1, str(k))
 
         for did in sorted(list(known_devices.keys()), key=safe_sort_key):
@@ -11360,7 +11384,7 @@ class PopulationRatePlot(QWidget):
         if resolution is None:
             try:
                 self.resolution = nest.resolution
-            except:
+            except Exception:
                 self.resolution = 0.1
         else:
             self.resolution = resolution
