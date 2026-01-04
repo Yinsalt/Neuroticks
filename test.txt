@@ -1,36 +1,64 @@
-# NEUROTICKS INSTALLATION - UBUNTU 24.04
+#!/bin/bash
 
+# --- 1. SYSTEM PREPARATION ---
+echo ">>> [1/5] Updating System and installing dependencies..."
 sudo apt update
 sudo apt install -y \
-    python3.12-venv python3-pip python3-dev \
+    python3-venv python3-pip python3-dev \
     build-essential cmake git \
-    libgl1 libegl1 \
+    libgl1 libegl1 libgl1-mesa-glx \
     libxcb-xinerama0 libxcb-cursor0 \
     libxkbcommon-x11-0 libdbus-1-3 \
     libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
     libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
-    mesa-utils
+    mesa-utils libqt6gui6
 
+# --- 2. VIRTUAL ENV SETUP ---
+echo ">>> [2/5] Setting up Virtual Environment (nest_env)..."
 cd ~
+# Falls alte Env existiert, löschen (für sauberen Neustart)
+rm -rf nest_env
 python3 -m venv nest_env
 source nest_env/bin/activate
+
+echo ">>> Upgrading pip..."
 pip install --upgrade pip
+
+# --- 3. PYTHON LIBRARIES INSTALLATION ---
+echo ">>> [3/5] Installing Python Libraries..."
+# HINWEIS: Wir installieren ohne starre Versionen, damit die Installation 
+# nicht fehlschlägt. Pip sucht automatisch die kompatiblen Versionen.
+# 'numpy<2' ist oft wichtig für NEST-Stabilität.
+
+pip install "numpy<2.0" 
 
 pip install \
     nest-simulator \
-    numpy==2.2.6 \
-    pandas==2.3.3 \
-    scipy==1.16.3 \
-    networkx==3.5 \
-    matplotlib==3.10.7 \
-    PyQt6==6.10.0 \
-    pyqtgraph==0.13.7 \
-    pyvista==0.46.4 \
-    pyvistaqt==0.11.3 \
-    vtk==9.5.2
+    pandas \
+    scipy \
+    networkx \
+    matplotlib \
+    PyQt6 \
+    pyqtgraph \
+    pyvista \
+    pyvistaqt \
+    vtk
 
+# --- 4. CLONE NEUROTICKS ---
+echo ">>> [4/5] Cloning NeuroTicks from GitHub..."
 cd ~
+# Falls Ordner schon da ist, löschen und neu holen
+rm -rf NeuroTicks
 git clone https://github.com/yinsalt/NeuroTicks.git
 
+# --- 5. STARTING APPLICATION (VM FIXES) ---
+echo ">>> [5/5] Starting NeuroTicks..."
 cd NeuroTicks
+
+# WICHTIG FÜR VM: Software Rendering erzwingen (verhindert schwarzes Fenster)
+export LIBGL_ALWAYS_SOFTWARE=1
+# WICHTIG FÜR UBUNTU 24.04: X11 Backend erzwingen (verhindert Wayland-Fehler)
+export QT_QPA_PLATFORM=xcb
+
+echo ">>> Launching Main.py..."
 python3 Main.py
