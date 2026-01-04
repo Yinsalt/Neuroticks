@@ -1409,6 +1409,12 @@ class NodeParametersWidget(QWidget):
         current_tool = data.get('tool_type', 'custom')
         tool_mapping = TOOL_PARAM_KEYS.get(current_tool, {})
         
+        # Falls tool_neuron_model nicht gesetzt ist, aber neuron_models existiert, übertrage den Wert
+        if 'tool_neuron_model' not in data and 'neuron_models' in data:
+            nm = data['neuron_models']
+            if isinstance(nm, list) and nm:
+                data['tool_neuron_model'] = nm[0]
+        
         for k, info in self.widgets.items():
             # Prüfe ob dieser Widget-Key zu einem generischen Key gemappt werden soll
             # Falls ja, hole den Wert vom generischen Key
@@ -1430,7 +1436,18 @@ class NodeParametersWidget(QWidget):
     def _add_neuron_edit_button(self, layout):
         btn = QPushButton("⚙️ Edit Neurons"); btn.clicked.connect(self._jump_to_neuron_editor)
         layout.addWidget(btn)
-    def _jump_to_neuron_editor(self): self.parent().parent().setCurrentIndex(2)
+    def _jump_to_neuron_editor(self):
+        # Traversiere die Parent-Hierarchie um das QTabWidget zu finden
+        widget = self
+        while widget is not None:
+            if hasattr(widget, 'setCurrentIndex'):
+                widget.setCurrentIndex(2)
+                return
+            if hasattr(widget, 'parent') and callable(widget.parent):
+                widget = widget.parent()
+            else:
+                break
+        print("⚠ Could not find tab widget to switch to neuron editor")
 
 
 def _set_visible(layout, visible):
@@ -2757,6 +2774,42 @@ class GraphCreatorWidget(QWidget):
                 encoded_polynoms_per_type = [[]]
                 prob_vec = [1.0]
                 pop_nest_params = [{}]
+            elif tool_type in ('Blob', 'Cone', 'CCW', 'Grid'):
+                # Bei Tool-Typen: tool_neuron_model hat Priorität über existierende Populations
+                selected_model = node['params'].get('tool_neuron_model', None)
+                model_changed = False
+                
+                if selected_model:
+                    # Prüfe ob sich das Modell geändert hat
+                    if populations:
+                        old_models = [pop.get('model') for pop in populations]
+                        model_changed = any(m != selected_model for m in old_models)
+                    neuron_models = [selected_model] * max(1, len(populations))
+                else:
+                    neuron_models = [pop['model'] for pop in populations] if populations else ['iaf_psc_alpha']
+                
+                types = list(range(len(populations))) if populations else [0]
+                
+                encoded_polynoms_per_type = []
+                for pop in populations:
+                    poly_dict = pop.get('polynomials', None)
+                    if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
+                        encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
+                    else:
+                        encoded_polynoms_per_type.append([])
+                if not encoded_polynoms_per_type:
+                    encoded_polynoms_per_type = [[]]
+                
+                num_pops = len(neuron_models)
+                prob_vec = node['params'].get('probability_vector', [])
+                if not prob_vec or len(prob_vec) != num_pops:
+                    prob_vec = [1.0 / num_pops] * num_pops if num_pops > 0 else [1.0]
+                
+                # Bei Modelländerung alte Parameter verwerfen
+                if model_changed:
+                    pop_nest_params = [{}] * len(neuron_models)
+                else:
+                    pop_nest_params = [pop.get('params', {}) for pop in populations] if populations else [{}]
             else:
                 neuron_models = [pop['model'] for pop in populations]
                 types = list(range(len(populations)))
@@ -3894,6 +3947,43 @@ class EditGraphWidget(QWidget):
             encoded_polynoms_per_type = [[]]
             prob_vec = [1.0]
             pop_nest_params = [{}]
+        elif tool_type in ('Blob', 'Cone', 'CCW', 'Grid'):
+            # Bei Tool-Typen: tool_neuron_model hat Priorität über existierende Populations
+            selected_model = raw_params.get('tool_neuron_model', None)
+            model_changed = False
+            
+            if selected_model:
+                # Prüfe ob sich das Modell geändert hat
+                if populations:
+                    old_models = [pop.get('model') for pop in populations]
+                    model_changed = any(m != selected_model for m in old_models)
+                # Wenn tool_neuron_model gesetzt ist, überschreibe alle Populations damit
+                neuron_models = [selected_model] * max(1, len(populations))
+            else:
+                # Fallback auf existierende Populations
+                neuron_models = [pop['model'] for pop in populations] if populations else ['iaf_psc_alpha']
+            
+            # Setze die anderen erforderlichen Variablen
+            types = list(range(len(populations))) if populations else [0]
+            encoded_polynoms_per_type = []
+            for pop in populations:
+                poly_dict = pop.get('polynomials', None)
+                if poly_dict and all(k in poly_dict for k in ['x', 'y', 'z']):
+                    encoded_polynoms_per_type.append([poly_dict['x'], poly_dict['y'], poly_dict['z']])
+                else:
+                    encoded_polynoms_per_type.append([])
+            if not encoded_polynoms_per_type:
+                encoded_polynoms_per_type = [[]]
+            
+            prob_vec = raw_params.get('probability_vector', [])
+            if not prob_vec or len(prob_vec) != len(neuron_models):
+                prob_vec = [1.0 / len(neuron_models)] * len(neuron_models)
+            
+            # WICHTIG: Bei Modelländerung die alten Parameter verwerfen (sie passen nicht zum neuen Modell)
+            if model_changed:
+                pop_nest_params = [{}] * len(neuron_models)
+            else:
+                pop_nest_params = [pop.get('params', {}) for pop in populations] if populations else [{}]
         else:
             neuron_models = [pop['model'] for pop in populations]
             types = list(range(len(populations)))
