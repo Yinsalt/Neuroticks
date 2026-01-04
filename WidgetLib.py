@@ -252,6 +252,29 @@ NODE_TOOLS = {
     }
 }
 
+# Tool-spezifische Key-Mappings für geteilte Parameter
+# Mappt generische Namen auf tool-spezifische Widget-Keys
+TOOL_PARAM_KEYS = {
+    'CCW': {
+        'n_neurons': 'ccw_n_neurons',
+        'radius': 'ccw_radius',
+        'tool_neuron_model': 'ccw_tool_neuron_model'
+    },
+    'Blob': {
+        'n_neurons': 'blob_n_neurons',
+        'radius': 'blob_radius',
+        'tool_neuron_model': 'blob_tool_neuron_model'
+    },
+    'Cone': {
+        'n_neurons': 'cone_n_neurons',
+        'tool_neuron_model': 'cone_tool_neuron_model'
+    },
+    'Grid': {
+        'tool_neuron_model': 'grid_tool_neuron_model'
+    },
+    'custom': {}
+}
+
 __all__ = [
     'SYNAPSE_MODELS',
     "DeviceConfigPage",
@@ -1237,10 +1260,10 @@ class NodeParametersWidget(QWidget):
     def _create_panel_ccw(self):
         panel = QWidget(); layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("Ring Attractor", styleSheet="color:#FF9800; font-weight:bold;"))
-        self._add_model_selector(layout)
+        self._add_model_selector(layout, key="ccw_tool_neuron_model")
         self._add_neuron_edit_button(layout)
-        self._add_field_to_layout(layout, "n_neurons", "Count", field_type="int", default=100)
-        self._add_field_to_layout(layout, "radius", "Radius", field_type="float", default=5.0)
+        self._add_field_to_layout(layout, "ccw_n_neurons", "Count", field_type="int", default=100)
+        self._add_field_to_layout(layout, "ccw_radius", "Radius", field_type="float", default=5.0)
         self._add_field_to_layout(layout, "bidirectional", "Bidirectional", field_type="bool", default=False)
         layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine))
         self._add_field_to_layout(layout, "ccw_weight_ex", "Weight", field_type="float", default=30.0)
@@ -1250,16 +1273,16 @@ class NodeParametersWidget(QWidget):
     def _create_panel_blob(self):
         panel = QWidget(); layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("Random Blob", styleSheet="color:#9C27B0; font-weight:bold;"))
-        self._add_model_selector(layout); self._add_neuron_edit_button(layout)
-        self._add_field_to_layout(layout, "n_neurons", "Count", field_type="int", default=100)
-        self._add_field_to_layout(layout, "radius", "Radius", field_type="float", default=5.0)
+        self._add_model_selector(layout, key="blob_tool_neuron_model"); self._add_neuron_edit_button(layout)
+        self._add_field_to_layout(layout, "blob_n_neurons", "Count", field_type="int", default=100)
+        self._add_field_to_layout(layout, "blob_radius", "Radius", field_type="float", default=5.0)
         layout.addStretch(); return panel
 
     def _create_panel_cone(self):
         panel = QWidget(); layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("Cone / Column", styleSheet="color:#E91E63; font-weight:bold;"))
-        self._add_model_selector(layout); self._add_neuron_edit_button(layout)
-        self._add_field_to_layout(layout, "n_neurons", "Count", field_type="int", default=500)
+        self._add_model_selector(layout, key="cone_tool_neuron_model"); self._add_neuron_edit_button(layout)
+        self._add_field_to_layout(layout, "cone_n_neurons", "Count", field_type="int", default=500)
         self._add_field_to_layout(layout, "radius_bottom", "R Bottom", field_type="float", default=5.0)
         self._add_field_to_layout(layout, "radius_top", "R Top", field_type="float", default=1.0)
         self._add_field_to_layout(layout, "height", "Height", field_type="float", default=10.0)
@@ -1268,7 +1291,7 @@ class NodeParametersWidget(QWidget):
     def _create_panel_grid(self):
         panel = QWidget(); layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("2D Grid", styleSheet="color:#00BCD4; font-weight:bold;"))
-        self._add_model_selector(layout)
+        self._add_model_selector(layout, key="grid_tool_neuron_model")
         self._add_field_to_layout(layout, "grid_side_length", "Side Length", field_type="int", default=10)
         layout.addStretch(); return panel
 
@@ -1345,14 +1368,25 @@ class NodeParametersWidget(QWidget):
 
     def get_current_params(self):
         res = {}
+        
+        # Hole aktuelles Tool
+        current_tool = self.tool_combo.currentData() or 'custom'
+        tool_mapping = TOOL_PARAM_KEYS.get(current_tool, {})
+        # Inverses Mapping: tool-spezifischer Key -> generischer Key
+        inverse_mapping = {v: k for k, v in tool_mapping.items()}
+        
         for k, info in self.widgets.items():
             t = info['type']; w = info.get('widget')
-            if t=='text': res[k]=w.text()
-            elif t=='int' or t=='float': res[k]=w.value()
-            elif t=='bool': res[k]=w.isChecked()
-            elif t=='combo': res[k]=w.currentData()
-            elif t=='combo_text': res[k]=w.currentText()
-            elif t in ['vector3', 'vector3_int', 'prob_list']: res[k]=[s.value() for s in info['widgets']]
+            
+            # Bestimme den Output-Key (generischer Name falls gemappt)
+            output_key = inverse_mapping.get(k, k)
+            
+            if t=='text': res[output_key]=w.text()
+            elif t=='int' or t=='float': res[output_key]=w.value()
+            elif t=='bool': res[output_key]=w.isChecked()
+            elif t=='combo': res[output_key]=w.currentData()
+            elif t=='combo_text': res[output_key]=w.currentText()
+            elif t in ['vector3', 'vector3_int', 'prob_list']: res[output_key]=[s.value() for s in info['widgets']]
         
         if 'center_of_mass' in res: res['m'] = res['center_of_mass']
         sx=res.get('stretch_x',1); sy=res.get('stretch_y',1); sz=res.get('stretch_z',1)
@@ -1362,9 +1396,27 @@ class NodeParametersWidget(QWidget):
     def load_data(self, data):
         self.auto_save = False
         self.node_data = data
+        
+        # Setze zuerst das Tool, damit wir das richtige Mapping haben
+        if 'tool_type' in data: 
+            self.tool_stack.setCurrentIndex(self.tool_panels.get(data['tool_type'], 0))
+            # Update auch die ComboBox
+            idx = self.tool_combo.findData(data['tool_type'])
+            if idx >= 0:
+                self.tool_combo.setCurrentIndex(idx)
+        
+        # Hole Mapping für das aktuelle Tool
+        current_tool = data.get('tool_type', 'custom')
+        tool_mapping = TOOL_PARAM_KEYS.get(current_tool, {})
+        
         for k, info in self.widgets.items():
-            if k not in data: continue
-            v = data[k]; t = info['type']; w = info.get('widget')
+            # Prüfe ob dieser Widget-Key zu einem generischen Key gemappt werden soll
+            # Falls ja, hole den Wert vom generischen Key
+            inverse_mapping = {v: k_gen for k_gen, v in tool_mapping.items()}
+            data_key = inverse_mapping.get(k, k)  # Generischer Key oder originaler Key
+            
+            if data_key not in data: continue
+            v = data[data_key]; t = info['type']; w = info.get('widget')
             if t=='text': w.setText(str(v))
             elif t in ['int', 'float']: w.setValue(v)
             elif t=='bool': w.setChecked(bool(v))
@@ -1373,7 +1425,6 @@ class NodeParametersWidget(QWidget):
             elif t in ['vector3', 'vector3_int', 'prob_list']:
                 for i, s in enumerate(info['widgets']):
                     if i < len(v): s.setValue(v[i])
-        if 'tool_type' in data: self.tool_stack.setCurrentIndex(self.tool_panels.get(data['tool_type'], 0))
         self.auto_save = True
 
     def _add_neuron_edit_button(self, layout):
