@@ -30,6 +30,7 @@ pip install numpy 'cython<3'
 pip install pandas scipy networkx matplotlib
 pip install PyQt6 PyQt6-WebEngine pyqtgraph
 pip install vtk pyvista pyvistaqt
+pip install PyOpenGL==3.1.10
 pip install ipython
 
 git clone --branch v3.8 --depth 1 https://github.com/nest/nest-simulator.git "${NEST_SRC}"
