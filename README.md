@@ -1,171 +1,162 @@
-# Neuroticks
+# NeuroTicks
 
 **A Visual CAD Tool for Spiking Neural Networks**
 
-- **Language:** Python  
-- **Backend:** NEST Simulator  
-- **License:** GPL-3.0 
-- **Status:** Research Prototype / Work in Progress  
+[![Demo Video](https://img.shields.io/badge/Demo-YouTube-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=cYMDaO1GlLc)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg?style=for-the-badge)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-green.svg?style=for-the-badge&logo=python)](https://python.org)
+[![NEST 3.8](https://img.shields.io/badge/NEST-3.8-orange.svg?style=for-the-badge)](https://nest-simulator.org)
 
 ---
 
-## What is this?
+## Demo
 
-**Neuroticks** is a graphical interface and construction kit for the **NEST Simulator**.  
-It bridges the gap between abstract network definitions and spatially explicit, biological architectures.
+[![NeuroTicks Demo](https://img.youtube.com/vi/cYMDaO1GlLc/maxresdefault.jpg)](https://www.youtube.com/watch?v=cYMDaO1GlLc)
 
-If you have ever tried to script complex 3D topologies, distance-dependent connectivity rules, or procedural population distributions purely in Python code, you know it can get messy.  
-Neuroticks acts as **“CAD software for the brain”**: it allows you to visually design, manipulate, and wire neural populations in 3D space *before* you ever hit the run button.
-
-It is designed for **connectomic hypothesis testing** and helps answer questions like:
-
-- *How does the physical arrangement of these two populations affect their synchronization?*
-- *What happens to signal propagation if I physically twist this cortical sheet?*
-
-> **Honesty Disclaimer**  
-> This is a research tool created for specific experiments. It is **not** a replacement for PyNN or a full-blown IDE.  
-> It is a powerful **prototyping assistant for spatial SNNs** that lets you see what you are doing.
+*Click to watch the demo on YouTube*
 
 ---
 
-## What can you actually do with it?
+## What is NeuroTicks?
 
-Neuroticks is not just for looking at pretty neurons — it is for **building and testing functional circuits**.
+NeuroTicks is a graphical construction kit for the **NEST Simulator**. It bridges the gap between abstract network definitions and spatially explicit, biological architectures.
 
-### Sculpt Neural Tissue
-Instead of just defining *“1000 neurons”*, you define their **geometry**:
-- Grids  
-- Layers  
-- Spheres  
+Think of it as **"CAD software for the brain"**: visually design, manipulate, and wire neural populations in 3D space before running simulations.
 
-You can:
-- Use **Flow Fields** (polynomial vector fields) to warp structures
-- Use **Wave Function Collapse (WFC)** to generate procedural, non-uniform distributions
+### Why?
 
-### “Sew” Networks
-Build functional modules (e.g. a visual cortex patch and a thalamic relay) in isolation and then:
-- Import them
-- “Sew” them together into a larger system using the **Fusion Tool**
+If you've tried scripting complex 3D topologies, distance-dependent connectivity rules, or procedural population distributions in pure Python — you know it gets messy fast.
 
-### Interact Live
-Watch the network spike **in real time** and interact with it:
+NeuroTicks is built for **connectomic hypothesis testing**:
 
-- **Simulate Lesions**  
-  Select a connection bundle and lower its weight to `0.0` *during runtime*.  
-  This simulates severing a pathway and lets you immediately observe how the network adapts (or fails).
+- *How does the physical arrangement of populations affect synchronization?*
+- *What happens to signal propagation if I twist this cortical sheet?*
 
-- **Tweak Dynamics**  
-  Adjust synaptic delays and weights on the fly without restarting the simulation.
-
-### Inject & Record
-- Click any neuron in 3D space
-- Attach voltmeters
-- Inject current spikes manually
+> **Note:** This is a research prototype, not a replacement for PyNN. It's a prototyping assistant for spatial SNNs that lets you see what you're doing.
 
 ---
 
 ## Features
 
-- **3D Visualization**  
-  Built on **PyVista** for high-performance rendering of neuron positions and connectivity skeletons.
+### Sculpt Neural Tissue
+Define neuron **geometry**, not just numbers:
+- Grids, Layers, Spheres
+- **Flow Fields** (polynomial vector fields) to warp structures
+- **Wave Function Collapse** for procedural, non-uniform distributions
 
-- **Procedural Generation**  
-  Create complex spatial distributions using **Wave Function Collapse** and **vector fields**.
+### Sew Networks Together
+Build functional modules in isolation, then combine them:
+- Import existing graphs
+- Use the **Fusion Tool** to merge networks
 
-- **Topological Wiring**  
-  Define connections based on spatial rules:
-  - Connect to nearest *k* neighbors
-  - Probability decays with distance
-  - Spherical masking
+### Live Interaction
+Watch the network spike in real-time:
+- **Simulate Lesions** — Set connection weights to zero during runtime
+- **Tweak Dynamics** — Adjust synaptic delays and weights on the fly
+- **Inject & Record** — Click neurons in 3D, attach voltmeters, inject currents
 
-- **Headless Export**  
-  Design in the GUI, export to a clean Python setup (`run.py` + JSON), and run heavy simulations on a cluster or server without graphical overhead.
+### 3D Visualization
+Built on **PyVista** for high-performance rendering of neuron positions and connectivity.
 
-- **Simulation History**  
-  Automatically snapshots simulation runs.  
-  Reload and replay past simulations to compare dynamics.
+### Headless Export
+Design in the GUI, export to Python + JSON, run on clusters without graphics.
 
----
-
-## Work in Progress: The Retina Module
-
-An anatomically correct **Retina Module** is currently under development.
-
-### Concept
-- Polar projection of video footage
-- Spherical arrangement of photoreceptors
-- Correct foveal density and peripheral vision
-
-### Video Input
-- Pipe real-world visual data directly into the graph structure via spike generators
-
-### Interactive
-- Select a video file directly via the GUI for quick testing
-
-### Automation
-- Drop video files into the project folder
-- Or pass them as parameters to the headless script
-
-This allows automated loops over different visual stimuli without manual intervention.
-
-**Status:**  
-Mathematical foundation is solid; integration into the main graph is currently being implemented.
+### Simulation History
+Automatic snapshots of simulation runs. Reload and compare past dynamics.
 
 ---
 
 ## Installation
 
-Neuroticks relies on the **NEST Simulator**.
+### Quick Install (Ubuntu 22.04/24.04)
 
-- Ensure you have a working NEST installation  
-- Alternatively, use a Conda environment
+```bash
+wget https://raw.githubusercontent.com/Yinsalt/NeuroTicks/main/install.sh
+chmod +x install.sh
+./install.sh
+```
 
+This will:
+- Install all system dependencies
+- Create a Python virtual environment
+- Compile NEST 3.8 from source
+- Clone NeuroTicks
 
+After installation:
+```bash
+source ~/neuroticks/activate.sh
+python Main.py
+```
 
-## Dependencies
+### Docker
 
-| Category | Package | Version |
-|----------|---------|---------|
-| Core | Python | 3.10+ |
-| Simulation | NEST Simulator | 3.x |
-| GUI | PyQt6 | 6.x |
-| 3D Viz | PyVista | 0.46+ |
-| Plotting | PyQtGraph | 0.13+ |
-| Plotting | Matplotlib | 3.x |
-| Numerics | NumPy | 2.x |
-| Numerics | SciPy | 1.x |
+```bash
+docker build -t neuroticks:latest .
+./run_neuroticks_docker.sh
+```
 
-## Structure
+### Manual Installation
+
+If you prefer manual setup, ensure you have:
+
+| Package | Version |
+|---------|---------|
+| Python | 3.10+ |
+| NEST Simulator | 3.8 |
+| PyQt6 | 6.x |
+| PyVista | 0.46+ |
+| PyQtGraph | 0.13+ |
+| PyOpenGL | 3.1.10 |
+| NumPy | 2.x |
+| SciPy | 1.x |
+| Cython | <3.0 (for NEST build) |
+
+---
+
+## Usage
+
+1. **Create Graph** — New graph structure via menu
+2. **Add Nodes** — Define populations with spatial parameters
+3. **Connect** — Use connection tool for synaptic projections
+4. **Attach Devices** — Spike recorders, voltmeters
+5. **Simulate** — Run and observe dynamics in real-time
+6. **Analyze** — Review past runs in history tab
+
+---
+
+## Project Structure
 
 ```
-├── Main.py              # Entry point, main window
+NeuroTicks/
+├── Main.py              # Entry point
 ├── neuron_toolbox.py    # Graph/Node classes, NEST wrappers
-├── WidgetLib.py         # UI components, editors, analysis tools
-├── CustomExtension.py   # History browser tab
+├── WidgetLib.py         # UI components, editors, analysis
+├── CustomExtension.py   # History browser
 ├── ExtraTab.py          # Additional tools
 └── functional_models.json
 ```
 
-## Usage
+---
 
-1. **Create graph** — Use menu to create a new graph structure
-2. **Add nodes** — Define neuron populations with spatial and model parameters
-3. **Connect** — Use connection tool to define synaptic projections
-4. **Attach devices** — Add spike recorders, voltmeters via menu
-5. **Simulate** — Run simulation, observe dynamics in real-time
-6. **Analyze** — Use history tab to review and compare past runs
+## Work in Progress
+
+### Retina Module
+An anatomically correct retina module is under development:
+- Polar projection of video input
+- Spherical photoreceptor arrangement
+- Correct foveal density distribution
+- Direct video-to-spike conversion
+
+---
 
 ## Limitations
 
-- Documentation is minimal
-- Error handling is inconsistent
 - Large networks (10k+ neurons) will slow down visualization
-- Some UI elements are rough around the edges
 - Tested primarily on Linux
+- Documentation is minimal
+- Some UI elements are rough
 
-## Status
-
-Work in progress. Functional for research use, but expect bugs.
+---
 
 ## License
 
