@@ -47,11 +47,15 @@ NEST_VERSION="3.8"
 NEST_BRANCH="v${NEST_VERSION}"
 PYTHON_VERSION="3.12"
 
+# NeuroTicks Repository
+NEUROTICKS_REPO="https://github.com/Yinsalt/NeuroTicks.git"
+
 # Installationspfade
 INSTALL_DIR="${HOME}/neuroticks"
 VENV_DIR="${INSTALL_DIR}/venv"
 NEST_SRC_DIR="${INSTALL_DIR}/nest-src"
 NEST_BUILD_DIR="${INSTALL_DIR}/nest-build"
+NEUROTICKS_DIR="${INSTALL_DIR}/NeuroTicks"
 
 # Build-Optionen
 NUM_CORES=$(nproc)
@@ -395,6 +399,23 @@ sys.exit(0 if all_ok else 1)
 VERIFY_EOF
 
 #===============================================================================
+# NeuroTicks herunterladen
+#===============================================================================
+
+print_header "NeuroTicks herunterladen"
+
+if [ -d "${NEUROTICKS_DIR}" ]; then
+    print_info "NeuroTicks existiert bereits, update..."
+    cd "${NEUROTICKS_DIR}"
+    git pull origin main || git pull origin master || true
+else
+    print_info "NeuroTicks clonen..."
+    git clone "${NEUROTICKS_REPO}" "${NEUROTICKS_DIR}"
+fi
+
+print_step "NeuroTicks bereit: ${NEUROTICKS_DIR}"
+
+#===============================================================================
 # Abschluss
 #===============================================================================
 
@@ -410,10 +431,14 @@ echo "  1. Umgebung aktivieren:"
 echo "     source ${ACTIVATE_SCRIPT}"
 echo ""
 echo "  2. NeuroTicks starten:"
-echo "     cd /pfad/zu/NeuroTicks"
+echo "     cd ${NEUROTICKS_DIR}"
 echo "     python Main.py"
 echo ""
 echo "  3. Oder zur .bashrc hinzufügen:"
-echo "     echo 'alias neuroticks=\"source ${ACTIVATE_SCRIPT}\"' >> ~/.bashrc"
+echo "     echo 'alias neuroticks=\"source ${ACTIVATE_SCRIPT} && cd ${NEUROTICKS_DIR}\"' >> ~/.bashrc"
+echo ""
+echo "  4. Danach einfach mit:"
+echo "     neuroticks"
+echo "     python Main.py"
 echo ""
 print_step "Fertig!"
