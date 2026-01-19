@@ -1036,6 +1036,9 @@ class CheckboxField(QWidget):
 
 
 class NeuronParametersWidget(QWidget):
+    # FIX: Add signal to notify parent when parameters are saved
+    parametersSaved = pyqtSignal(str, dict)  # model_name, params_dict
+    
     def __init__(self):
         super().__init__()
         self.all_models = {}
@@ -1107,6 +1110,27 @@ class NeuronParametersWidget(QWidget):
                     self.params_layout.addWidget(widget)
                     self.parameter_widgets[param_name] = widget
 
+    def load_params(self, saved_params):
+        """FIX: Load saved parameter values into the UI widgets"""
+        if not saved_params:
+            return
+        
+        for param_name, value in saved_params.items():
+            if param_name in self.parameter_widgets:
+                widget = self.parameter_widgets[param_name]
+                # Find the actual input widget (spinbox, checkbox, etc.)
+                if hasattr(widget, 'get_value'):
+                    # Find the spinbox/checkbox inside the container widget
+                    for child in widget.findChildren(QDoubleSpinBox):
+                        child.setValue(float(value))
+                        break
+                    for child in widget.findChildren(QSpinBox):
+                        child.setValue(int(value))
+                        break
+                    for child in widget.findChildren(QCheckBox):
+                        child.setChecked(bool(value))
+                        break
+
     def clear_params(self):
         while self.params_layout.count():
             item = self.params_layout.takeAt(0)
@@ -1171,7 +1195,9 @@ class NeuronParametersWidget(QWidget):
         params = {}
         for param_name, widget in self.parameter_widgets.items():
             params[param_name] = widget.get_value()
-        print({"model": self.current_model, "params": params})
+        
+        # FIX: Emit signal to notify parent widget
+        self.parametersSaved.emit(self.current_model, params)
 
 
 
@@ -2481,6 +2507,7 @@ class GraphCreatorWidget(QWidget):
         self.node_param_widget.paramsChanged.connect(self.save_node_params)
         self.editor_stack.addWidget(self.node_param_widget)
         self.pop_param_widget = NeuronParametersWidget()
+        self.pop_param_widget.parametersSaved.connect(self._on_population_params_saved)  # FIX: Connect signal
         self.editor_stack.addWidget(self.pop_param_widget)
         self.polynom_manager = PolynomialManagerWidget()
         self.editor_stack.addWidget(self.polynom_manager)
@@ -3134,8 +3161,14 @@ class GraphCreatorWidget(QWidget):
                 pop['button'].setStyleSheet("")
         
         pop = node['populations'][pop_idx]
-        if pop['params']:
-            self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        
+        # FIX: First set the model, then load saved params
+        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        
+        # FIX: Load saved parameters into the UI widgets AFTER model change
+        if pop.get('params'):
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.pop_param_widget.load_params(pop['params']))
         
         self.editor_stack.setCurrentIndex(2)
     
@@ -3160,6 +3193,9 @@ class GraphCreatorWidget(QWidget):
                 if 'button' in pop:
                     pop['button'].setText(f"Pop {self.current_pop_idx+1}: {pop['model']}")
 
+    def _on_population_params_saved(self, model_name, params):
+        """FIX: Handler for when 'Save Parameters' button is clicked in NeuronParametersWidget"""
+        self.save_current_population_params()
     
     def generate_random_color(self):
         r = random.randint(0, 255)
@@ -3212,6 +3248,7 @@ class EditGraphWidget(QWidget):
         self.current_node_idx = None
         self.current_pop_idx = None
         self._last_polynomial_node_idx = None
+        self._loading = False  # FIX: Prevent saving during load
         self.init_ui()
     
     def init_ui(self):
@@ -3335,6 +3372,7 @@ class EditGraphWidget(QWidget):
         self.editor_stack.addWidget(self.node_param_widget)
         
         self.pop_param_widget = NeuronParametersWidget()
+        self.pop_param_widget.parametersSaved.connect(self._on_population_params_saved)  # FIX: Connect signal
         self.editor_stack.addWidget(self.pop_param_widget)
         
         self.polynom_manager = PolynomialManagerWidget()
@@ -3384,7 +3422,7 @@ class EditGraphWidget(QWidget):
                 break
         
         if target_idx is not None:
-            self.select_node(target_idx)
+            self.select_node(target_idx, auto_save=False)  # FIX: Don't auto-save when selecting from external
         else:
             print(f"⚠ Node ID {node_id} not found in Editor list.")
 
@@ -3394,7 +3432,7 @@ class EditGraphWidget(QWidget):
         if self.current_node_idx is not None:
             node_data = self.node_list[self.current_node_idx]
             if pop_id < len(node_data['populations']):
-                self.select_population(pop_id)
+                self.select_population(pop_id, auto_save=False)  # FIX: Don't auto-save
 
     def delete_connection_by_data(self, conn_data):
         src_gid = conn_data['source']['graph_id']
@@ -3696,7 +3734,11 @@ class EditGraphWidget(QWidget):
     def load_graph_data(self):
         if not self.current_graph: return
         
-        print(f"\nLoading Graph {self.current_graph_id}")
+        self._loading = True  # FIX: Prevent save_current_population_params during load
+        
+        # FIX: Block signals on the parameter widget to prevent spurious saves
+        self.pop_param_widget.blockSignals(True)
+        self.pop_param_widget.model_combo.blockSignals(True)
         
         self.current_node_idx = None
         self.current_pop_idx = None
@@ -3722,9 +3764,14 @@ class EditGraphWidget(QWidget):
         for node in self.current_graph.node_list:
             self.load_node_from_graph(node)
         
-        print(f"Loaded {len(self.node_list)} nodes")
+        # FIX: Re-enable signals before selecting node
+        self.pop_param_widget.model_combo.blockSignals(False)
+        self.pop_param_widget.blockSignals(False)
+        
         if self.node_list:
-            self.select_node(0)
+            self.select_node(0, auto_save=False)  # FIX: Don't save defaults during load
+        
+        self._loading = False  # FIX: Re-enable saving after load complete
     
     def load_node_from_graph(self, node):
         node_idx = len(self.node_list)
@@ -3734,22 +3781,34 @@ class EditGraphWidget(QWidget):
         self.node_list_layout.addWidget(node_btn)
         
         populations = []
+        
+        # FIX: First try to get params from node.parameters (original source of truth)
+        stored_pop_params = []
+        if hasattr(node, 'parameters'):
+            stored_pop_params = node.parameters.get('population_nest_params', [])
+        
         if hasattr(node, 'population') and node.population:
             for pop_idx, nest_pop in enumerate(node.population):
                 if nest_pop is None or len(nest_pop) == 0: continue
                 
                 model = safe_get_model(nest_pop, 'unknown')
                 params = {}
-                try:
-                    status = safe_get_status(nest_pop)
-                    if status:
-                        first_neuron = status[0]
-                        param_keys = ['V_m', 'E_L', 'tau_m', 'C_m', 'V_th', 't_ref', 'V_reset', 'I_e', 'tau_syn_ex', 'tau_syn_in']
-                        for key in param_keys:
-                            if key in first_neuron:
-                                params[key] = first_neuron[key]
-                except Exception as e:
-                    print(f"Could not extract params from pop {pop_idx}: {e}")
+                
+                # FIX: Prefer stored params over NEST status (they may have been modified)
+                if pop_idx < len(stored_pop_params) and stored_pop_params[pop_idx]:
+                    params = stored_pop_params[pop_idx].copy()
+                else:
+                    # Fallback: read from NEST
+                    try:
+                        status = safe_get_status(nest_pop)
+                        if status:
+                            first_neuron = status[0]
+                            param_keys = ['V_m', 'E_L', 'tau_m', 'C_m', 'V_th', 't_ref', 'V_reset', 'I_e', 'tau_syn_ex', 'tau_syn_in']
+                            for key in param_keys:
+                                if key in first_neuron:
+                                    params[key] = first_neuron[key]
+                    except Exception as e:
+                        print(f"Could not extract params from pop {pop_idx}: {e}")
                 
                 polynomials = {}
                 if hasattr(node, 'parameters'):
@@ -3802,9 +3861,13 @@ class EditGraphWidget(QWidget):
         })
         self.select_node(node_idx)
     
-    def select_node(self, node_idx):
+    def select_node(self, node_idx, auto_save=True):
         if node_idx < 0 or node_idx >= len(self.node_list): return
-        self.save_current_population_params()
+        
+        # FIX: Only save if auto_save is True and we're not loading
+        if auto_save and not getattr(self, '_loading', False):
+            self.save_current_population_params()
+        
         self.current_node_idx = node_idx
         self.current_pop_idx = None
         
@@ -3872,8 +3935,11 @@ class EditGraphWidget(QWidget):
             self.pop_list_layout.addWidget(pop_btn)
             pop['button'] = pop_btn
     
-    def select_population(self, pop_idx):
-        self.save_current_population_params()
+    def select_population(self, pop_idx, auto_save=True):
+        # FIX: Only save if auto_save is True and we're not loading
+        if auto_save and not getattr(self, '_loading', False):
+            self.save_current_population_params()
+        
         self.current_pop_idx = pop_idx
         node = self.node_list[self.current_node_idx]
         for i, pop in enumerate(node['populations']):
@@ -3882,8 +3948,16 @@ class EditGraphWidget(QWidget):
             else:
                 pop['button'].setStyleSheet("")
         pop = node['populations'][pop_idx]
-        if pop['params']:
-            self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        
+        # FIX: First set the model, then load saved params
+        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        
+        # FIX: Load saved parameters into the UI widgets AFTER model change
+        if pop.get('params'):
+            # Use QTimer to ensure widgets are created after model change
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.pop_param_widget.load_params(pop['params']))
+        
         self.editor_stack.setCurrentIndex(2)
         self.remove_pop_btn.setEnabled(True)
 
@@ -4130,6 +4204,10 @@ class EditGraphWidget(QWidget):
     
     
     def save_current_population_params(self):
+        # FIX: Don't save during load - this prevents default values from overwriting loaded data
+        if getattr(self, '_loading', False):
+            return
+            
         if self.current_node_idx is not None and self.current_pop_idx is not None:
             if self.current_node_idx < 0 or self.current_node_idx >= len(self.node_list): return
             node = self.node_list[self.current_node_idx]
@@ -4137,9 +4215,14 @@ class EditGraphWidget(QWidget):
             pop = node['populations'][self.current_pop_idx]
             if self.pop_param_widget.current_model:
                 pop['model'] = self.pop_param_widget.current_model
-                pop['params'] = {k: w.get_value() for k, w in self.pop_param_widget.parameter_widgets.items()}
+                new_params = {k: w.get_value() for k, w in self.pop_param_widget.parameter_widgets.items()}
+                pop['params'] = new_params
                 if 'button' in pop: pop['button'].setText(f"Pop {self.current_pop_idx+1}: {pop['model']}")
     
+    def _on_population_params_saved(self, model_name, params):
+        """FIX: Handler for when 'Save Parameters' button is clicked in NeuronParametersWidget"""
+        self.save_current_population_params()
+
     def open_polynomial_editor(self):
         if self.current_node_idx is None:
             print("Please select a node first!")
@@ -9680,6 +9763,25 @@ class ScriptExporter:
 
                 safe_params = _clean_params(node.parameters) if hasattr(node, 'parameters') else {}
                 
+                # FIX: Get population_nest_params from BOTH sources, preferring node.parameters
+                pop_nest_params = []
+                # First try node.parameters (most reliable source after editing)
+                if hasattr(node, 'parameters') and 'population_nest_params' in node.parameters:
+                    pop_nest_params = node.parameters.get('population_nest_params', [])
+                # Fallback to node attribute
+                if not pop_nest_params and hasattr(node, 'population_nest_params'):
+                    pop_nest_params = getattr(node, 'population_nest_params', [])
+                
+                # Clean the params
+                cleaned_pop_params = [_clean_params(p) if p else {} for p in pop_nest_params]
+                
+                # Debug: Log what we're saving
+                if cleaned_pop_params:
+                    print(f"  Saving Node {node.id} ({node.name}): {len(cleaned_pop_params)} pop_nest_params")
+                    for idx, p in enumerate(cleaned_pop_params):
+                        if p:
+                            print(f"    Pop {idx}: V_th={p.get('V_th', 'N/A')}, C_m={p.get('C_m', 'N/A')}, t_ref={p.get('t_ref', 'N/A')}")
+                
                 node_data = {
                     'id': node.id,
                     'name': getattr(node, 'name', f"Node_{node.id}"),
@@ -9688,10 +9790,7 @@ class ScriptExporter:
                     'positions': positions,
                     'devices': devices,
                     'connections': _serialize_connections(node.connections) if hasattr(node, 'connections') else [],
-                    'population_nest_params': [
-                        _clean_params(p) if p else {} 
-                        for p in getattr(node, 'population_nest_params', [])
-                    ],
+                    'population_nest_params': cleaned_pop_params,
                     'tool_type': safe_params.get('tool_type', 'custom'),
                     'parameters': safe_params
                 }

@@ -855,6 +855,7 @@ class MainWindow(QMainWindow):
 
         self.update_visualizations()
         self.init_simulation_timer()
+        self._update_global_button_state('stopped')  # FIX: Ensure buttons are in stopped state on startup
         self._switch_main_view(0)
 
     def _create_data_view(self):
@@ -3049,6 +3050,21 @@ class MainWindow(QMainWindow):
                     if 'center_of_mass' in nd:
                         params['center_of_mass'] = np.array(nd['center_of_mass'])
                     
+                    # FIX: Ensure population_nest_params is correctly loaded
+                    # Priority: nd['parameters']['population_nest_params'] > nd['population_nest_params']
+                    if 'population_nest_params' not in params or not params['population_nest_params']:
+                        # Check if it's at top level (older format)
+                        if 'population_nest_params' in nd and nd['population_nest_params']:
+                            params['population_nest_params'] = nd['population_nest_params']
+                    
+                    # Debug output for parameter loading
+                    pop_params = params.get('population_nest_params', [])
+                    if pop_params:
+                        print(f"  Loading Node {nd['id']} ({nd['name']}): {len(pop_params)} pop_nest_params")
+                        for idx, p in enumerate(pop_params):
+                            if p:
+                                print(f"    Pop {idx}: V_th={p.get('V_th', 'N/A')}, C_m={p.get('C_m', 'N/A')}, t_ref={p.get('t_ref', 'N/A')}")
+                    
                     new_node = graph.create_node(
                         parameters=params,
                         is_root=(nd['id']==0),
@@ -3060,6 +3076,9 @@ class MainWindow(QMainWindow):
                     
                     if nd.get('distribution'):
                         new_node.distribution = nd['distribution']
+                    
+                    # FIX: Sync population_nest_params to node attribute BEFORE populate_node
+                    new_node.population_nest_params = params.get('population_nest_params', [])
                     
                     new_node.populate_node()
 

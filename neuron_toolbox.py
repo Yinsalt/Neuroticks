@@ -3106,7 +3106,21 @@ class Node:
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
         
+        # FIX: Also check node attribute as fallback
         pop_nest_params = params.get("population_nest_params", [])
+        if not pop_nest_params and hasattr(self, 'population_nest_params'):
+            pop_nest_params = self.population_nest_params
+        
+        # Debug: Show what parameters we're using
+        if pop_nest_params:
+            print(f"  Using custom NEST params for {len(pop_nest_params)} population(s):")
+            for idx, p in enumerate(pop_nest_params):
+                if p:
+                    key_params = {k: p[k] for k in ['V_th', 'C_m', 't_ref', 'E_L'] if k in p}
+                    print(f"    Pop {idx}: {key_params}")
+        else:
+            print(f"  Using NEST defaults (no custom params)")
+        
         neuron_params = pop_nest_params[0] if pop_nest_params else {}
         current_models = params.get("neuron_models", ["iaf_psc_alpha"])
         
