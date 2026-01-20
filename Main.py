@@ -2317,7 +2317,24 @@ class MainWindow(QMainWindow):
 
     def _ensure_spike_recorders(self):
         self.live_recorders = []
-        
+        for graph in graph_list:
+            for node in graph.node_list:
+                if hasattr(node, 'devices'):
+                    for dev in node.devices:
+                        # Prüfen, ob es ein Recorder oder Meter ist
+                        model = dev.get('model', '')
+                        if 'recorder' in model or 'meter' in model:
+                            gid = dev.get('runtime_gid')
+
+                            if gid is not None:
+
+                                if hasattr(gid, 'tolist'):
+                                    gid = gid.tolist()
+                                if isinstance(gid, list):
+                                    gid = gid[0]
+                                
+                                if gid not in self.live_recorders:
+                                    self.live_recorders.append(gid)
         non_spiking = [
             'siegert_neuron', 'mcculloch_pitts_neuron',
             'rate_neuron_ipn', 'rate_neuron_opn', 'gif_pop_psc_exp',
