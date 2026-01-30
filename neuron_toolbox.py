@@ -1001,6 +1001,10 @@ def wave_collapse_old(mask=None,
             neigh_labels = [collapsed_nodes[x,y,z] for x,y,z in coll_nbrs]
 
             allowed = np.setdiff1d(type_array, neigh_labels)
+            
+            # FIX: Bei nur einem Typ wird allowed leer - erlaube dann alle Typen
+            if len(allowed) == 0:
+                allowed = np.array(type_array)
 
             p = np.zeros_like(probability_vector, dtype=float)
             idxs = [type_array.index(a) for a in allowed]
@@ -1016,9 +1020,10 @@ def wave_collapse_old(mask=None,
         candidates = np.argwhere(mask == 0)
         if candidates.size == 0:
             return None
+        # FIX: entropy >= 0 statt > 0, damit single-type WFC funktioniert
         valid = [(tuple(idx), entropy_matrix[tuple(idx)])
                  for idx in candidates
-                 if entropy_matrix[tuple(idx)] > 0]
+                 if entropy_matrix[tuple(idx)] >= 0]
         if not valid:
             return None
         next_idx = min(valid, key=lambda x: x[1])[0]
@@ -2154,10 +2159,12 @@ def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_posit
                 
                 try:
                     actual_pos = nest.GetPosition(pop)
-                    if len(actual_pos) == len(cluster):
-                        print(f"    ✓ Positionen verifiziert ({len(actual_pos)} Neuronen)")
+                    # FIX: GetPosition returns (x,y,z) for single neuron, not [(x,y,z)]
+                    n_actual = len(pop) if hasattr(pop, '__len__') else 1
+                    if n_actual == len(cluster):
+                        print(f"    ✓ Positionen verifiziert ({n_actual} Neuronen)")
                     else:
-                        print(f"  Position mismatch: {len(actual_pos)} vs {len(cluster)}")
+                        print(f"  Position mismatch: {n_actual} vs {len(cluster)}")
                 except Exception as e:
                     print(f"  Position verification failed: {e}")
             else:

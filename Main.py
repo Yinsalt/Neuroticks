@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
         return layout
     
     def on_device_tree_click(self, device_data):
-        self.tool_stack.setCurrentIndex(4)
+        self.set_tool_page(4)
         self.tools_widget.open_device_editor(device_data)
         self.status_bar.set_status(f"Editing Device: {device_data.get('model')}", "#FF9800")
 
@@ -1515,14 +1515,26 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            self.tool_stack.setCurrentIndex(1)
+            self.set_tool_page(1)
             self.graph_editor.delete_connection_by_data(conn_data)
             self.status_bar.show_success(f"Connection '{name}' deleted.")
             self.update_visualizations()
 
+    def set_tool_page(self, index):
+        """Zentrale Methode zum Wechseln der Tool-Seite mit Navigation-Sync."""
+        self.tool_stack.setCurrentIndex(index)
+        
+        # Synchronisiere Navigation-Buttons
+        if hasattr(self, 'nav_btns') and self.nav_btns:
+            for i, btn in enumerate(self.nav_btns):
+                if i == index:
+                    btn.setStyleSheet(self.nav_active_style)
+                else:
+                    btn.setStyleSheet(self.nav_base_style)
+
     def _on_overview_node_selected(self, graph_id, node_id):
         
-        self.tool_stack.setCurrentIndex(1)
+        self.set_tool_page(1)
         self.graph_editor.select_node_by_id(graph_id, node_id)
         
         if hasattr(self, 'flow_widget'):
@@ -1531,7 +1543,7 @@ class MainWindow(QMainWindow):
 
         print(f"Context Menu Action: Setting Source to Graph {graph_id}, Node {node_id}, Pop {pop_id}")
         
-        self.tool_stack.setCurrentIndex(2)
+        self.set_tool_page(2)
         
         self.connection_tool.refresh()
         
@@ -1541,19 +1553,19 @@ class MainWindow(QMainWindow):
 
 
     def _on_overview_pop_selected(self, graph_id, node_id, pop_id):
-        self.tool_stack.setCurrentIndex(1)
+        self.set_tool_page(1)
         self.graph_editor.select_population_by_ids(graph_id, node_id, pop_id)
 
 
     def _on_overview_conn_selected(self, connection_data):
-        self.tool_stack.setCurrentIndex(1)
+        self.set_tool_page(1)
         self.graph_editor.load_connection_editor(connection_data)
 
 
     
     def on_structure_selected(self, name, models, probs):
         
-        self.tool_stack.setCurrentIndex(0)
+        self.set_tool_page(0)
         
         self.graph_builder.load_structure_preset(name, models, probs, grid_size=[10, 10, 10])
         
@@ -1639,7 +1651,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
 
-        base_btn_style = """
+        self.nav_base_style = """
             QPushButton {
                 background-color: #2b2b2b;
                 color: #B0BEC5;
@@ -1659,7 +1671,7 @@ class MainWindow(QMainWindow):
             }
         """
 
-        active_btn_style = """
+        self.nav_active_style = """
             QPushButton {
                 background-color: #1c242b;
                 color: #00E5FF;
@@ -1709,28 +1721,19 @@ class MainWindow(QMainWindow):
             ("Instrumentation", 4)
         ]
 
-        def on_nav_click(target_idx, clicked_btn):
-            self.tool_stack.setCurrentIndex(target_idx)
-            
-            for btn in self.nav_btns:
-                if btn == clicked_btn:
-                    btn.setStyleSheet(active_btn_style)
-                else:
-                    btn.setStyleSheet(base_btn_style)
-
         for label, idx in nav_items:
             btn = QPushButton(label)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
-            btn.setStyleSheet(base_btn_style)
+            btn.setStyleSheet(self.nav_base_style)
             
-            btn.clicked.connect(lambda checked, i=idx, b=btn: on_nav_click(i, b))
+            btn.clicked.connect(lambda checked, i=idx: self.set_tool_page(i))
             
             self.nav_btns.append(btn)
             col1_layout.addWidget(btn)
 
         if self.nav_btns:
-            self.nav_btns[0].setStyleSheet(active_btn_style)
+            self.nav_btns[0].setStyleSheet(self.nav_active_style)
 
         col2_layout = QVBoxLayout()
         col2_layout.setSpacing(5)
