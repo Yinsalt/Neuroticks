@@ -9827,7 +9827,7 @@ from neuron_toolbox import Graph, Node, PolynomGenerator
 JSON_FILENAME = "{json_filename}"
 SIM_DURATION = {duration}
 DUMP_INTERVAL = 2000.0
-OUTPUT_DIR = Path("Headless_Runs")
+OUTPUT_DIR = Path("Simulation_History")
 
 class NumpyNestEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -9876,7 +9876,6 @@ def load_and_build():
             params = nd.get('parameters', {{}}).copy()
             devs = nd.get('devices', [])
             
-            # === FIX: population_nest_params laden ===
             pop_nest_params = nd.get('population_nest_params', [])
             
             params.update({{
@@ -9887,7 +9886,7 @@ def load_and_build():
                 'devices': devs, 
                 'neuron_models': nd.get('neuron_models', ['iaf_psc_alpha']),
                 'types': nd.get('types', [0]),
-                'population_nest_params': pop_nest_params  # FIX: NEST-Parameter übergeben
+                'population_nest_params': pop_nest_params
             }})
             
             if 'positions' in nd and nd['positions']:
@@ -9900,8 +9899,6 @@ def load_and_build():
             
             node.connections = nd.get('connections', [])
             node.devices = devs
-            
-            # === FIX: population_nest_params auch direkt am Node setzen ===
             node.population_nest_params = pop_nest_params
             
             node.populate_node()
@@ -9917,10 +9914,6 @@ def load_and_build():
     return graphs
 
 def cache_active_recorders(graphs):
-    \"\"\"
-    Erstellt eine flache Liste aller aktiven Recorder.
-    Wrappt IDs direkt in NodeCollection für NEST 3.x Kompatibilität.
-    \"\"\"
     active_recorders = []
     
     for graph in graphs.values():
@@ -9931,7 +9924,6 @@ def cache_active_recorders(graphs):
                 gid_col = dev.get('runtime_gid')
                 if gid_col is None: continue
                 
-                # 1. GID extrahieren
                 try:
                     if hasattr(gid_col, 'tolist'): gid_int = int(gid_col.tolist()[0])
                     elif isinstance(gid_col, list): gid_int = int(gid_col[0])
@@ -9942,7 +9934,6 @@ def cache_active_recorders(graphs):
                 model = dev.get('model', '')
                 if 'recorder' in model or 'meter' in model:
                     try:
-                        # 2. FIX: NodeCollection erstellen und cachen
                         node_handle = nest.NodeCollection([gid_int])
                         
                         active_recorders.append({{
@@ -9958,98 +9949,143 @@ def cache_active_recorders(graphs):
     print(f"Cached {{len(active_recorders)}} active recording devices.")
     
     if len(active_recorders) == 0:
-        print("⚠ WARNING: No spike_recorders or multimeters found!")
-        print("  → Simulation will run but NO DATA will be collected.")
-        print("  → Add devices with 'spike_recorder' or 'multimeter' model to record data.")
+        print("WARNING: No spike_recorders or multimeters found!")
+        print("  Simulation will run but NO DATA will be collected.")
     
     return active_recorders
 
-def collect_data_optimized(active_recorders):
-    \"\"\"
-    Iteriert nur über die vorgefertigte Liste von Recordern.
-    \"\"\"
-    snapshot = {{}}
+def collect_and_flush(active_recorders):
+    collected = {{}}
     total_events = 0
     
     for rec in active_recorders:
         try:
-            # Daten holen (Handle ist schon NodeCollection)
             status = nest.GetStatus(rec['handle'])[0]
             n_events = status.get('n_events', 0)
             
             if n_events > 0:
                 events = status.get('events', {{}})
                 
-                # Struktur initialisieren falls nötig
-                gid, nid = rec['graph_id'], rec['node_id']
-                if gid not in snapshot: snapshot[gid] = {{}}
-                if nid not in snapshot[gid]: snapshot[gid][nid] = {{}}
+                clean_data = {{k: v.tolist() if isinstance(v, np.ndarray) else list(v) 
+                             for k, v in events.items()}}
                 
-                # Numpy Arrays zu Listen konvertieren
-                clean_events = {{k: v.tolist() if isinstance(v, np.ndarray) else list(v) 
-                              for k, v in events.items()}}
-                
-                snapshot[gid][nid][rec['device_id']] = {{
+                key = (rec['graph_id'], rec['node_id'], rec['device_id'])
+                collected[key] = {{
                     'model': rec['model'],
-                    'events': clean_events,
-                    'n_events': n_events
+                    'data': clean_data
                 }}
                 
                 total_events += n_events
-                
-                # Speicher leeren
                 nest.SetStatus(rec['handle'], {{'n_events': 0}})
                 
         except Exception as e:
             print(f"Read error on device {{rec['device_id']}}: {{e}}")
 
-    return snapshot
+    return collected, total_events
+
+def build_history_file(graphs, accumulated_runs):
+    history = {{
+        'meta': {{
+            'version': '3.0',
+            'type': 'neuroticks_history',
+            'timestamp': str(datetime.now()),
+            'source': 'headless_export'
+        }},
+        'graphs': []
+    }}
+    
+    for graph in graphs.values():
+        g_entry = {{
+            'graph_id': graph.graph_id,
+            'graph_name': getattr(graph, 'graph_name', f'Graph_{{graph.graph_id}}'),
+            'nodes': []
+        }}
+        
+        for node in graph.node_list:
+            # Device-Configs ohne runtime_gid
+            clean_devices = []
+            for dev in getattr(node, 'devices', []):
+                d_copy = dev.copy()
+                d_copy.pop('runtime_gid', None)
+                clean_devices.append(d_copy)
+            
+            n_entry = {{
+                'id': node.id,
+                'name': getattr(node, 'name', f'Node_{{node.id}}'),
+                'neuron_models': getattr(node, 'neuron_models', []),
+                'types': getattr(node, 'types', []),
+                'devices': clean_devices,
+                'results': {{
+                    'history': []
+                }}
+            }}
+            
+            for run_data in accumulated_runs:
+                run_entry = {{'devices': {{}}}}
+                
+                for (gid, nid, did), dev_result in run_data.items():
+                    if gid == graph.graph_id and nid == node.id:
+                        run_entry['devices'][did] = dev_result
+                
+                if run_entry['devices']:
+                    n_entry['results']['history'].append(run_entry)
+            
+            g_entry['nodes'].append(n_entry)
+        
+        history['graphs'].append(g_entry)
+    
+    return history
 
 def main():
-    run_name = datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S")
-    run_dir = OUTPUT_DIR / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
-    print(f"Simulation START. Output: {{run_dir}}")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = OUTPUT_DIR / f"history_live_{{timestamp}}.json"
     
-    # 1. Aufbauen
+    print(f"Simulation START. Output: {{output_file}}")
+    
     graphs = load_and_build()
     
-    # 2. Cachen (Optimierung)
     recorders = cache_active_recorders(graphs)
     
     current_time = 0.0
-    dump_count = 0
+    step_count = 0
+    accumulated_runs = []
     
-    print(f"Simulating {{SIM_DURATION}} ms...")
+    print(f"Simulating {{SIM_DURATION}} ms (dump every {{DUMP_INTERVAL}} ms)...")
     
     while current_time < SIM_DURATION:
         step = min(DUMP_INTERVAL, SIM_DURATION - current_time)
         nest.Simulate(step)
         current_time += step
+        step_count += 1
         
-        # 3. Optimiertes Sammeln
-        data = collect_data_optimized(recorders)
+        run_data, n_events = collect_and_flush(recorders)
+        accumulated_runs.append(run_data)
         
-        filename = f"step_{{dump_count:04d}}_{{int(current_time)}}ms.json"
-        filepath = run_dir / filename
-        
-        # Auch leere Files speichern um den Timestamp zu garantieren.
-        with open(filepath, 'w') as f:
-            dump_obj = {{
-                'time': current_time,
-                'graphs': data
-            }}
-            json.dump(dump_obj, f, cls=NumpyNestEncoder)
-        
-        if data:
-            print(f"  Step {{dump_count}}: {{current_time}}ms -> Dumped active data")
-        else:
-            print(f"  Step {{dump_count}}: {{current_time}}ms -> (no spikes)")
-            
-        dump_count += 1
-
-    print("Simulation FINISHED.")
+        pct = current_time / SIM_DURATION * 100
+        print(f"  [{{pct:5.1f}}%] {{current_time:.0f}}/{{SIM_DURATION:.0f}} ms  |  {{n_events}} events collected")
+    
+    print("\\nBuilding history file...")
+    history = build_history_file(graphs, accumulated_runs)
+    
+    with open(output_file, 'w') as f:
+        json.dump(history, f, cls=NumpyNestEncoder)
+    
+    # Stats
+    total_recordings = 0
+    for g in history['graphs']:
+        for n in g['nodes']:
+            for run in n['results']['history']:
+                total_recordings += len(run.get('devices', {{}}))
+    
+    size_mb = output_file.stat().st_size / (1024 * 1024)
+    print(f"\\nSimulation FINISHED.")
+    print(f"  File:       {{output_file}}")
+    print(f"  Size:       {{size_mb:.1f}} MB")
+    print(f"  Steps:      {{step_count}}")
+    print(f"  Recordings: {{total_recordings}} device entries")
+    print(f"\\nThis file is directly loadable in the NeuroTicks History Browser.")
 
 if __name__ == "__main__":
     main()
@@ -10980,7 +11016,7 @@ class NodeLiveGroup(QGroupBox):
                     cutoff = last_t - time_window
                     
                     
-                    
+                    # TODO
                     y, x = np.histogram(w.times, bins=50)
                     pass
         
