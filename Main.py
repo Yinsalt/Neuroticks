@@ -367,6 +367,22 @@ class StatusBarWidget(QWidget):
         self.set_status(f"{message}", color="#2E7D32")
         self.progress_bar.setVisible(False)
 
+def _invalidate_nest_refs(graphs):
+    """Remove auto-devices and null runtime_gids before ResetKernel to prevent stale NodeCollection access."""
+    for graph in graphs:
+        for node in graph.node_list:
+            if hasattr(node, 'devices'):
+                node.devices = [d for d in node.devices if not d.get('is_auto', False)]
+                for d in node.devices:
+                    d['runtime_gid'] = None
+            if hasattr(node, 'parameters') and 'devices' in node.parameters:
+                node.parameters['devices'] = [d for d in node.parameters['devices'] if not d.get('is_auto', False)]
+                for d in node.parameters['devices']:
+                    d['runtime_gid'] = None
+            if hasattr(node, 'population'):
+                node.population = []
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -478,6 +494,7 @@ class MainWindow(QMainWindow):
   
             
             print("Resetting NEST Kernel...")
+            self.live_recorders = []
             nest.ResetKernel()
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
@@ -578,6 +595,12 @@ class MainWindow(QMainWindow):
         
         node.build()
         
+        # Invalidate stale refs before ResetKernel
+        if hasattr(self, 'sim_timer'):
+            self.sim_timer.stop()
+        self.live_recorders = []
+        _invalidate_nest_refs(list(self.active_graphs.values()))
+        
         nest.ResetKernel()
         for g in self.active_graphs.values():
             for n in g.node_list:
@@ -642,6 +665,13 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             
             print("\nManual NEST Reset...")
+            
+            # Invalidate stale NodeCollection refs before ResetKernel
+            if hasattr(self, 'sim_timer'):
+                self.sim_timer.stop()
+            self.live_recorders = []
+            _invalidate_nest_refs(graph_list)
+            
             nest.ResetKernel()
             self.status_bar.set_progress(30)
             QApplication.processEvents()
@@ -1492,6 +1522,9 @@ class MainWindow(QMainWindow):
             return
 
         print("Resetting Kernel...")
+        # Invalidate stale refs before ResetKernel
+        _invalidate_nest_refs(graph_list)
+        
         nest.ResetKernel()
         if self.structural_plasticity_enabled:
             nest.EnableStructuralPlasticity()
@@ -2324,18 +2357,17 @@ class MainWindow(QMainWindow):
             for node in graph.node_list:
                 if hasattr(node, 'devices'):
                     for dev in node.devices:
-                        # Prüfen, ob es ein Recorder oder Meter ist
                         model = dev.get('model', '')
                         if 'recorder' in model or 'meter' in model:
                             gid = dev.get('runtime_gid')
-
                             if gid is not None:
-
-                                if hasattr(gid, 'tolist'):
-                                    gid = gid.tolist()
-                                if isinstance(gid, list):
-                                    gid = gid[0]
-                                
+                                # Keep as NodeCollection for nest.GetStatus compatibility
+                                if not hasattr(gid, 'tolist') and not isinstance(gid, list):
+                                    # It's a raw int - wrap it
+                                    try:
+                                        gid = nest.NodeCollection([int(gid)])
+                                    except Exception:
+                                        continue
                                 if gid not in self.live_recorders:
                                     self.live_recorders.append(gid)
         non_spiking = [
@@ -2369,6 +2401,7 @@ class MainWindow(QMainWindow):
                                     nest.GetStatus(rec) 
                                 except:
                                     rec = None
+                                    rec_entry['runtime_gid'] = None
                                 
                                 if rec:
                                     self.live_recorders.append(rec)
@@ -2609,6 +2642,8 @@ class MainWindow(QMainWindow):
                 self.simulation_view.update_time_display(0.0)
                 self.simulation_view.is_paused = True
                 self.simulation_view.update_button_styles()
+            # Invalidate stale NodeCollection refs before ResetKernel
+            _invalidate_nest_refs(graph_list)
 
             nest.ResetKernel()
             
@@ -2750,9 +2785,14 @@ class MainWindow(QMainWindow):
                     if gid is None: 
                         continue
                     
-                    nest_id = gid
-                    if isinstance(gid, list) or hasattr(gid, 'tolist'):
-                        nest_id = gid[0] if isinstance(gid, list) else gid.tolist()[0]
+                    try:
+                        nest_id = gid
+                        if isinstance(gid, list):
+                            nest_id = gid[0]
+                        elif hasattr(gid, 'tolist'):
+                            nest_id = gid.tolist()[0]
+                    except Exception:
+                        continue  # Stale NodeCollection → skip
 
                     if "recorder" in model or "meter" in model:
                         if nest_id in all_events_cache:
@@ -2823,6 +2863,12 @@ class MainWindow(QMainWindow):
                     self.status_bar.set_status("Resetting NEST kernel...", color="#FF5722")
                     self.status_bar.set_progress(5)
                     QApplication.processEvents()
+
+                # Invalidate stale NodeCollection refs before ResetKernel
+                if hasattr(self, 'sim_timer'):
+                    self.sim_timer.stop()
+                self.live_recorders = []
+                _invalidate_nest_refs(graphs_to_process)
 
                 nest.ResetKernel()
                 
@@ -3023,9 +3069,16 @@ class MainWindow(QMainWindow):
                 raise ValueError("Invalid file format: 'graphs' key missing")
 
             print("\nResetting Environment for Load...")
+            
+            # Stop simulation and invalidate stale refs before ResetKernel
+            global graph_list
+            if hasattr(self, 'sim_timer'):
+                self.sim_timer.stop()
+            self.live_recorders = []
+            _invalidate_nest_refs(graph_list)
+            
             nest.ResetKernel()
             
-            global graph_list
             graph_list.clear()
             
             WidgetLib.next_graph_id = 0
