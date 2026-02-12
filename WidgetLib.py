@@ -8477,9 +8477,12 @@ class SimulationViewWidget(QWidget):
         h = self.view.height()
         # Fallunterscheidung für verschiedene PyQtGraph-Versionen
         try:
-            proj_matrix = self.view.projectionMatrix()
+            # Neue pyqtgraph API (>=0.13.4): region und viewport sind Pflicht
+            region = (0, 0, w, h)
+            proj_matrix = self.view.projectionMatrix(region=region, viewport=(0, 0, w, h))
         except TypeError:
-            proj_matrix = self.view.projectionMatrix(region=None, viewport=(0, 0, w, h))
+            # Alte pyqtgraph API: keine Argumente nötig
+            proj_matrix = self.view.projectionMatrix()
         mvp = proj_matrix * view_matrix
         screen_vec = mvp.map(QVector3D(vec3[0], vec3[1], vec3[2]))
         x = (screen_vec.x() + 1.0) * w / 2.0
