@@ -28,6 +28,16 @@ dt = 0.01
 positions=[np.zeros(3)]
 gsl = 8
 
+# Toggle for detailed build-time output (per-pop model/synapse logs,
+# parameter validation messages, position verification). Errors and
+# warnings are always shown regardless. Set True when debugging.
+VERBOSE_BUILD = False
+
+def _vprint(*args, **kwargs):
+    """Print only when VERBOSE_BUILD is enabled."""
+    if VERBOSE_BUILD:
+        print(*args, **kwargs)
+
 # Multi-Compartment Neuron Models - require special handling
 MC_MODELS = {'iaf_cond_alpha_mc', 'cm_default', 'cm_main', 'iaf_cond_beta_mc'}
 
@@ -110,42 +120,87 @@ def compute_angular_similarity_weights(local_points, weight_ex, weight_in, bidir
     
     return weights.flatten()
 
-def connect_neighbors_by_index(nodes, n_neighbors, weight_ex, weight_in, delay):
+def _is_plasticity_synapse(syn_model):
+    """Synapsen-Modelle die negative Gewichte typisch NICHT akzeptieren
+    (NEST throws BadProperty). STDP & STP-Modelle sind excitatory-only."""
+    return syn_model not in ('static_synapse', 'static_synapse_hpc',
+                              'static_synapse_hom_w')
+
+
+def _adjust_wmax_if_needed(extra_syn_params, max_abs_weight, syn_model):
+    """Falls extras ein Wmax enthalten das niedriger als der größte Connection-
+    Weight ist, automatisch hochziehen und warnen. Verhindert BadProperty.
+    Auch wenn Wmax nicht explizit gesetzt ist aber das Modell defaults auf
+    niedrige Wmax hat (stdp_synapse: 100 in NEST, aber unser dict hat 3.5)."""
+    if not extra_syn_params:
+        return extra_syn_params
+    extras = dict(extra_syn_params)
+    if 'Wmax' in extras and extras['Wmax'] < max_abs_weight:
+        new_wmax = float(max_abs_weight * 1.5)
+        print(f"  WARNING: {syn_model}: Wmax ({extras['Wmax']}) < max(|weight|)={max_abs_weight:.2f}. "
+              f"Auto-adjusting to Wmax={new_wmax:.2f}")
+        extras['Wmax'] = new_wmax
+    return extras
+
+
+def connect_neighbors_by_index(nodes, n_neighbors, weight_ex, weight_in, delay,
+                               syn_model='static_synapse', extra_syn_params=None):
     gids = np.array(nodes.get("global_id"))
     N = len(gids)
     
     m = min(n_neighbors, N - 1)
     if m < 1: return
     
-    sources = []
-    targets = []
-    weights = []
-    delays = []
+    # Excitatory (positive weights, forward neighbors) und
+    # Inhibitory (negative weights, backward neighbors) getrennt aufbauen.
+    # Plasticity-Synapsen vertragen keine negativen Weights → Inhibitory
+    # bekommt IMMER static_synapse als Fallback (das ist auch biologisch
+    # konventionell: Plasticity ist excitatory).
+    src_ex, tgt_ex, w_ex_arr, d_ex_arr = [], [], [], []
+    src_in, tgt_in, w_in_arr, d_in_arr = [], [], [], []
     
     for i in range(N):
         for offset in range(1, m + 1):
-            target_idx = (i + offset) % N
-            sources.append(gids[i])
-            targets.append(gids[target_idx])
-            
+            t_idx = (i + offset) % N
             w = weight_ex * (1.0 - (offset-1)/m)
-            weights.append(w)
-            delays.append(delay)
-            
+            src_ex.append(gids[i]); tgt_ex.append(gids[t_idx])
+            w_ex_arr.append(w); d_ex_arr.append(delay)
         for offset in range(1, m + 1):
-            target_idx = (i - offset) % N
-            sources.append(gids[i])
-            targets.append(gids[target_idx])
-            
+            t_idx = (i - offset) % N
             w = -abs(weight_in) * (1.0 - (offset-1)/m)
-            weights.append(w)
-            delays.append(delay)
-            
-    nest.Connect(sources, targets,
-                 {'rule': 'one_to_one'},
-                 {'synapse_model': 'static_synapse',
-                  'weight': np.array(weights),
-                  'delay': np.array(delays)})
+            src_in.append(gids[i]); tgt_in.append(gids[t_idx])
+            w_in_arr.append(w); d_in_arr.append(delay)
+    
+    is_plast = _is_plasticity_synapse(syn_model)
+    extras = extra_syn_params or {}
+    
+    # --- Excitatory: User's chosen synapse model ---
+    if src_ex:
+        max_w_ex = max(abs(w) for w in w_ex_arr) if w_ex_arr else 1.0
+        ex_extras = _adjust_wmax_if_needed(extras, max_w_ex, syn_model) if is_plast else extras
+        syn_spec_ex = {'synapse_model': syn_model,
+                       'weight': np.array(w_ex_arr),
+                       'delay': np.array(d_ex_arr)}
+        for k_e, v_e in ex_extras.items():
+            syn_spec_ex[k_e] = v_e
+        nest.Connect(src_ex, tgt_ex, {'rule': 'one_to_one'}, syn_spec_ex)
+    
+    # --- Inhibitory: Plasticity → static_synapse fallback, sonst gleicher syn ---
+    if src_in:
+        if is_plast:
+            in_syn_model = 'static_synapse'
+            in_extras = {}  # Plasticity-Extras passen nicht zu static
+            _vprint(f"  -> Inhibitory connections fall back to static_synapse "
+                  f"({syn_model} does not support negative weights).")
+        else:
+            in_syn_model = syn_model
+            in_extras = extras
+        syn_spec_in = {'synapse_model': in_syn_model,
+                       'weight': np.array(w_in_arr),
+                       'delay': np.array(d_in_arr)}
+        for k_e, v_e in in_extras.items():
+            syn_spec_in[k_e] = v_e
+        nest.Connect(src_in, tgt_in, {'rule': 'one_to_one'}, syn_spec_in)
     
 
 
@@ -1669,6 +1724,8 @@ def create_CCW(
     neuron_params=None,
     plot=False,
     syn_model='static_synapse',
+    extra_syn_params=None,  # dict mit modell-spezifischen Synapse-Params
+                            # (z.B. {'tau_plus': 20.0, 'lambda': 0.01} für stdp)
     
     weight_ex=30.0,
     delay_ex=1.0,
@@ -1682,10 +1739,22 @@ def create_CCW(
     rot_phi=0.0,
     
     bidirectional=False,
-    use_index_based=False
+    use_index_based=False,
+    
+    # Allgemeine Connection-Rule für den NICHT-Index-Based-Modus.
+    # Werte: 'similarity' (Default), 'one_to_one', 'all_to_all',
+    # 'pairwise_bernoulli', 'fixed_indegree', 'fixed_outdegree'.
+    # 'similarity' ist die alte Logik (jeder mit jedem, weights aus Winkel-
+    # Ähnlichkeit). Andere Werte ignorieren die similarity weights und
+    # nutzen weight_ex für alle synapsen homogen.
+    conn_rule='similarity',
+    conn_p=1.0,
+    conn_indegree=10,
+    conn_outdegree=10
     ):
     
     safe_params = neuron_params if neuron_params else {}
+    extra = extra_syn_params if extra_syn_params else {}
     
     t = np.linspace(0, 2*np.pi, n_neurons, endpoint=False)
     local_x = radius * np.cos(t)
@@ -1708,12 +1777,14 @@ def create_CCW(
             n_neighbors=m_neighbors,
             weight_ex=weight_ex,
             weight_in=weight_ex * weight_in_factor,
-            delay=delay_ex
+            delay=delay_ex,
+            syn_model=syn_model,
+            extra_syn_params=extra,
         )
-        print(f"CCW (Index-Based): Connected {m_neighbors} prev/next neighbors.")
+        _vprint(f"CCW (Index-Based): Connected {m_neighbors} prev/next neighbors. model={model}, syn={syn_model}")
         
-    else:
-        
+    elif conn_rule == 'similarity':
+        # Old behavior: per-pair weights aus angular similarity
         weights_flat = compute_angular_similarity_weights(
             local_points,
             weight_ex=weight_ex,
@@ -1729,21 +1800,77 @@ def create_CCW(
         targets = np.tile(gids, N)
         
         mask = sources != targets
+        srcs = sources[mask]
+        tgts = targets[mask]
+        ws = weights_flat[mask]
+        ds = delays_flat[mask]
         
-        nest.Connect(
-            sources[mask],
-            targets[mask],
-            {'rule': 'one_to_one'},
-            {
-                'synapse_model': syn_model,
-                'weight': weights_flat[mask],
-                'delay': delays_flat[mask]
-            }
-        )
+        is_plast = _is_plasticity_synapse(syn_model)
+        
+        if is_plast:
+            # Splitte in ex (w>0) und in (w<0). Plasticity nur auf ex.
+            ex_idx = ws > 0
+            in_idx = ws < 0
+            # Excitatory mit user-syn_model
+            if np.any(ex_idx):
+                ws_ex = ws[ex_idx]
+                max_w = float(np.max(np.abs(ws_ex))) if ws_ex.size else 1.0
+                ex_extras = _adjust_wmax_if_needed(extra, max_w, syn_model)
+                syn_spec_ex = {'synapse_model': syn_model,
+                               'weight': ws_ex,
+                               'delay': ds[ex_idx]}
+                for k_e, v_e in ex_extras.items():
+                    syn_spec_ex[k_e] = v_e
+                nest.Connect(srcs[ex_idx], tgts[ex_idx],
+                             {'rule': 'one_to_one'}, syn_spec_ex)
+            # Inhibitory immer static
+            if np.any(in_idx):
+                nest.Connect(srcs[in_idx], tgts[in_idx],
+                             {'rule': 'one_to_one'},
+                             {'synapse_model': 'static_synapse',
+                              'weight': ws[in_idx],
+                              'delay': ds[in_idx]})
+                _vprint(f"  -> Inhibitory similarity connections: static_synapse fallback "
+                      f"({syn_model} does not support negative weights).")
+        else:
+            syn_spec = {'synapse_model': syn_model, 'weight': ws, 'delay': ds}
+            for k_e, v_e in extra.items():
+                syn_spec[k_e] = v_e
+            nest.Connect(srcs, tgts, {'rule': 'one_to_one'}, syn_spec)
+        
         mode = "Bidirectional" if bidirectional else "Unidirectional (Vector)"
-        print(f"CCW ({mode}): Connected using similarity matrix.")
+        _vprint(f"CCW ({mode}): Connected via similarity. model={model}, syn={syn_model}")
+    else:
+        # Generische NEST connection rules (homogene weights/delays)
+        conn_spec = _build_conn_spec(conn_rule, conn_p, conn_indegree, conn_outdegree)
+        is_plast = _is_plasticity_synapse(syn_model)
+        gen_extras = _adjust_wmax_if_needed(extra, abs(float(weight_ex)), syn_model) if is_plast else extra
+        syn_spec = {'synapse_model': syn_model,
+                    'weight': float(weight_ex),
+                    'delay': float(delay_ex)}
+        for k_extra, v_extra in gen_extras.items():
+            syn_spec[k_extra] = v_extra
+        nest.Connect(nodes, nodes, conn_spec, syn_spec)
+        _vprint(f"CCW (Rule={conn_rule}): homogeneous weight={weight_ex}. model={model}, syn={syn_model}")
 
     return nodes
+
+
+def _build_conn_spec(rule, p=1.0, indegree=10, outdegree=10):
+    """Baut ein NEST conn_spec dict aus generischen Parametern."""
+    if rule == 'one_to_one':
+        return {'rule': 'one_to_one'}
+    elif rule == 'all_to_all':
+        return {'rule': 'all_to_all'}
+    elif rule == 'pairwise_bernoulli':
+        return {'rule': 'pairwise_bernoulli', 'p': float(p)}
+    elif rule == 'fixed_indegree':
+        return {'rule': 'fixed_indegree', 'indegree': int(indegree)}
+    elif rule == 'fixed_outdegree':
+        return {'rule': 'fixed_outdegree', 'outdegree': int(outdegree)}
+    else:
+        # Fallback
+        return {'rule': 'all_to_all'}
 
 
 def CCW_spike_recorder(ccw):
@@ -1763,8 +1890,12 @@ def connect_cone(
     model='iaf_psc_alpha',
     neuron_params=None,
     
+    syn_model='static_synapse',
+    extra_syn_params=None,
     k=10.0,
     weight_ex=30.0,
+    weight_in_factor=1.0,
+    delay_ex=1.0,
     
     n_neurons=100,
     radius_top=1.0,
@@ -1777,11 +1908,18 @@ def connect_cone(
     bidirectional=False,
     use_index_based=False,
     
+    # Analog zu create_CCW: 'similarity' = alte Logik, andere Werte =
+    # generische NEST connection rule mit homogenen weights/delays.
+    conn_rule='similarity',
+    conn_p=1.0,
+    conn_indegree=10,
+    conn_outdegree=10,
+    
     **kwargs
     ):
     
     safe_params = neuron_params if neuron_params else {}
-    
+    extra = extra_syn_params if extra_syn_params else {}
     
     z_local = np.linspace(0, height, n_neurons)
     r_at_z = radius_bottom + (radius_top - radius_bottom) * (z_local / height)
@@ -1798,7 +1936,7 @@ def connect_cone(
     nodes = nest.Create(model, positions=nest.spatial.free(pos=world_points.tolist()), params=safe_params)
     
     w_ex = weight_ex if weight_ex else 10.0
-    w_in = w_ex * 1.0
+    w_in = -abs(w_ex * weight_in_factor)
     
     if use_index_based:
         m_neighbors = int(k)
@@ -1806,34 +1944,75 @@ def connect_cone(
             nodes,
             n_neighbors=m_neighbors,
             weight_ex=w_ex,
-            weight_in=-abs(w_ex),
-            delay=1.0
+            weight_in=w_in,
+            delay=float(delay_ex),
+            syn_model=syn_model,
+            extra_syn_params=extra,
         )
-        print(f"Cone (Index-Based): Connected linear neighbors (Spiral).")
+        _vprint(f"Cone (Index-Based): Connected linear neighbors. model={model}, syn={syn_model}")
         
-    else:
-        
+    elif conn_rule == 'similarity':
         weights_flat = compute_angular_similarity_weights(
             local_points,
             weight_ex=w_ex,
-            weight_in=abs(w_ex * 2.0),
+            weight_in=abs(w_in),
             bidirectional=bidirectional
         )
         
-        delays_flat = np.ones_like(weights_flat) * 1.0
+        delays_flat = np.ones_like(weights_flat) * float(delay_ex)
         
         gids = np.array(nodes.get("global_id"))
         N = len(gids)
         sources = np.repeat(gids, N)
         targets = np.tile(gids, N)
         mask = sources != targets
+        srcs = sources[mask]
+        tgts = targets[mask]
+        ws = weights_flat[mask]
+        ds = delays_flat[mask]
         
-        nest.Connect(
-            sources[mask], targets[mask],
-            {'rule': 'one_to_one'},
-            {'synapse_model': 'static_synapse', 'weight': weights_flat[mask], 'delay': delays_flat[mask]}
-        )
-        print(f"Cone (Similarity): Connected based on angular alignment.")
+        is_plast = _is_plasticity_synapse(syn_model)
+        
+        if is_plast:
+            ex_idx = ws > 0
+            in_idx = ws < 0
+            if np.any(ex_idx):
+                ws_ex = ws[ex_idx]
+                max_w = float(np.max(np.abs(ws_ex))) if ws_ex.size else 1.0
+                ex_extras = _adjust_wmax_if_needed(extra, max_w, syn_model)
+                syn_spec_ex = {'synapse_model': syn_model,
+                               'weight': ws_ex,
+                               'delay': ds[ex_idx]}
+                for k_e, v_e in ex_extras.items():
+                    syn_spec_ex[k_e] = v_e
+                nest.Connect(srcs[ex_idx], tgts[ex_idx],
+                             {'rule': 'one_to_one'}, syn_spec_ex)
+            if np.any(in_idx):
+                nest.Connect(srcs[in_idx], tgts[in_idx],
+                             {'rule': 'one_to_one'},
+                             {'synapse_model': 'static_synapse',
+                              'weight': ws[in_idx],
+                              'delay': ds[in_idx]})
+                _vprint(f"  -> Cone inhibitory similarity: static_synapse fallback.")
+        else:
+            syn_spec = {'synapse_model': syn_model, 'weight': ws, 'delay': ds}
+            for k_e, v_e in extra.items():
+                syn_spec[k_e] = v_e
+            nest.Connect(srcs, tgts, {'rule': 'one_to_one'}, syn_spec)
+        
+        _vprint(f"Cone (Similarity): Connected. model={model}, syn={syn_model}")
+    else:
+        # Generische NEST connection rules
+        conn_spec = _build_conn_spec(conn_rule, conn_p, conn_indegree, conn_outdegree)
+        is_plast = _is_plasticity_synapse(syn_model)
+        gen_extras = _adjust_wmax_if_needed(extra, abs(float(w_ex)), syn_model) if is_plast else extra
+        syn_spec = {'synapse_model': syn_model,
+                    'weight': float(w_ex),
+                    'delay': float(delay_ex)}
+        for k_extra, v_extra in gen_extras.items():
+            syn_spec[k_extra] = v_extra
+        nest.Connect(nodes, nodes, conn_spec, syn_spec)
+        _vprint(f"Cone (Rule={conn_rule}): homogeneous weight={w_ex}. model={model}, syn={syn_model}")
 
     return nodes
 
@@ -1874,14 +2053,46 @@ def create_blob_population(
     positions,
     neuron_type="iaf_psc_alpha",
     neuron_params=None,
-    conn_ex={'rule': 'pairwise_bernoulli', 'p': 0.8, 'allow_autapses': False},
-    syn_ex={'synapse_model': 'static_synapse', 'weight': 2.0, 'delay': 1.0},
-    conn_in={'rule': 'pairwise_bernoulli', 'p': 0.2, 'allow_autapses': False},
-    syn_in={'synapse_model': 'static_synapse','weight': -10.0,'delay': 1.0},
+    
+    # Scalar convenience parameters - werden in dicts assembled
+    # falls kein eigenes conn/syn dict übergeben wurde.
+    p_ex=0.8,
+    p_in=0.2,
+    weight_ex=2.0,
+    weight_in=-10.0,
+    delay_ex=1.0,
+    delay_in=1.0,
+    syn_model_ex='static_synapse',
+    syn_model_in='static_synapse',
+    extra_syn_params_ex=None,  # dict mit synapse-spezifischen Params (Excitatory)
+    extra_syn_params_in=None,  # dict mit synapse-spezifischen Params (Inhibitory)
+    allow_autapses=False,
+    
+    # Legacy dict-Params: wenn übergeben, überschreiben sie die scalars.
+    conn_ex=None,
+    syn_ex=None,
+    conn_in=None,
+    syn_in=None,
     plot=False
     ):
     
     safe_params = neuron_params if neuron_params else {}
+    extra_ex = extra_syn_params_ex if extra_syn_params_ex else {}
+    extra_in = extra_syn_params_in if extra_syn_params_in else {}
+    
+    # Dicts aus scalars assemblen falls nicht explizit übergeben
+    if conn_ex is None:
+        conn_ex = {'rule': 'pairwise_bernoulli', 'p': float(p_ex), 'allow_autapses': bool(allow_autapses)}
+    if syn_ex is None:
+        syn_ex = {'synapse_model': syn_model_ex, 'weight': float(weight_ex), 'delay': float(delay_ex)}
+        for k_extra, v_extra in extra_ex.items():
+            syn_ex[k_extra] = v_extra
+    if conn_in is None:
+        conn_in = {'rule': 'pairwise_bernoulli', 'p': float(p_in), 'allow_autapses': bool(allow_autapses)}
+    if syn_in is None:
+        syn_in = {'synapse_model': syn_model_in, 'weight': float(weight_in), 'delay': float(delay_in)}
+        for k_extra, v_extra in extra_in.items():
+            syn_in[k_extra] = v_extra
     
     blob_pop = nest.Create(
         neuron_type,
@@ -2124,7 +2335,7 @@ def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_posit
     
     for i, cluster in enumerate(positions):
         if len(cluster) == 0:
-            print(f"  Pop {i}: Leer - übersprungen")
+            _vprint(f"  Pop {i}: empty - skipped")
             populations.append([])
             continue
         
@@ -2135,11 +2346,11 @@ def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_posit
             
             validated_params = filter_params_for_model(model, raw_params)
             
-            print(f"  Pop {i}: Erstelle {len(cluster)} × {model}")
-            print(f"    → {len(raw_params)} Parameter geliefert, {len(validated_params)} gültig")
+            _vprint(f"  Pop {i}: creating {len(cluster)} × {model}")
+            _vprint(f"    -> {len(raw_params)} params given, {len(validated_params)} valid")
         else:
             validated_params = {}
-            print(f"  Pop {i}: Erstelle {len(cluster)} × {model} mit NEST defaults")
+            _vprint(f"  Pop {i}: creating {len(cluster)} × {model} (NEST defaults)")
         
         try:
             if set_positions:
@@ -2155,27 +2366,27 @@ def clusters_to_neurons(positions, neuron_models, params_per_pop=None, set_posit
                     params=validated_params
                 )
                 
-                print(f"    ✓ {len(cluster)} spatial neurons erstellt")
+                _vprint(f"    OK {len(cluster)} spatial neurons created")
                 
                 try:
                     actual_pos = nest.GetPosition(pop)
                     # FIX: GetPosition returns (x,y,z) for single neuron, not [(x,y,z)]
                     n_actual = len(pop) if hasattr(pop, '__len__') else 1
                     if n_actual == len(cluster):
-                        print(f"    ✓ Positionen verifiziert ({n_actual} Neuronen)")
+                        _vprint(f"    OK positions verified ({n_actual} neurons)")
                     else:
                         print(f"  Position mismatch: {n_actual} vs {len(cluster)}")
                 except Exception as e:
                     print(f"  Position verification failed: {e}")
             else:
                 pop = nest.Create(model, len(cluster), params=validated_params)
-                print(f"    ✓ {len(cluster)} non-spatial neurons erstellt")
+                _vprint(f"    OK {len(cluster)} non-spatial neurons created")
             
             populations.append(pop)
             
         except Exception as e:
-            print(f"    ✗ FEHLER bei Pop {i} ({model}): {e}")
-            print(f"       Versuchte Parameter: {list(validated_params.keys())}")
+            print(f"    ERROR Pop {i} ({model}): {e}")
+            print(f"       Attempted params: {list(validated_params.keys())}")
             populations.append([])
     
     return populations
@@ -3003,7 +3214,7 @@ class Node:
         disp_factor = float(params.get('displacement_factor', 1.0))
         final_displacement_vector = raw_disp * disp_factor
         
-        print(f"   [Build] Node {self.id}: Local Flow Origin = {local_center_pos}, Global Shift = {final_displacement_vector}")
+        _vprint(f"   [Build] Node {self.id}: Local Flow Origin = {local_center_pos}, Global Shift = {final_displacement_vector}")
         
         rot_theta = float(params.get('rot_theta', 0.0))
         rot_phi = float(params.get('rot_phi', 0.0))
@@ -3065,9 +3276,16 @@ class Node:
 
         else: 
             types = params.get('types', [0])
+            shape_params_per_pop = params.get('shape_params_per_pop', None)
             generated_positions = []
             for i in range(len(types)):
-                raw_points = get_raw_shape_points(tool_type, params)
+                # Pro-Pop shape_params nutzen, sonst auf node-globale params zurückfallen
+                if shape_params_per_pop and i < len(shape_params_per_pop) and shape_params_per_pop[i]:
+                    pop_params = dict(params)  # base from node
+                    pop_params.update(shape_params_per_pop[i])  # override with pop-specific
+                else:
+                    pop_params = params
+                raw_points = get_raw_shape_points(tool_type, pop_params)
                 if len(raw_points) == 0:
                     generated_positions.append(np.array([]))
                     continue
@@ -3109,7 +3327,7 @@ class Node:
         self.parameters['old_center_of_mass'] = self.center_of_mass.tolist()
 
     def populate_node(self):
-        print(f"\nPopulating Node {self.id} ({self.name})...")
+        _vprint(f"\nPopulating Node {self.id} ({self.name})...")
         params = self.parameters
         tool_type = params.get('tool_type', 'custom')
         
@@ -3118,62 +3336,163 @@ class Node:
         if not pop_nest_params and hasattr(self, 'population_nest_params'):
             pop_nest_params = self.population_nest_params
         
+        # Per-pop shape params (tool geometry / weights / k)
+        shape_params_per_pop = params.get('shape_params_per_pop', None) or []
+        
         # Debug: Show what parameters we're using
         if pop_nest_params:
-            print(f"  Using custom NEST params for {len(pop_nest_params)} population(s):")
+            _vprint(f"  Using custom NEST params for {len(pop_nest_params)} population(s):")
             for idx, p in enumerate(pop_nest_params):
                 if p:
                     key_params = {k: p[k] for k in ['V_th', 'C_m', 't_ref', 'E_L'] if k in p}
-                    print(f"    Pop {idx}: {key_params}")
+                    _vprint(f"    Pop {idx}: {key_params}")
         else:
-            print(f"  Using NEST defaults (no custom params)")
+            _vprint(f"  Using NEST defaults (no custom params)")
         
-        neuron_params = pop_nest_params[0] if pop_nest_params else {}
+        if shape_params_per_pop:
+            _vprint(f"  Using per-pop shape params for {len(shape_params_per_pop)} population(s)")
+        
         current_models = params.get("neuron_models", ["iaf_psc_alpha"])
         
         created_pops = []
         
-        k_val = float(params.get('k', 10.0))
+        # Globale Defaults (Backward-Compat fallback wenn keine shape_params da sind)
+        global_n        = int(params.get('n_neurons', 100))
+        global_radius   = float(params.get('radius', 5.0))
+        global_rtop     = float(params.get('radius_top', 1.0))
+        global_rbot     = float(params.get('radius_bottom', 5.0))
+        global_height   = float(params.get('height', 10.0))
+        global_bidir    = bool(params.get('bidirectional', False))
+        global_w_ex     = float(params.get('ccw_weight_ex', 30.0))
+        global_d_ex     = float(params.get('ccw_delay_ex', 1.0))
+        global_w_in_f   = float(params.get('weight_in_factor', 1.0))
+        # Synapse-Config: dict {synapse_model, extra_params} - ersetzt das alte
+        # einfache 'ccw_syn_model'. Backward-Compat: wenn nur ccw_syn_model
+        # vorhanden, wandle zu config dict.
+        global_syn_cfg  = params.get('ccw_syn_config') or {
+            'synapse_model': params.get('ccw_syn_model', 'static_synapse'),
+            'extra_params': {}
+        }
+        global_k        = float(params.get('k', 10.0))
+        # Blob-Specific globals
+        global_p_ex     = float(params.get('blob_p_ex', 0.8))
+        global_p_in     = float(params.get('blob_p_in', 0.2))
+        global_blob_w_ex = float(params.get('blob_weight_ex', 2.0))
+        global_blob_w_in = float(params.get('blob_weight_in', -10.0))
+        global_blob_d_ex = float(params.get('blob_delay_ex', 1.0))
+        global_blob_d_in = float(params.get('blob_delay_in', 1.0))
+        global_blob_syn_ex_cfg = params.get('blob_syn_config_ex') or {
+            'synapse_model': params.get('blob_syn_model_ex', 'static_synapse'),
+            'extra_params': {}
+        }
+        global_blob_syn_in_cfg = params.get('blob_syn_config_in') or {
+            'synapse_model': params.get('blob_syn_model_in', 'static_synapse'),
+            'extra_params': {}
+        }
+        global_blob_autapses = bool(params.get('blob_allow_autapses', False))
         use_index = params.get('old', False)
 
         center_pos = self.center_of_mass 
+        
+        def _shape_for(i):
+            """Shape-Params für Pop i: pop-spezifisch wenn vorhanden, sonst Node-Globals."""
+            if i < len(shape_params_per_pop) and shape_params_per_pop[i]:
+                return shape_params_per_pop[i]
+            return {}
+        
+        def _syn_cfg_from_shape(sp, key, fallback_cfg):
+            """Holt die Synapsen-Config (dict mit synapse_model + extra_params)
+            aus shape_params. Backward-Compat: wenn alte syn_model-key vorhanden,
+            wandelt sie in das neue dict-Format."""
+            if key in sp and isinstance(sp[key], dict):
+                return sp[key]
+            # Backward-compat fallback: alter ccw_syn_model -> dict bauen
+            old_key_map = {
+                'ccw_syn_config': 'ccw_syn_model',
+                'blob_syn_config_ex': 'blob_syn_model_ex',
+                'blob_syn_config_in': 'blob_syn_model_in',
+            }
+            old_k = old_key_map.get(key)
+            if old_k and old_k in sp:
+                return {'synapse_model': sp[old_k], 'extra_params': {}}
+            return fallback_cfg
+        
+        def _neuron_params_for(i, model):
+            """Validated NEST params for pop i (filter to model's accepted keys).
+            Prevents foreign-model values from leaking through and crashing NEST."""
+            if i < len(pop_nest_params) and pop_nest_params[i]:
+                raw = pop_nest_params[i].copy()
+                validated = filter_params_for_model(model, raw)
+                if len(raw) != len(validated):
+                    _vprint(f"    Pop {i}: {len(raw)} params given, {len(validated)} valid for {model}")
+                else:
+                    _vprint(f"    Pop {i}: {len(validated)} params validated for {model}")
+                return validated
+            return {}
         
         try:
             if tool_type == 'CCW':
                 for i, _ in enumerate(self.positions):
                     mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-
+                    sp = _shape_for(i)
+                    np_i = _neuron_params_for(i, mod)
+                    syn_cfg = _syn_cfg_from_shape(sp, 'ccw_syn_config', global_syn_cfg)
+                    syn_model = syn_cfg.get('synapse_model', 'static_synapse')
+                    syn_extra = syn_cfg.get('extra_params', {}) or {}
+                    _vprint(f"    CCW Pop {i}: model={mod}, syn={syn_model}, extra_syn_params={syn_extra}")
                     
                     pop = create_CCW(
-                        model=mod, neuron_params=neuron_params,
-                        weight_ex=float(params.get('ccw_weight_ex', 30.0)),
-                        delay_ex=float(params.get('ccw_delay_ex', 1.0)),
-                        k=k_val,
-                        n_neurons=int(params.get('n_neurons', 100)),
-                        radius=float(params.get('radius', 5.0)),
-                        center=center_pos, # Nutzt das verschobene Zentrum
+                        model=mod, neuron_params=np_i,
+                        syn_model=syn_model,
+                        extra_syn_params=syn_extra,
+                        weight_ex=float(sp.get('ccw_weight_ex', global_w_ex)),
+                        delay_ex=float(sp.get('ccw_delay_ex', global_d_ex)),
+                        weight_in_factor=float(sp.get('weight_in_factor', global_w_in_f)),
+                        k=float(sp.get('k', global_k)),
+                        n_neurons=int(sp.get('n_neurons', global_n)),
+                        radius=float(sp.get('radius', global_radius)),
+                        center=center_pos,  # Nutzt das verschobene Zentrum
                         rot_theta=float(params.get('rot_theta', 0.0)),
                         rot_phi=float(params.get('rot_phi', 0.0)),
-                        bidirectional=bool(params.get('bidirectional', False)),
-                        use_index_based=use_index
+                        bidirectional=bool(sp.get('bidirectional', global_bidir)),
+                        use_index_based=use_index,
+                        conn_rule=str(sp.get('conn_rule', params.get('conn_rule', 'similarity'))),
+                        conn_p=float(sp.get('conn_p', params.get('conn_p', 1.0))),
+                        conn_indegree=int(sp.get('conn_indegree', params.get('conn_indegree', 10))),
+                        conn_outdegree=int(sp.get('conn_outdegree', params.get('conn_outdegree', 10))),
                     )
                     created_pops.append(pop)
             elif tool_type == 'Cone':
                 for i, _ in enumerate(self.positions):
                     mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
+                    sp = _shape_for(i)
+                    np_i = _neuron_params_for(i, mod)
+                    syn_cfg = _syn_cfg_from_shape(sp, 'ccw_syn_config', global_syn_cfg)
+                    syn_model = syn_cfg.get('synapse_model', 'static_synapse')
+                    syn_extra = syn_cfg.get('extra_params', {}) or {}
+                    _vprint(f"    Cone Pop {i}: model={mod}, syn={syn_model}, extra_syn_params={syn_extra}")
+                    
                     pop = connect_cone(
-                        model=mod, neuron_params=neuron_params,
-                        weight_ex=float(params.get('ccw_weight_ex', 30.0)),
-                        k=k_val,
-                        n_neurons=int(params.get('n_neurons', 100)),
-                        radius_top=float(params.get('radius_top', 1.0)),
-                        radius_bottom=float(params.get('radius_bottom', 5.0)),
-                        height=float(params.get('height', 10.0)),
-                        center=center_pos, # Nutzt das verschobene Zentrum
+                        model=mod, neuron_params=np_i,
+                        syn_model=syn_model,
+                        extra_syn_params=syn_extra,
+                        weight_ex=float(sp.get('ccw_weight_ex', global_w_ex)),
+                        delay_ex=float(sp.get('ccw_delay_ex', global_d_ex)),
+                        weight_in_factor=float(sp.get('weight_in_factor', global_w_in_f)),
+                        k=float(sp.get('k', global_k)),
+                        n_neurons=int(sp.get('n_neurons', global_n)),
+                        radius_top=float(sp.get('radius_top', global_rtop)),
+                        radius_bottom=float(sp.get('radius_bottom', global_rbot)),
+                        height=float(sp.get('height', global_height)),
+                        center=center_pos,  # Nutzt das verschobene Zentrum
                         rot_theta=float(params.get('rot_theta', 0.0)),
                         rot_phi=float(params.get('rot_phi', 0.0)),
-                        bidirectional=bool(params.get('bidirectional', False)),
-                        use_index_based=use_index
+                        bidirectional=bool(sp.get('bidirectional', global_bidir)),
+                        use_index_based=use_index,
+                        conn_rule=str(sp.get('conn_rule', params.get('conn_rule', 'similarity'))),
+                        conn_p=float(sp.get('conn_p', params.get('conn_p', 1.0))),
+                        conn_indegree=int(sp.get('conn_indegree', params.get('conn_indegree', 10))),
+                        conn_outdegree=int(sp.get('conn_outdegree', params.get('conn_outdegree', 10))),
                     )
                     created_pops.append(pop)
             elif tool_type == 'Blob':
@@ -3183,7 +3502,30 @@ class Node:
                 # create_blob_population nimmt positions argument.
                 for i, pos_cluster in enumerate(self.positions):
                     mod = current_models[i] if i < len(current_models) else "iaf_psc_alpha"
-                    pop = create_blob_population(pos_cluster, neuron_type=mod, neuron_params=neuron_params)
+                    np_i = _neuron_params_for(i, mod)
+                    sp = _shape_for(i)
+                    syn_cfg_ex = _syn_cfg_from_shape(sp, 'blob_syn_config_ex', global_blob_syn_ex_cfg)
+                    syn_cfg_in = _syn_cfg_from_shape(sp, 'blob_syn_config_in', global_blob_syn_in_cfg)
+                    syn_model_ex = syn_cfg_ex.get('synapse_model', 'static_synapse')
+                    syn_model_in = syn_cfg_in.get('synapse_model', 'static_synapse')
+                    syn_extra_ex = syn_cfg_ex.get('extra_params', {}) or {}
+                    syn_extra_in = syn_cfg_in.get('extra_params', {}) or {}
+                    _vprint(f"    Blob Pop {i}: model={mod}, syn_ex={syn_model_ex}, syn_in={syn_model_in}")
+                    
+                    pop = create_blob_population(
+                        pos_cluster, neuron_type=mod, neuron_params=np_i,
+                        p_ex=float(sp.get('blob_p_ex', global_p_ex)),
+                        p_in=float(sp.get('blob_p_in', global_p_in)),
+                        weight_ex=float(sp.get('blob_weight_ex', global_blob_w_ex)),
+                        weight_in=float(sp.get('blob_weight_in', global_blob_w_in)),
+                        delay_ex=float(sp.get('blob_delay_ex', global_blob_d_ex)),
+                        delay_in=float(sp.get('blob_delay_in', global_blob_d_in)),
+                        syn_model_ex=syn_model_ex,
+                        syn_model_in=syn_model_in,
+                        extra_syn_params_ex=syn_extra_ex,
+                        extra_syn_params_in=syn_extra_in,
+                        allow_autapses=bool(sp.get('blob_allow_autapses', global_blob_autapses)),
+                    )
                     created_pops.append(pop)
             else:
                 # Custom / WFC / Grid
@@ -3258,18 +3600,62 @@ class Node:
             if self in other.prev: other.prev.remove(self)
 
     def remove(self):
-        for p in self.prev:
-            if self in p.next: p.next.remove(self)
-        for n in self.next:
-            if self in n.prev: n.prev.remove(self)
-        self.prev=[]; self.next=[]
+        """
+        Cleans up all references to this node BEFORE it is removed from
+        the graph.
+        
+        Strategy:
+        1. For each predecessor in self.prev: remove from its `connections`
+           list (and the `parameters['connections']` mirror) exactly the
+           entries whose target points at (self.graph_id, self.id). All
+           other connections — including ones from the same predecessor
+           to OTHER nodes — stay untouched.
+        2. Remove self from prev.next and next.prev (topology backrefs).
+        3. Clear own connections so any lingering reference doesn't see
+           stale data.
+        """
+        my_gid = self.graph_id
+        my_nid = self.id
+        
+        def _is_pointing_at_me(conn):
+            tgt = conn.get('target', {}) or {}
+            return (tgt.get('graph_id') == my_gid and tgt.get('node_id') == my_nid)
+        
+        # 1. Predecessors: clean their connections lists
+        for p in list(self.prev):
+            if p is None or p is self:
+                continue
+            if hasattr(p, 'connections') and p.connections:
+                p.connections = [c for c in p.connections if not _is_pointing_at_me(c)]
+            if hasattr(p, 'parameters') and isinstance(p.parameters, dict):
+                if 'connections' in p.parameters and p.parameters['connections']:
+                    p.parameters['connections'] = [
+                        c for c in p.parameters['connections']
+                        if not _is_pointing_at_me(c)
+                    ]
+            while self in p.next:
+                p.next.remove(self)
+        
+        # 2. Successors: only drop the backref (our own connections leave with us)
+        for n in list(self.next):
+            if n is None or n is self:
+                continue
+            while self in n.prev:
+                n.prev.remove(self)
+        
+        # 3. Clear own state
+        self.prev = []
+        self.next = []
+        self.connections = []
+        if hasattr(self, 'parameters') and isinstance(self.parameters, dict):
+            self.parameters['connections'] = []
         
     def instantiate_devices(self):
         if not hasattr(self, 'devices') or not self.devices:
             if 'devices' in self.parameters: self.devices = self.parameters['devices']
             else: return
             
-        print(f" Instantiating {len(self.devices)} devices for Node {self.id}")
+        _vprint(f" Instantiating {len(self.devices)} devices for Node {self.id}")
         for dev_conf in self.devices:
             try:
                 model = dev_conf['model']
@@ -3816,15 +4202,34 @@ class Graph:
             node.remove()
             self.node_list.remove(node)
             
-            if node.name in self.node_dict:
-                del self.node_dict[node.name]
-            if str(node.id) in self.node_dict:
-                del self.node_dict[str(node.id)]
+            # node_dict gets entries under BOTH node.name (str) and node.id
+            # (int) at create-time, plus older code paths sometimes used
+            # str(node.id). Drop every key whose value points at this node
+            # so a stale lookup can't resurrect it.
+            stale_keys = [k for k, v in self.node_dict.items() if v is node]
+            for k in stale_keys:
+                del self.node_dict[k]
             
             self.nodes -= 1
             print(f"Node {node.id} ({node.name}) deleted")
         else:
             print(f"No node with id {node.id} found")
+    
+    def dispose(self):
+        """
+        Removes every node of this graph one by one, so each node can clean
+        up its incoming Cross-Graph-Connections from external predecessors.
+        After this returns the graph is empty and can be discarded safely.
+        """
+        for node in list(self.node_list):
+            try:
+                self.remove_node(node)
+            except Exception as e:
+                print(f"dispose: error removing node {getattr(node, 'id', '?')}: {e}")
+        self.node_list = []
+        self.node_dict = {}
+        self.nodes = 0
+        self.root = None
     
     def connect_nodes(self, from_node, to_node):
         from_node.add_edge_to(to_node)

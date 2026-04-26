@@ -2,10 +2,20 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSlider, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
-    QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator,QInputDialog
+    QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator,QInputDialog,
+    QFrame
 )
 from ExtraTab import ExtraTabWidget
 import WidgetLib
+# OtherTab is a user-editable sandbox in OtherTab.py. If the file is
+# missing or has an error, fall back to a tiny placeholder so the app
+# still starts.
+try:
+    from OtherTab import OtherTabWidget
+    _OTHER_TAB_OK = True
+except Exception as _other_err:
+    print(f"OtherTab.py not loadable ({_other_err}); using placeholder.")
+    _OTHER_TAB_OK = False
 import pyqtgraph.dockarea as dock
 from PyQt6.QtGui import QColor, QPalette, QAction
 from PyQt6.QtCore import Qt,QSize
@@ -16,6 +26,14 @@ from CustomExtension import CustomTabWidget
 import vtk
 import pyvista as pv
 from pyvistaqt import QtInteractor
+
+# Retina-Test-Tab (optional - fails gracefully if retina modules missing)
+try:
+    from RetinaTestTab import RetinaTestTabWidget
+    HAS_RETINA_TEST_TAB = True
+except Exception as _retina_tab_err:
+    HAS_RETINA_TEST_TAB = False
+    print(f"[Main] RetinaTestTab nicht geladen: {_retina_tab_err}")
 from neuron_toolbox import *
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from WidgetLib import *
@@ -665,7 +683,15 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             
             print("\nManual NEST Reset...")
-            
+
+            # RetinaTestTab informieren dass seine NodeCollections jetzt tot sind
+            # (und den virtual_graph aus graph_list entfernen BEVOR repopulate laeuft).
+            if hasattr(self, 'retina_test_tab') and self.retina_test_tab is not None:
+                try:
+                    self.retina_test_tab.on_nest_kernel_reset()
+                except Exception as _e:
+                    print(f"retina_test_tab.on_nest_kernel_reset error: {_e}")
+
             # Invalidate stale NodeCollection refs before ResetKernel
             if hasattr(self, 'sim_timer'):
                 self.sim_timer.stop()
@@ -793,7 +819,8 @@ class MainWindow(QMainWindow):
         self.btn_view_data = QPushButton("LIVE PLOTS")
         self.btn_view_custom = QPushButton("HISTORY")
         self.btn_view_extra = QPushButton("FUSION TOOL") 
-        for btn in [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom, self.btn_view_extra]: 
+        self.btn_view_eye = QPushButton("EYE")
+        for btn in [self.btn_view_editor, self.btn_view_simulation, self.btn_view_data, self.btn_view_custom, self.btn_view_extra, self.btn_view_eye]: 
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(self.view_switch_style_inactive)
 
@@ -802,13 +829,15 @@ class MainWindow(QMainWindow):
         self.btn_view_data.clicked.connect(lambda: self._switch_main_view(2))
         self.btn_view_custom.clicked.connect(lambda: self._switch_main_view(3))
         self.btn_view_extra.clicked.connect(lambda: self._switch_main_view(4))
+        self.btn_view_eye.clicked.connect(lambda: self._switch_main_view(5))
         
         self.view_buttons = [
             self.btn_view_editor, 
             self.btn_view_simulation, 
             self.btn_view_data, 
             self.btn_view_custom,
-            self.btn_view_extra
+            self.btn_view_extra,
+            self.btn_view_eye,
         ]
         
         switch_layout.addWidget(self.btn_view_editor)
@@ -816,6 +845,7 @@ class MainWindow(QMainWindow):
         switch_layout.addWidget(self.btn_view_data)
         switch_layout.addWidget(self.btn_view_custom)
         switch_layout.addWidget(self.btn_view_extra) 
+        switch_layout.addWidget(self.btn_view_eye)
 
         self.global_sim_control = QWidget()
         self.global_sim_control.setStyleSheet("background-color: transparent;")
@@ -837,8 +867,8 @@ class MainWindow(QMainWindow):
         self.global_step_spin.setRange(0.1, 1000); self.global_step_spin.setValue(25.0); self.global_step_spin.setSuffix(" ms")
         self.global_step_spin.setFixedWidth(70); self.global_step_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
         
-        self.global_time_label = QLabel("T: 0.0 ms")
-        self.global_time_label.setFixedWidth(100)
+        self.global_time_label = QLabel("0.0 ms")
+        self.global_time_label.setFixedWidth(180)
         self.global_time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.global_time_label.setStyleSheet("background-color: #000; color: #00FF00; font-family: Consolas; font-size: 14px; font-weight: bold; border: 1px solid #444; padding: 2px;")
         
@@ -880,6 +910,21 @@ class MainWindow(QMainWindow):
         self.main_stack.addWidget(self.live_dashboard)  # Index 2
         self.main_stack.addWidget(self.custom_tab)      # Index 3
         self.main_stack.addWidget(self.extra_tab)       # Index 4 
+
+        # Index 5: Retina-Test-Tab (falls ladbar)
+        if HAS_RETINA_TEST_TAB:
+            self.retina_test_tab = RetinaTestTabWidget(graph_list, main_window=self)
+            self.retina_test_tab.requestVizRefresh.connect(self._on_retina_viz_refresh)
+            self.retina_test_tab.retinaBuilt.connect(self._on_retina_viz_refresh)
+            self.retina_test_tab.retinaDestroyed.connect(self._on_retina_viz_refresh)
+            self.main_stack.addWidget(self.retina_test_tab)
+        else:
+            self.retina_test_tab = None
+            # Placeholder falls RetinaTestTab nicht geladen werden konnte
+            _placeholder = QLabel("EYE tab unavailable - retina_main.py not found in PYTHONPATH")
+            _placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _placeholder.setStyleSheet("color: #888; font-size: 16px;")
+            self.main_stack.addWidget(_placeholder)
         
         main_layout.addWidget(self.main_stack)
 
@@ -939,6 +984,9 @@ class MainWindow(QMainWindow):
             total_measurements = 0
 
             for graph in graph_list:
+                # Skip virtuelle Graphen (RetinaTestTab) im History-Export
+                if getattr(graph, 'is_virtual', False):
+                    continue
                 g_data = {
                     'graph_id': graph.graph_id,
                     'graph_name': getattr(graph, 'graph_name', f'Graph_{graph.graph_id}'),
@@ -1058,6 +1106,13 @@ class MainWindow(QMainWindow):
         if index == 4:
             if hasattr(self, 'extra_tab'):
                 self.extra_tab.on_tab_active()
+
+        if index == 5:
+            if hasattr(self, 'retina_test_tab') and self.retina_test_tab is not None:
+                try:
+                    self.retina_test_tab.on_tab_activated()
+                except Exception as e:
+                    print(f"retina_test_tab.on_tab_activated error: {e}")
 
 
     def _create_editor_widget(self):
@@ -1199,12 +1254,16 @@ class MainWindow(QMainWindow):
         self.vis_stack = QStackedWidget()
         
         self.neuron_plotter = self.create_neuron_visualization()
-        self.graph_plotter = self.create_graph_visualization()
+        # create_graph_visualization() sets self.graph_plotter (the
+        # QtInteractor) internally and returns the wrapper widget that
+        # contains the header + plotter + detail panel. We store the
+        # wrapper separately so we don't overwrite self.graph_plotter.
+        self.graph_skeleton_wrapper = self.create_graph_visualization()
         self.blink_widget = BlinkingNetworkWidget(graph_list)
         self.flow_widget = FlowFieldWidget(graph_list)
         
         self.vis_stack.addWidget(self.neuron_plotter)
-        self.vis_stack.addWidget(self.graph_plotter)
+        self.vis_stack.addWidget(self.graph_skeleton_wrapper)
         self.vis_stack.addWidget(self.blink_widget)
         self.vis_stack.addWidget(self.flow_widget)
         self.sim_dashboard = SimulationDashboardWidget(graph_list)
@@ -1214,7 +1273,18 @@ class MainWindow(QMainWindow):
         self.sim_dashboard.requestResetKernel.connect(self.manual_nest_reset)
         
         self.vis_stack.addWidget(self.sim_dashboard)
-        self.vis_stack.addWidget(Color("darkorange"))
+        if _OTHER_TAB_OK:
+            self.other_tab = OtherTabWidget(graph_list=graph_list)
+        else:
+            self.other_tab = QLabel(
+                "OtherTab.py konnte nicht geladen werden — "
+                "siehe Konsole für Details."
+            )
+            self.other_tab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.other_tab.setStyleSheet(
+                "background: #2a1a1a; color: #ff8888; font-size: 14px;"
+            )
+        self.vis_stack.addWidget(self.other_tab)
         
         self.nav_buttons = [btn_neurons, btn_graph, btn_sim, btn_flow, btn_simulation, btn_other]
         
@@ -1256,7 +1326,7 @@ class MainWindow(QMainWindow):
         self._ensure_spike_recorders()
         
         try:
-            kernel_time = nest.GetKernelStatus().get('time', 0.0)
+            kernel_time = self._get_nest_time()
             self.headless_target_time = kernel_time + duration
             self.headless_start_time = kernel_time
         except: 
@@ -1277,7 +1347,7 @@ class MainWindow(QMainWindow):
 
     def headless_loop_step(self):
         try:
-            current_time = nest.GetKernelStatus().get('time', 0.0)
+            current_time = self._get_nest_time()
             
             remaining = self.headless_target_time - current_time
             
@@ -1287,7 +1357,7 @@ class MainWindow(QMainWindow):
 
             step_to_take = min(self.headless_step_size, remaining)
 
-            nest.Simulate(step_to_take)
+            self._simulate_step_and_update(step_to_take)
 
             total_duration = self.headless_target_time - self.headless_start_time
             if total_duration > 0:
@@ -1317,7 +1387,7 @@ class MainWindow(QMainWindow):
     def finish_headless_simulation(self):
         self.headless_timer.stop()
         
-        final_time = nest.GetKernelStatus().get('time', 0.0)
+        final_time = self._get_nest_time()
         self.update_global_time_display(final_time)
         
         print(f">>> Headless Simulation Finished at {final_time:.1f} ms.")
@@ -1390,6 +1460,29 @@ class MainWindow(QMainWindow):
         if index == 4:
             self.sim_dashboard.refresh_data()
 
+    def _on_retina_viz_refresh(self):
+        """Triggert Redraw der Live-Viz nach Retina-Build oder Frame-Tick.
+
+        Die BlinkingNetworkWidget aktualisiert sich selbst via Timer, aber bei
+        strukturellen Aenderungen (Retina neu gebaut / zerstoert) muss build_scene()
+        erneut laufen, damit die virtual_graph-Nodes mitgerendert werden.
+        """
+        try:
+            if hasattr(self, 'blink_widget') and self.blink_widget is not None:
+                # Nur bei strukturellen Aenderungen rebuild - nicht bei jedem Frame-Tick
+                # Der Caller (retinaBuilt/Destroyed) signalisiert das.
+                if self.sender() is not None and self.sender().__class__.__name__ == 'RetinaTestTabWidget':
+                    # Signal name checken via sender()... einfacher: immer rebuild
+                    pass
+                self.blink_widget.build_scene()
+            # Neuron- und Graph-Plotter ebenfalls aktualisieren wenn gerade sichtbar
+            if self.vis_stack.currentIndex() == 0:
+                self.plot_neuron_points()
+            elif self.vis_stack.currentIndex() == 1:
+                self.plot_graph_skeleton()
+        except Exception as e:
+            print(f"viz refresh error: {e}")
+
     def create_neuron_visualization(self):
         plotter = QtInteractor(self)
         plotter.set_background('black')
@@ -1402,10 +1495,99 @@ class MainWindow(QMainWindow):
             self.blink_widget.set_base_opacity(opacity)
 
     def create_graph_visualization(self):
-        plotter = QtInteractor(self)
-        plotter.set_background('black')
-        plotter.add_axes()
-        return plotter
+        """Returns a wrapper widget: graph plotter with a top header bar
+        (label-toggle) and an overlay detail-panel. The actual plotter
+        sits at self.graph_plotter; helpers below access it directly."""
+        wrapper = QWidget()
+        v = QVBoxLayout(wrapper)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # Header bar with the label-toggle
+        header = QWidget()
+        header.setStyleSheet("background: #1a1a1a; border-bottom: 1px solid #444;")
+        header.setFixedHeight(34)
+        h = QHBoxLayout(header)
+        h.setContentsMargins(8, 4, 8, 4)
+        h.setSpacing(8)
+
+        title = QLabel("Graph Skeleton")
+        title.setStyleSheet("color: #FFD700; font-weight: bold;")
+        h.addWidget(title)
+        h.addStretch()
+
+        self.graph_label_toggle = QPushButton("Labels: OFF")
+        self.graph_label_toggle.setCheckable(True)
+        self.graph_label_toggle.setChecked(False)
+        self.graph_label_toggle.setFixedWidth(110)
+        self.graph_label_toggle.setStyleSheet("""
+            QPushButton { background: #333; color: #ccc; border: 1px solid #555;
+                          border-radius: 3px; padding: 3px 8px; font-size: 11px; }
+            QPushButton:checked { background: #2E7D32; color: white;
+                                  border: 1px solid #4CAF50; }
+        """)
+        self.graph_label_toggle.toggled.connect(self._on_graph_labels_toggled)
+        h.addWidget(self.graph_label_toggle)
+
+        v.addWidget(header)
+
+        # The actual PyVista plotter
+        self.graph_plotter = QtInteractor(wrapper)
+        self.graph_plotter.set_background('black')
+        self.graph_plotter.add_axes()
+        v.addWidget(self.graph_plotter, 1)
+
+        # Floating detail panel — sits on top of the plotter, hidden until
+        # a node/connection is clicked. Click-outside closes it.
+        self.graph_detail_panel = QFrame(wrapper)
+        self.graph_detail_panel.setStyleSheet("""
+            QFrame {
+                background: rgba(20, 20, 20, 235);
+                border: 2px solid #FFD700;
+                border-radius: 6px;
+            }
+            QLabel { color: #eee; }
+        """)
+        self.graph_detail_panel.setMinimumWidth(320)
+        self.graph_detail_panel.setMaximumWidth(420)
+        dp_layout = QVBoxLayout(self.graph_detail_panel)
+        dp_layout.setContentsMargins(12, 10, 12, 10)
+        dp_layout.setSpacing(6)
+
+        dp_header = QHBoxLayout()
+        self.graph_detail_title = QLabel("Details")
+        self.graph_detail_title.setStyleSheet(
+            "font-weight: bold; font-size: 13px; color: #FFD700;"
+        )
+        dp_header.addWidget(self.graph_detail_title)
+        dp_header.addStretch()
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(22, 22)
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #ccc; "
+            "border: none; font-size: 16px; font-weight: bold; } "
+            "QPushButton:hover { color: #FF3333; }"
+        )
+        close_btn.clicked.connect(self._hide_graph_detail_panel)
+        dp_header.addWidget(close_btn)
+        dp_layout.addLayout(dp_header)
+
+        self.graph_detail_text = QLabel("")
+        self.graph_detail_text.setWordWrap(True)
+        self.graph_detail_text.setTextFormat(Qt.TextFormat.RichText)
+        self.graph_detail_text.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px; color: #ddd;"
+        )
+        self.graph_detail_text.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        dp_layout.addWidget(self.graph_detail_text)
+
+        self.graph_detail_panel.hide()
+        # Make wrapper own the panel so we can position it absolutely later
+        self._graph_skeleton_wrapper = wrapper
+
+        return wrapper
     def on_graph_updated(self, graph_id):
         if graph_id == -1:
             self.status_bar.set_status("Graph deleted, refreshing...", color="#1976D2")
@@ -1837,6 +2019,9 @@ class MainWindow(QMainWindow):
                 }
 
                 for graph in graph_list:
+                    # Skip virtuelle Graphen (z.B. RetinaTestTab): nicht exportieren
+                    if getattr(graph, 'is_virtual', False):
+                        continue
                     nodes_data = []
                     for node in graph.node_list:
                         
@@ -1939,7 +2124,16 @@ class MainWindow(QMainWindow):
                     
                     if hasattr(node, 'parameters') and 'devices' in node.parameters:
                         node.parameters['devices'] = [d for d in node.parameters['devices'] if str(d.get('id')) != str(dev_id)]
-            
+
+            # FIX: Auch den Editor-State aktualisieren, sonst kommt das Device beim naechsten
+            # save_changes zurueck (_build_node_params bevorzugt raw_params)
+            if hasattr(self, 'graph_editor') and self.graph_editor.current_graph_id == gid:
+                for nd in self.graph_editor.node_list:
+                    if nd['params'].get('id') == nid:
+                        devs = nd['params'].get('devices', [])
+                        nd['params']['devices'] = [d for d in devs if str(d.get('id')) != str(dev_id)]
+                        break
+
             self.manual_nest_reset()
             
             self.graph_overview.update_tree()
@@ -2109,6 +2303,7 @@ class MainWindow(QMainWindow):
         self.graph_plotter.clear()
         
         self.skeleton_info_map = {}
+        self.skeleton_label_actors = []  # actors that toggle with the label button
         self.highlighted_actor = None
         self.original_color = None
         self.original_opacity = None
@@ -2132,12 +2327,44 @@ class MainWindow(QMainWindow):
         import random
         import matplotlib.pyplot as plt
 
+        labels_visible = (
+            self.graph_label_toggle.isChecked()
+            if hasattr(self, 'graph_label_toggle') else False
+        )
+
         for graph in graph_list:
             if graph.graph_id in self.hidden_graphs: continue
 
             cmap = plt.get_cmap("tab20")
             rgba = cmap(graph.graph_id % 20)
             graph_node_color = rgba[:3] 
+
+            # Optional: graph-name label, placed above the highest node of
+            # the graph. Only added when label-toggle is on.
+            if labels_visible and graph.node_list:
+                node_centers = np.array([
+                    nd.center_of_mass for nd in graph.node_list
+                    if (graph.graph_id, nd.id) not in self.hidden_nodes
+                ])
+                if len(node_centers) > 0:
+                    top_pt = node_centers.mean(axis=0).copy()
+                    top_pt[2] = node_centers[:, 2].max() + 1.6
+                    g_name = getattr(graph, 'graph_name', f'Graph_{graph.graph_id}')
+                    try:
+                        actor = self.graph_plotter.add_point_labels(
+                            np.array([top_pt]),
+                            [g_name],
+                            font_size=14,
+                            text_color="#FFD700",
+                            point_color=None, point_size=0,
+                            shape=None, shape_opacity=0.0,
+                            show_points=False, always_visible=True,
+                            pickable=False,
+                            name=f"glabel_g{graph.graph_id}"
+                        )
+                        self.skeleton_label_actors.append(actor)
+                    except Exception:
+                        pass
             
             for node in graph.node_list:
                 if (graph.graph_id, node.id) in self.hidden_nodes: continue
@@ -2156,100 +2383,95 @@ class MainWindow(QMainWindow):
                 n_pops = len(node.population) if hasattr(node, 'population') and node.population else 0
                 dev_count = len(node.devices) if hasattr(node, 'devices') else 0
                 if not dev_count and 'devices' in node.parameters: dev_count = len(node.parameters['devices'])
-                
+
+                # Sum neuron count from populations (also if some are None)
+                total_neurons = 0
+                if hasattr(node, 'population') and node.population:
+                    for pop in node.population:
+                        if pop is not None:
+                            try:
+                                total_neurons += len(pop)
+                            except (TypeError, AttributeError):
+                                pass
+
                 info_text = (f"NODE: {node.name}\n"
                              f"ID: {node.id} (Graph {graph.graph_id})\n"
                              f"Populations: {n_pops}\n"
+                             f"Neurons: {total_neurons}\n"
                              f"Devices: {dev_count}\n"
                              f"Pos: {center.round(2)}")
-                self.skeleton_info_map[node_actor] = info_text
-                
+                # Build a richer info dict for click-panel + plain text for hover
+                self.skeleton_info_map[node_actor] = {
+                    'kind': 'node',
+                    'short': info_text,
+                    'detail_html': self._format_node_detail_html(
+                        graph, node, n_pops, total_neurons, dev_count, center
+                    ),
+                    'title': f"Node: {node.name}",
+                }
+
+                # Permanent label only when toggle is on. When off, no label
+                # actor is created at all (cleaner than visibility hacks).
+                if labels_visible:
+                    label_text = f"{node.name}\n({total_neurons}n)"
+                    label_pos = center + np.array([0.0, 0.0, 0.85])
+                    try:
+                        lbl_actor = self.graph_plotter.add_point_labels(
+                            np.array([label_pos]), [label_text],
+                            font_size=11,
+                            text_color="white",
+                            point_color=None,
+                            point_size=0,
+                            shape=None,
+                            shape_opacity=0.0,
+                            show_points=False,
+                            always_visible=True,
+                            pickable=False,
+                            name=f"label_g{graph.graph_id}_n{node.id}"
+                        )
+                        self.skeleton_label_actors.append(lbl_actor)
+                    except Exception:
+                        try:
+                            lbl_actor = self.graph_plotter.add_point_labels(
+                                np.array([label_pos]), [label_text],
+                                font_size=11, text_color="white",
+                                show_points=False, always_visible=True
+                            )
+                            self.skeleton_label_actors.append(lbl_actor)
+                        except Exception:
+                            pass
+
                 if dev_count > 0:
                     aura = pv.Sphere(radius=0.9, center=center)
                     self.graph_plotter.add_mesh(aura, color="#FFD700", opacity=0.15, pickable=False)
 
                 if hasattr(node, 'connections') and node.connections:
+                    # Group connections by (target_graph, target_node) so we
+                    # can fan multiple connections out across distinct
+                    # control-points instead of overlapping a single spline.
+                    pair_buckets = {}
                     for conn in node.connections:
-                        try:
-                            target = conn.get('target', {})
-                            tgt_gid = int(target.get('graph_id'))
-                            tgt_nid = int(target.get('node_id'))
-                            
-                            if (tgt_gid, tgt_nid) not in node_map: continue
-                            if tgt_gid in self.hidden_graphs: continue
-                            if (tgt_gid, tgt_nid) in self.hidden_nodes: continue
-                            
-                            target_node = node_map[(tgt_gid, tgt_nid)]
-                            
-                            params = conn.get('params', {})
-                            weight = float(params.get('weight', 1.0))
-                            conn_name = conn.get('name', 'Connection')
-                            
-                            if weight > 0:
-                                edge_color = "#FF3333" 
-                                conn_type = "Excitatory (+)"
-                            elif weight < 0:
-                                edge_color = "#3366FF" 
-                                conn_type = "Inhibitory (-)"
-                            else:
-                                edge_color = "#888888" 
-                                conn_type = "Silent (0)"
+                        tgt_id = (
+                            int(conn.get('target', {}).get('graph_id', -1)),
+                            int(conn.get('target', {}).get('node_id', -1)),
+                        )
+                        pair_buckets.setdefault(tgt_id, []).append(conn)
 
-                            start = np.array(node.center_of_mass)
-                            end = np.array(target_node.center_of_mass)
-                            
-                            conn_info_text = (f"CONNECTION: {conn_name}\n"
-                                              f"Type: {conn_type}\n"
-                                              f"From: {node.name} (G{graph.graph_id})\n"
-                                              f"To:   {target_node.name} (G{tgt_gid})\n"
-                                              f"Weight: {weight}\n"
-                                              f"Model: {params.get('synapse_model', '?')}")
+                    for (tgt_gid, tgt_nid), conns_to_pair in pair_buckets.items():
+                        if (tgt_gid, tgt_nid) not in node_map: continue
+                        if tgt_gid in self.hidden_graphs: continue
+                        if (tgt_gid, tgt_nid) in self.hidden_nodes: continue
+                        target_node = node_map[(tgt_gid, tgt_nid)]
 
-                            if node == target_node:
-                                torus = pv.ParametricTorus(ringradius=1.2, crosssectionradius=0.08)
-                                torus.rotate_x(45)
-                                torus.translate(start)
-                                actor_self = self.graph_plotter.add_mesh(torus, color=edge_color, opacity=0.8, pickable=True)
-                                self.skeleton_info_map[actor_self] = conn_info_text + " (Self-Loop)"
-                            
-                            else:
-                                mid_point = (start + end) / 2.0
-                                
-                                seed = node.id * 100 + target_node.id
-                                random.seed(seed)
-                                offset = np.array([
-                                    random.uniform(-1.5, 1.5),
-                                    random.uniform(-1.5, 1.5),
-                                    random.uniform(0.5, 2.0)
-                                ])
-                                control_point = mid_point + offset
-                                
-                                points = np.array([start, control_point, end])
-                                spline = pv.Spline(points, n_points=20)
-                                
-                                self.graph_plotter.add_mesh(
-                                    spline, color=edge_color, line_width=2.0, 
-                                    render_lines_as_tubes=True, pickable=False
+                        for conn_idx, conn in enumerate(conns_to_pair):
+                            try:
+                                self._draw_single_connection(
+                                    graph, node, target_node, conn,
+                                    conn_idx, len(conns_to_pair),
+                                    tgt_gid, tgt_nid,
                                 )
-                                
-                                hitbox = spline.tube(radius=0.3)
-                                actor_hitbox = self.graph_plotter.add_mesh(
-                                    hitbox, color=edge_color, opacity=0.0, pickable=True
-                                )
-                                self.skeleton_info_map[actor_hitbox] = conn_info_text
-                                
-                                last_pt = spline.points[-1]
-                                prev_pt = spline.points[-3]
-                                direction = last_pt - prev_pt
-                                norm = np.linalg.norm(direction)
-                                if norm > 0: direction /= norm
-                                
-                                cone_pos = end - (direction * 0.8) 
-                                arrow_head = pv.Cone(center=cone_pos, direction=direction, height=0.5, radius=0.2, resolution=12)
-                                self.graph_plotter.add_mesh(arrow_head, color=edge_color, pickable=False)
-
-                        except Exception as e:
-                            print(f"Error plotting connection: {e}")
+                            except Exception as e:
+                                print(f"Error plotting connection: {e}")
 
         try:
             self.graph_plotter.iren.remove_observer(self._observer_tag)
@@ -2258,9 +2480,266 @@ class MainWindow(QMainWindow):
         self._observer_tag = self.graph_plotter.iren.add_observer(
             "MouseMoveEvent", self._on_skeleton_hover
         )
-        
+        # Click handler for the detail panel
+        try:
+            self.graph_plotter.iren.remove_observer(self._click_observer_tag)
+        except: pass
+        self._click_observer_tag = self.graph_plotter.iren.add_observer(
+            "LeftButtonPressEvent", self._on_skeleton_click
+        )
+
         self.graph_plotter.reset_camera()
         self.graph_plotter.update()
+
+    def _draw_single_connection(self, graph, node, target_node, conn,
+                                 conn_idx, total_for_pair, tgt_gid, tgt_nid):
+        """Draws ONE connection as its own spline+arrowhead. Multiple
+        connections between the same node pair fan out across distinct
+        control-points so they don't overlap. Each gets its own pickable
+        hitbox so hover/click identifies that specific connection."""
+        params = conn.get('params', {})
+        weight = float(params.get('weight', 1.0))
+        conn_name = conn.get('name', 'Connection')
+
+        if weight > 0:
+            edge_color = "#FF3333"
+            conn_type = "Excitatory (+)"
+        elif weight < 0:
+            edge_color = "#3366FF"
+            conn_type = "Inhibitory (-)"
+        else:
+            edge_color = "#888888"
+            conn_type = "Silent (0)"
+
+        start = np.array(node.center_of_mass)
+        end = np.array(target_node.center_of_mass)
+
+        delay_val = params.get('delay', '?')
+        rule = params.get('rule', '?')
+        p_val = params.get('p', None)
+        src_pop = conn.get('source', {}).get('pop_id', '?')
+        tgt_pop = conn.get('target', {}).get('pop_id', '?')
+        synapse_model = params.get('synapse_model', '?')
+
+        conn_short = (f"CONNECTION: {conn_name}\n"
+                      f"Type: {conn_type}\n"
+                      f"From: {node.name} (G{graph.graph_id} N{node.id} P{src_pop})\n"
+                      f"To:   {target_node.name} (G{tgt_gid} N{tgt_nid} P{tgt_pop})\n"
+                      f"Weight: {weight}\n"
+                      f"Delay:  {delay_val} ms\n"
+                      f"Model: {synapse_model}\n"
+                      f"Rule:  {rule}" + (f" (p={p_val})" if p_val is not None else ""))
+
+        conn_detail_html = self._format_connection_detail_html(
+            conn_name, conn_type, edge_color,
+            graph, node, src_pop,
+            target_node, tgt_gid, tgt_nid, tgt_pop,
+            weight, delay_val, synapse_model, rule, p_val,
+            params, conn_idx, total_for_pair,
+        )
+        click_payload = {
+            'kind': 'connection',
+            'short': conn_short,
+            'detail_html': conn_detail_html,
+            'title': f"Connection: {conn_name}",
+        }
+
+        if node == target_node:
+            # Self-loop: ring on top of the node, slight tilt per
+            # conn_idx so multiple self-loops are visible.
+            tilt_deg = 90 + (conn_idx - (total_for_pair - 1) / 2) * 10
+            torus = pv.ParametricTorus(ringradius=0.7, crosssectionradius=0.07)
+            try:
+                torus.rotate_x(tilt_deg, inplace=True)
+                torus.translate(start + np.array([0.0, 0.0, 0.65 + 0.15 * conn_idx]),
+                                inplace=True)
+            except TypeError:
+                torus = torus.rotate_x(tilt_deg)
+                torus = torus.translate(
+                    start + np.array([0.0, 0.0, 0.65 + 0.15 * conn_idx])
+                )
+            actor_self = self.graph_plotter.add_mesh(
+                torus, color=edge_color, opacity=0.85, pickable=True
+            )
+            self.skeleton_info_map[actor_self] = click_payload
+            return
+
+        # Fan-out: each connection gets a distinct control-point so multiple
+        # parallel connections don't overlap. Offset is index-based, not
+        # random, so re-renders are stable.
+        mid_point = (start + end) / 2.0
+        # Build an axis perpendicular to the edge direction to fan along
+        edge_dir = end - start
+        edge_len = np.linalg.norm(edge_dir)
+        if edge_len < 1e-6:
+            edge_dir_n = np.array([1.0, 0.0, 0.0])
+        else:
+            edge_dir_n = edge_dir / edge_len
+        # Pick a stable perp axis — cross with world-up, fall back to X
+        world_up = np.array([0.0, 0.0, 1.0])
+        perp = np.cross(edge_dir_n, world_up)
+        if np.linalg.norm(perp) < 1e-6:
+            perp = np.cross(edge_dir_n, np.array([1.0, 0.0, 0.0]))
+        perp = perp / max(np.linalg.norm(perp), 1e-6)
+
+        # Spread angle around the mid-point, centered around 0
+        if total_for_pair == 1:
+            spread = np.array([0.0, 0.0, 1.2])  # single conn: small upward bow
+        else:
+            theta = (conn_idx / max(total_for_pair - 1, 1)) * np.pi - np.pi / 2
+            radius_lift = 1.5 + 0.4 * total_for_pair
+            spread = perp * np.cos(theta) * radius_lift + world_up * (
+                np.sin(theta) * radius_lift * 0.4 + 0.6
+            )
+        control_point = mid_point + spread
+
+        points = np.array([start, control_point, end])
+        spline = pv.Spline(points, n_points=20)
+
+        self.graph_plotter.add_mesh(
+            spline, color=edge_color, line_width=2.0,
+            render_lines_as_tubes=True, pickable=False
+        )
+
+        # Invisible thicker tube for picking
+        hitbox = spline.tube(radius=0.25)
+        actor_hitbox = self.graph_plotter.add_mesh(
+            hitbox, color=edge_color, opacity=0.0, pickable=True
+        )
+        self.skeleton_info_map[actor_hitbox] = click_payload
+
+        # Arrow head at the target end, offset along spline tangent
+        last_pt = spline.points[-1]
+        prev_pt = spline.points[-3]
+        direction = last_pt - prev_pt
+        norm = np.linalg.norm(direction)
+        if norm > 0:
+            direction /= norm
+        cone_pos = end - (direction * 0.8)
+        arrow_head = pv.Cone(
+            center=cone_pos, direction=direction,
+            height=0.5, radius=0.2, resolution=12
+        )
+        self.graph_plotter.add_mesh(arrow_head, color=edge_color, pickable=False)
+
+    def _format_node_detail_html(self, graph, node, n_pops, total_neurons,
+                                  dev_count, center):
+        g_name = getattr(graph, 'graph_name', f'Graph_{graph.graph_id}')
+        rows = [
+            f"<b>Graph:</b> {g_name} (id={graph.graph_id})",
+            f"<b>Node:</b> {node.name} (id={node.id})",
+            f"<b>Populations:</b> {n_pops}",
+            f"<b>Total neurons:</b> {total_neurons}",
+            f"<b>Devices:</b> {dev_count}",
+            f"<b>Center of mass:</b> [{center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}]",
+        ]
+        # Per-pop neuron model + count
+        if hasattr(node, 'neuron_models') and node.neuron_models:
+            rows.append("<br><b>Per-population:</b>")
+            for i, model in enumerate(node.neuron_models):
+                pop_n = 0
+                if hasattr(node, 'population') and i < len(node.population):
+                    p = node.population[i]
+                    if p is not None:
+                        try:
+                            pop_n = len(p)
+                        except Exception:
+                            pop_n = 0
+                rows.append(f"&nbsp;&nbsp;Pop {i}: {model} ({pop_n}n)")
+        n_outgoing = len(node.connections) if hasattr(node, 'connections') else 0
+        rows.append(f"<br><b>Outgoing connections:</b> {n_outgoing}")
+        return "<br>".join(rows)
+
+    def _format_connection_detail_html(self, conn_name, conn_type, edge_color,
+                                        graph, src_node, src_pop,
+                                        tgt_node, tgt_gid, tgt_nid, tgt_pop,
+                                        weight, delay_val, synapse_model, rule,
+                                        p_val, params, conn_idx, total_for_pair):
+        g_name = getattr(graph, 'graph_name', f'Graph_{graph.graph_id}')
+        type_html = f"<span style='color:{edge_color};'>{conn_type}</span>"
+        rows = [
+            f"<b>Name:</b> {conn_name}",
+            f"<b>Type:</b> {type_html}",
+            "",
+            f"<b>From:</b> {src_node.name} (Pop {src_pop})",
+            f"&nbsp;&nbsp;<i>Graph: {g_name} (id={graph.graph_id}), Node id={src_node.id}</i>",
+            f"<b>To:</b> {tgt_node.name} (Pop {tgt_pop})",
+            f"&nbsp;&nbsp;<i>Graph id={tgt_gid}, Node id={tgt_nid}</i>",
+            "",
+            f"<b>Weight:</b> {weight}",
+            f"<b>Delay:</b> {delay_val} ms",
+            f"<b>Synapse model:</b> {synapse_model}",
+            f"<b>Rule:</b> {rule}" + (f" (p={p_val})" if p_val is not None else ""),
+        ]
+        # Append any additional params not covered above
+        extras = {
+            k: v for k, v in (params or {}).items()
+            if k not in ('weight', 'delay', 'synapse_model', 'rule', 'p',
+                         'allow_autapses', 'allow_multapses', 'receptor_type',
+                         'use_spatial')
+        }
+        if extras:
+            rows.append("")
+            rows.append("<b>Extra synapse params:</b>")
+            for k, v in extras.items():
+                rows.append(f"&nbsp;&nbsp;{k} = {v}")
+        if total_for_pair > 1:
+            rows.append("")
+            rows.append(
+                f"<i>Connection {conn_idx + 1} of {total_for_pair} between this pair</i>"
+            )
+        return "<br>".join(rows)
+
+    def _on_graph_labels_toggled(self, checked):
+        """Re-renders the skeleton with or without labels."""
+        if hasattr(self, 'graph_label_toggle'):
+            self.graph_label_toggle.setText("Labels: ON" if checked else "Labels: OFF")
+        # Easiest path: rebuild the skeleton (cheap for normal graph counts).
+        if hasattr(self, 'graph_plotter') and hasattr(self, 'plot_graph_skeleton'):
+            try:
+                self.plot_graph_skeleton()
+            except Exception as e:
+                print(f"label toggle rebuild error: {e}")
+
+    def _on_skeleton_click(self, interactor, event):
+        """Click on a node/connection → show the detail panel. Click on
+        empty space → hide it."""
+        x, y = interactor.GetEventPosition()
+        picker = vtk.vtkPropPicker()
+        picker.Pick(x, y, 0, self.graph_plotter.renderer)
+        actor = picker.GetActor()
+        if actor and actor in self.skeleton_info_map:
+            payload = self.skeleton_info_map[actor]
+            if isinstance(payload, dict):
+                self._show_graph_detail_panel(
+                    payload.get('title', 'Details'),
+                    payload.get('detail_html', payload.get('short', '')),
+                )
+            else:
+                # Backward-compat: old code stored plain strings
+                self._show_graph_detail_panel("Details", str(payload))
+        else:
+            self._hide_graph_detail_panel()
+
+    def _show_graph_detail_panel(self, title, html_body):
+        if not hasattr(self, 'graph_detail_panel'):
+            return
+        self.graph_detail_title.setText(title)
+        self.graph_detail_text.setText(html_body)
+        # Position the panel in the top-right corner of the wrapper
+        wrapper = self._graph_skeleton_wrapper
+        self.graph_detail_panel.adjustSize()
+        pw = self.graph_detail_panel.sizeHint().width()
+        # Anchor 12px from the right edge, 50px below the header
+        x = max(10, wrapper.width() - pw - 12)
+        y = 46
+        self.graph_detail_panel.setGeometry(x, y, pw, self.graph_detail_panel.sizeHint().height())
+        self.graph_detail_panel.raise_()
+        self.graph_detail_panel.show()
+
+    def _hide_graph_detail_panel(self):
+        if hasattr(self, 'graph_detail_panel'):
+            self.graph_detail_panel.hide()
     def update_simulation_speed(self, value):
         
         delay = int((100 - value) * 2)
@@ -2301,7 +2780,13 @@ class MainWindow(QMainWindow):
                 prop.SetColor(1.0, 1.0, 1.0)
                 prop.SetOpacity(1.0)
                 
-                text_content = self.skeleton_info_map[actor]
+                payload = self.skeleton_info_map[actor]
+                # Tooltip uses the short plain-text form. Click-panel uses
+                # the html form. For backward-compat, accept plain strings.
+                if isinstance(payload, dict):
+                    text_content = payload.get('short', '')
+                else:
+                    text_content = str(payload)
                 self.tooltip_actor.SetInput(text_content)
                 self.tooltip_actor.SetVisibility(True)
             
@@ -2330,7 +2815,7 @@ class MainWindow(QMainWindow):
         
         try:
             while current_time < duration:
-                nest.Simulate(step_size)
+                self._simulate_step_and_update(step_size)
                 current_time += step_size
                 
                 
@@ -2354,6 +2839,9 @@ class MainWindow(QMainWindow):
     def _ensure_spike_recorders(self):
         self.live_recorders = []
         for graph in graph_list:
+            # Skip virtuelle Graphs (RetinaTestTab hat eigene Recorder)
+            if getattr(graph, 'is_virtual', False):
+                continue
             for node in graph.node_list:
                 if hasattr(node, 'devices'):
                     for dev in node.devices:
@@ -2422,8 +2910,12 @@ class MainWindow(QMainWindow):
                                 "is_auto": True 
                             }
                             
-                            node.devices.append(auto_device_entry)
+                            # FIX: Doppel-Append vermeiden bei shared list reference
+                            if 'devices' not in node.parameters:
+                                node.parameters['devices'] = []
                             node.parameters['devices'].append(auto_device_entry)
+                            if node.devices is not node.parameters['devices']:
+                                node.devices.append(auto_device_entry)
                             
                         except Exception as e:
                             print(f"Warning creating live recorder: {e}")
@@ -2466,7 +2958,7 @@ class MainWindow(QMainWindow):
     def _global_reset(self):
         self.reset_and_restart()
         self._update_global_button_state('stopped')
-        self.global_time_label.setText("T: 0.0 ms")
+        self.global_time_label.setText("0.0 ms")
     
     def _update_global_button_state(self, state):
         base = "font-weight: bold; border-radius: 3px; padding: 5px 10px;"
@@ -2487,11 +2979,40 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'global_time_label'): return
         
         if time_ms is None:
-            try: time_ms = nest.GetKernelStatus().get('time', 0.0)
-            except: time_ms = 0.0
+            time_ms = self._get_nest_time()
 
         self.global_time_label.setText(f"{float(time_ms):.1f} ms")
+        # Forciere UI-Repaint: setText + repaint() reicht in PyQt6 nicht
+        # immer wenn der main-thread durch nest.Simulate blockiert wird.
+        # processEvents() gibt Qt explizit Zeit zum painten.
+        self.global_time_label.update()
         self.global_time_label.repaint()
+        QApplication.processEvents()
+    
+    @staticmethod
+    def _get_nest_time():
+        """Liest die aktuelle NEST-Simulationszeit. NEST 3.x hat den Wert
+        unter 'biological_time'; 'time' ist deprecated/leer und gibt 0.0
+        zurück, was den Timer einfrieren ließ."""
+        try:
+            stat = nest.GetKernelStatus()
+            return float(stat.get('biological_time', stat.get('time', 0.0)) or 0.0)
+        except Exception:
+            return 0.0
+    
+    def _simulate_step_and_update(self, step):
+        """Wrapper um nest.Simulate(step) der den globalen Timer mit der
+        akkumulierten Sim-Zeit aktualisiert. Jeder Pfad in Neuroticks der
+        NEST live laufen lässt (continuous-loop, live-run, headless) sollte
+        diesen Helper benutzen — sonst bleibt das global_time_label hängen.
+        Reset auf 0 passiert ohnehin in reset_and_restart()."""
+        nest.Simulate(float(step))
+        # NEST-Zeit auslesen + lokale Akkumulation als Backup
+        local_t = float(getattr(self, 'current_nest_time', 0.0)) + float(step)
+        nest_t = self._get_nest_time()
+        self.current_nest_time = max(local_t, nest_t)
+        self.update_global_time_display(self.current_nest_time)
+        return self.current_nest_time
     def update_simulation_speed(self, slider_value):
         if hasattr(self, 'sim_timer'):
             self.sim_timer.setInterval(slider_value)
@@ -2504,11 +3025,10 @@ class MainWindow(QMainWindow):
         self.sim_mode = 'continuous'
         self.sim_step_size = step_val
         
-        try:
-            stat = nest.GetKernelStatus()
-            self.current_nest_time = stat.get('time', 0.0)
-        except:
-            self.current_nest_time = 0.0
+        self.current_nest_time = self._get_nest_time()
+        
+        # Initiales Label-Update damit User sieht von wo wir starten
+        self.update_global_time_display(self.current_nest_time)
             
         print(f"Starting Continuous Run from {self.current_nest_time} ms")
 
@@ -2603,11 +3123,7 @@ class MainWindow(QMainWindow):
             else:
                 step_to_take = self.sim_step_size
 
-            nest.Simulate(step_to_take)
-            
-            self.current_nest_time = nest.GetKernelStatus().get('time', 0.0)
-            
-            self.update_global_time_display(self.current_nest_time)
+            self._simulate_step_and_update(step_to_take)
             self._distribute_simulation_data()
             QApplication.processEvents()
             
@@ -2642,6 +3158,15 @@ class MainWindow(QMainWindow):
                 self.simulation_view.update_time_display(0.0)
                 self.simulation_view.is_paused = True
                 self.simulation_view.update_button_styles()
+
+            # RetinaTestTab informieren BEVOR ResetKernel, damit es seinen State clearen
+            # und den virtual_graph aus graph_list entfernen kann.
+            if hasattr(self, 'retina_test_tab') and self.retina_test_tab is not None:
+                try:
+                    self.retina_test_tab.on_nest_kernel_reset()
+                except Exception as _e:
+                    print(f"retina_test_tab.on_nest_kernel_reset error: {_e}")
+
             # Invalidate stale NodeCollection refs before ResetKernel
             _invalidate_nest_refs(graph_list)
 
@@ -2760,6 +3285,9 @@ class MainWindow(QMainWindow):
         process_counter = 0
 
         for graph in graphs:
+            # Skip virtuelle Graphs (RetinaTestTab bewirtschaftet eigene Recorder)
+            if getattr(graph, 'is_virtual', False):
+                continue
             for node in graph.node_list:
                 process_counter += 1
                 if process_counter % 10 == 0:
@@ -2767,7 +3295,10 @@ class MainWindow(QMainWindow):
 
                 if not hasattr(node, 'devices') or not node.devices:
                     continue
-                
+
+                # Safety-Net: results-Attribut sicherstellen
+                if not hasattr(node, 'results') or node.results is None:
+                    node.results = {}
                 if "history" not in node.results:
                     node.results["history"] = []
                 
@@ -2979,6 +3510,9 @@ class MainWindow(QMainWindow):
                 }
 
                 for graph in graph_list:
+                    # Skip virtuelle Graphen (z.B. RetinaTestTab): nicht exportieren
+                    if getattr(graph, 'is_virtual', False):
+                        continue
                     nodes_data = []
                     for node in graph.node_list:
                         
@@ -3160,6 +3694,16 @@ class MainWindow(QMainWindow):
 
 
             print("Reconstructing graph topology...")
+            # Build a flat lookup over ALL graphs so we can resolve
+            # cross-graph targets when populating prev/next from
+            # node.connections. Without this, prev only contains
+            # same-graph predecessors and Node.remove() can't clean up
+            # cross-graph links → dangling refs after delete.
+            global_lookup = {}
+            for g_obj in graph_list:
+                for n_obj in g_obj.node_list:
+                    global_lookup[(g_obj.graph_id, n_obj.id)] = n_obj
+            
             for g_data in project_data['graphs']:
                 gid = g_data['graph_id']
                 current_graph_obj = next((g for g in graph_list if g.graph_id == gid), None)
@@ -3195,6 +3739,21 @@ class MainWindow(QMainWindow):
                                 node_obj.prev.append(source_node)
                             if node_obj not in source_node.next:
                                 source_node.next.append(node_obj)
+                    
+                    # Cross-graph backref pass: every connection in this
+                    # node's connections list represents an edge to
+                    # (target_graph_id, target_node_id). Resolve via the
+                    # global lookup and call add_neighbor so target.prev
+                    # knows about us. add_neighbor is idempotent.
+                    for conn in (node_obj.connections or []):
+                        try:
+                            tgt = conn.get('target', {}) or {}
+                            tgt_key = (tgt.get('graph_id'), tgt.get('node_id'))
+                            tgt_node = global_lookup.get(tgt_key)
+                            if tgt_node is not None:
+                                node_obj.add_neighbor(tgt_node)
+                        except Exception:
+                            pass
 
 
             if hasattr(self, 'tools_widget'):

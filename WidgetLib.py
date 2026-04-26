@@ -286,14 +286,94 @@ TOOL_PARAM_KEYS = {
         'tool_neuron_model': 'blob_tool_neuron_model'
     },
     'Cone': {
+        # Cone teilt KEINE widget-keys mit CCW (weil das self.widgets
+        # überschreiben würde). Eigene cone_*-Keys werden hier zurück
+        # zu den generischen Namen gemappt, die SHAPE_PARAM_KEYS und
+        # die Build-Funktionen erwarten.
         'n_neurons': 'cone_n_neurons',
-        'tool_neuron_model': 'cone_tool_neuron_model'
+        'tool_neuron_model': 'cone_tool_neuron_model',
+        'bidirectional': 'cone_bidirectional',
+        'conn_rule': 'cone_conn_rule',
+        'conn_p': 'cone_conn_p',
+        'conn_indegree': 'cone_conn_indegree',
+        'conn_outdegree': 'cone_conn_outdegree',
+        'ccw_syn_config': 'cone_syn_config',
+        'ccw_weight_ex': 'cone_weight_ex',
+        'ccw_delay_ex': 'cone_delay_ex',
+        'weight_in_factor': 'cone_weight_in_factor',
+        'k': 'cone_k',
     },
     'Grid': {
         'tool_neuron_model': 'grid_tool_neuron_model'
     },
     'custom': {}
 }
+
+# Welche Keys (in generischer Form, post-mapping) gehören PRO POPULATION
+# zu einem Tool-Type-Knoten? Diese landen in pop['shape_params'].
+# Position/Transform/Probability-Keys gehören weiter zum Knoten global.
+SHAPE_PARAM_KEYS = {
+    'CCW':    ['n_neurons', 'radius', 'bidirectional',
+               'ccw_weight_ex', 'ccw_delay_ex', 'weight_in_factor',
+               'ccw_syn_config', 'k',
+               'conn_rule', 'conn_p', 'conn_indegree', 'conn_outdegree'],
+    'Blob':   ['n_neurons', 'radius',
+               'blob_p_ex', 'blob_p_in',
+               'blob_weight_ex', 'blob_weight_in',
+               'blob_delay_ex', 'blob_delay_in',
+               'blob_syn_config_ex', 'blob_syn_config_in',
+               'blob_allow_autapses'],
+    'Cone':   ['n_neurons', 'radius_top', 'radius_bottom', 'height',
+               'bidirectional', 'ccw_weight_ex', 'ccw_delay_ex',
+               'weight_in_factor', 'ccw_syn_config', 'k',
+               'conn_rule', 'conn_p', 'conn_indegree', 'conn_outdegree'],
+    'Grid':   ['grid_side_length'],
+    'custom': []
+}
+
+# Defaults pro Tool-Type für neu angelegte Populations.
+# Werden verwendet, wenn keine shape_params vorliegen. Werte sind 1:1
+# aligned mit den Defaults der Build-Funktionen in neuron_toolbox.py.
+SHAPE_PARAM_DEFAULTS = {
+    'CCW':    {'n_neurons': 100, 'radius': 5.0, 'bidirectional': False,
+               'ccw_weight_ex': 30.0, 'ccw_delay_ex': 1.0,
+               'weight_in_factor': 1.0,
+               'ccw_syn_config': {'synapse_model': 'static_synapse', 'extra_params': {}},
+               'k': 10.0,
+               'conn_rule': 'similarity', 'conn_p': 1.0,
+               'conn_indegree': 10, 'conn_outdegree': 10},
+    'Blob':   {'n_neurons': 100, 'radius': 5.0,
+               'blob_p_ex': 0.8, 'blob_p_in': 0.2,
+               'blob_weight_ex': 2.0, 'blob_weight_in': -10.0,
+               'blob_delay_ex': 1.0, 'blob_delay_in': 1.0,
+               'blob_syn_config_ex': {'synapse_model': 'static_synapse', 'extra_params': {}},
+               'blob_syn_config_in': {'synapse_model': 'static_synapse', 'extra_params': {}},
+               'blob_allow_autapses': False},
+    'Cone':   {'n_neurons': 500, 'radius_top': 1.0, 'radius_bottom': 5.0,
+               'height': 10.0, 'bidirectional': False,
+               'ccw_weight_ex': 30.0, 'ccw_delay_ex': 1.0,
+               'weight_in_factor': 1.0,
+               'ccw_syn_config': {'synapse_model': 'static_synapse', 'extra_params': {}},
+               'k': 10.0,
+               'conn_rule': 'similarity', 'conn_p': 1.0,
+               'conn_indegree': 10, 'conn_outdegree': 10},
+    'Grid':   {'grid_side_length': 10},
+    'custom': {}
+}
+
+
+def extract_shape_params(tool_type, params_dict):
+    """Extrahiert die Shape-Parameter aus einem Params-Dict für den gegebenen Tool-Type.
+    Fehlende Keys werden aus SHAPE_PARAM_DEFAULTS aufgefüllt."""
+    keys = SHAPE_PARAM_KEYS.get(tool_type, [])
+    defaults = SHAPE_PARAM_DEFAULTS.get(tool_type, {})
+    result = {}
+    for k in keys:
+        if k in params_dict:
+            result[k] = params_dict[k]
+        elif k in defaults:
+            result[k] = defaults[k]
+    return result
 
 __all__ = [
     'SYNAPSE_MODELS',
@@ -325,6 +405,7 @@ __all__ = [
     '_serialize_connections',
     'NumpyEncoder',
     'create_nest_connections_from_stored',
+    'prune_dangling_connections',
     'safe_nest_reset_and_repopulate',
     'repopulate_all_graphs',
     'get_all_connections_summary',
@@ -366,19 +447,25 @@ SYNAPSE_MODELS = {
 
     "stdp_synapse": {
         "category": "plasticity",
-        "description": "Standard STDP nach Song et al.",
+        "description": "Standard STDP nach Song et al. (lambda und alpha tunen die Lerndynamik; tau_minus wird auf dem postsynaptischen Neuron gesetzt, nicht hier)",
         "params": {
             "tau_plus": {"default": 20.0, "type": "float", "min": 0.1, "max": 1000.0, "unit": "ms",
+                         "step": 1.0, "decimals": 2,
                          "description": "Time constant of potentiation window"},
             "lambda": {"default": 0.01, "type": "float", "min": 0.0, "max": 1.0, "unit": "",
+                       "step": 0.001, "decimals": 5,
                        "description": "Learning rate"},
             "alpha": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
-                      "description": "Asymmetry parameter (depression scale)"},
+                      "step": 0.1, "decimals": 3,
+                      "description": "Asymmetry parameter (depression scale, >1 = LTD dominant)"},
             "mu_plus": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
+                        "step": 0.1, "decimals": 2,
                         "description": "Weight dependence exponent (potentiation)"},
             "mu_minus": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "unit": "",
+                         "step": 0.1, "decimals": 2,
                          "description": "Weight dependence exponent (depression)"},
-            "Wmax": {"default": 100.0, "type": "float", "min": 0.0, "max": 10000.0, "unit": "",
+            "Wmax": {"default": 3.5, "type": "float", "min": 0.0, "max": 10000.0, "unit": "",
+                     "step": 0.5, "decimals": 2,
                      "description": "Maximum weight"}
         }
     },
@@ -737,6 +824,142 @@ class SynapseParamWidget(QWidget):
         else:
             self.input.setText(str(value))
 
+
+class InlineSynapseConfig(QWidget):
+    """
+    Kompakte Synapse-Config für Tool-Panels (CCW/Cone/Blob).
+    Combo zum Synapsen-Modell + ausklappbare model-spezifische Parameter
+    (z.B. tau_plus/lambda/alpha bei stdp_synapse). Funktioniert wie
+    der Connection Manager, nur als Inline-Widget.
+    
+    Wert: dict {'synapse_model': str, 'extra_params': {pname: value, ...}}.
+    """
+    valueChanged = pyqtSignal()
+    
+    def __init__(self, label="Synapse", default_model='static_synapse',
+                 collapsed=True, parent=None):
+        super().__init__(parent)
+        self.param_widgets: Dict[str, SynapseParamWidget] = {}
+        
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 4)
+        outer.setSpacing(2)
+        
+        # Title row
+        title_lbl = QLabel(label)
+        title_lbl.setStyleSheet("font-weight: bold; color: #FFC107;")
+        outer.addWidget(title_lbl)
+        
+        # Synapse model combo
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Model:", styleSheet="min-width:60px;"))
+        self.model_combo = QComboBox()
+        for name in SYNAPSE_MODELS.keys():
+            self.model_combo.addItem(name)
+        if default_model in SYNAPSE_MODELS:
+            self.model_combo.setCurrentText(default_model)
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        row.addWidget(self.model_combo, 1)
+        outer.addLayout(row)
+        
+        # Description label (small, italic)
+        self.desc_label = QLabel("")
+        self.desc_label.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
+        self.desc_label.setWordWrap(True)
+        outer.addWidget(self.desc_label)
+        
+        # Collapsible group for model-specific params
+        self.params_group = QGroupBox("Model Parameters")
+        self.params_group.setCheckable(True)
+        self.params_group.setChecked(not collapsed)  # checked = expanded
+        self.params_group.toggled.connect(self._on_group_toggled)
+        self.params_layout = QVBoxLayout(self.params_group)
+        self.params_layout.setContentsMargins(8, 8, 8, 8)
+        self.params_layout.setSpacing(2)
+        outer.addWidget(self.params_group)
+        
+        # Erste Befüllung
+        self._populate_param_widgets(default_model)
+        # Initial: visibility nach collapsed-Status
+        self._on_group_toggled(self.params_group.isChecked())
+    
+    def _on_model_changed(self, model_name):
+        self._populate_param_widgets(model_name)
+        self.valueChanged.emit()
+    
+    def _on_group_toggled(self, checked):
+        # GroupBox content visibility manuell steuern
+        for i in range(self.params_layout.count()):
+            item = self.params_layout.itemAt(i)
+            w = item.widget()
+            if w:
+                w.setVisible(checked)
+    
+    def _populate_param_widgets(self, model_name):
+        # Bestehende Widgets entfernen
+        while self.params_layout.count():
+            item = self.params_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        self.param_widgets.clear()
+        
+        if model_name not in SYNAPSE_MODELS:
+            self.desc_label.setText(f"Unbekanntes Modell: {model_name}")
+            return
+        
+        # Hinweis: SYNAPSE_MODELS hat FLAT-Struktur (gleich wie der
+        # Connection-Manager). Jeder key (außer weight/delay) ist ein
+        # Synapsen-Param. weight/delay werden separat im Tool-Panel
+        # geführt. Diese Iterations-Logik ist 1:1 wie
+        # ConnectionTool.on_synapse_model_changed.
+        info = SYNAPSE_MODELS[model_name]
+        added = 0
+        for pname, pinfo in info.items():
+            if pname in ('weight', 'delay'):
+                continue
+            if not isinstance(pinfo, dict):
+                continue
+            widget = SynapseParamWidget(pname, pinfo)
+            widget.valueChanged.connect(self.valueChanged.emit)
+            self.params_layout.addWidget(widget)
+            self.param_widgets[pname] = widget
+            added += 1
+        
+        if added == 0:
+            empty_lbl = QLabel("Nur weight/delay (kein zusätzlicher Param).")
+            empty_lbl.setStyleSheet("color: #888; font-style: italic;")
+            self.params_layout.addWidget(empty_lbl)
+            self.desc_label.setText("")
+        else:
+            self.desc_label.setText(f"{added} modell-spezifische Parameter")
+    
+    def get_value(self) -> dict:
+        return {
+            'synapse_model': self.model_combo.currentText(),
+            'extra_params': {n: w.get_value() for n, w in self.param_widgets.items()}
+        }
+    
+    def set_value(self, config):
+        if not isinstance(config, dict):
+            return
+        m = config.get('synapse_model')
+        if m and m in SYNAPSE_MODELS:
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentText(m)
+            self.model_combo.blockSignals(False)
+            self._populate_param_widgets(m)
+            # Visibility wieder synchron mit GroupBox-Toggle
+            self._on_group_toggled(self.params_group.isChecked())
+        for pname, val in (config.get('extra_params', {}) or {}).items():
+            if pname in self.param_widgets:
+                try:
+                    self.param_widgets[pname].set_value(val)
+                except Exception:
+                    pass
+
+
 class SynapseCreationWidget(QWidget):
 
     
@@ -973,7 +1196,8 @@ def create_nest_mask_safe(mask_type, params):
 
 
 class DoubleInputField(QWidget):
-    def __init__(self, param_name, default_value=0.0, min_val=-1000000.0, max_val=1000000.0, decimals=2):
+    def __init__(self, param_name, default_value=0.0, min_val=-1000000.0, max_val=1000000.0,
+                 decimals=2, step=None):
         super().__init__()
         self.param_name = param_name
         layout = QHBoxLayout()
@@ -981,6 +1205,13 @@ class DoubleInputField(QWidget):
         self.spinbox = QDoubleSpinBox()
         self.spinbox.setRange(min_val, max_val)
         self.spinbox.setDecimals(decimals)
+        # Auto-step wenn nicht explizit angegeben — kleiner als Default
+        if step is None:
+            if abs(default_value) > 1e-9:
+                step = abs(default_value) / 10
+            else:
+                step = 10 ** (-decimals)
+        self.spinbox.setSingleStep(step)
         self.spinbox.setValue(default_value)
         layout.addWidget(self.label)
         layout.addWidget(self.spinbox)
@@ -1155,15 +1386,32 @@ class NeuronParametersWidget(QWidget):
             spinbox = QDoubleSpinBox()
             spinbox.setRange(min_val, max_val)
             
-            if abs(default) < 0.001 and default != 0.0:
-                spinbox.setDecimals(10)
-                spinbox.setSingleStep(default / 10)
-            elif abs(default) < 1.0:
-                spinbox.setDecimals(6)
-            else:
-                spinbox.setDecimals(2)
+            # Step und Decimals aus Param-Info lesen, sonst auto-bestimmen
+            step = param_info.get('step')
+            decimals = param_info.get('decimals')
             
+            if step is None:
+                # Auto: Step ist 10% von Default, oder 1.0 wenn Default 0
+                if abs(default) > 1e-9:
+                    step = abs(default) / 10
+                else:
+                    step = 0.01
+            
+            if decimals is None:
+                # Auto: genug Decimals um Step darzustellen
+                if step >= 1.0:
+                    decimals = 2
+                elif step >= 0.001:
+                    decimals = 4
+                elif step >= 1e-6:
+                    decimals = 7
+                else:
+                    decimals = 10
+            
+            spinbox.setSingleStep(step)
+            spinbox.setDecimals(decimals)
             spinbox.setValue(default)
+            
             layout.addWidget(spinbox)
             widget = QWidget()
             widget.setLayout(layout)
@@ -1312,7 +1560,26 @@ class NodeParametersWidget(QWidget):
         self._add_field_to_layout(layout, "ccw_radius", "Radius", field_type="float", default=5.0)
         self._add_field_to_layout(layout, "bidirectional", "Bidirectional", field_type="bool", default=False)
         layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine))
-        self._add_field_to_layout(layout, "ccw_weight_ex", "Weight", field_type="float", default=30.0)
+        # Connection rule
+        conn_rule_choices = ['similarity', 'one_to_one', 'all_to_all',
+                             'pairwise_bernoulli', 'fixed_indegree', 'fixed_outdegree']
+        self._add_field_to_layout(layout, "conn_rule", "Connection Rule",
+                                  field_type="combo_text", choices=conn_rule_choices,
+                                  default='similarity')
+        self._add_field_to_layout(layout, "conn_p", "Bernoulli p", field_type="float",
+                                  default=1.0, min_val=0.0, max_val=1.0)
+        self._add_field_to_layout(layout, "conn_indegree", "Indegree", field_type="int",
+                                  default=10, min_val=1, max_val=100000)
+        self._add_field_to_layout(layout, "conn_outdegree", "Outdegree", field_type="int",
+                                  default=10, min_val=1, max_val=100000)
+        # Synaptik (volle Synapse-Config inkl. modell-spezifische Params)
+        self._add_field_to_layout(layout, "ccw_syn_config", "Synapse",
+                                  field_type="synapse_config", default='static_synapse')
+        self._add_field_to_layout(layout, "ccw_weight_ex", "Weight (ex)", field_type="float", default=30.0)
+        self._add_field_to_layout(layout, "ccw_delay_ex", "Delay [ms]", field_type="float", default=1.0,
+                                  min_val=0.1, max_val=1000.0)
+        self._add_field_to_layout(layout, "weight_in_factor", "Weight Inhib Factor",
+                                  field_type="float", default=1.0, min_val=0.0, max_val=100.0)
         self._add_field_to_layout(layout, "k", "Inhibition (k)", field_type="float", default=10.0)
         layout.addStretch(); return panel
 
@@ -1322,6 +1589,27 @@ class NodeParametersWidget(QWidget):
         self._add_model_selector(layout, key="blob_tool_neuron_model"); self._add_neuron_edit_button(layout)
         self._add_field_to_layout(layout, "blob_n_neurons", "Count", field_type="int", default=100)
         self._add_field_to_layout(layout, "blob_radius", "Radius", field_type="float", default=5.0)
+        layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine))
+        # Excitatory subnet — eigene Synapse-Config + p/weight/delay
+        layout.addWidget(QLabel("Excitatory Sub-Network", styleSheet="color:#66BB6A; font-weight:bold;"))
+        self._add_field_to_layout(layout, "blob_syn_config_ex", "Synapse (Ex)",
+                                  field_type="synapse_config", default='static_synapse')
+        self._add_field_to_layout(layout, "blob_p_ex", "Connection p", field_type="float",
+                                  default=0.8, min_val=0.0, max_val=1.0)
+        self._add_field_to_layout(layout, "blob_weight_ex", "Weight", field_type="float", default=2.0)
+        self._add_field_to_layout(layout, "blob_delay_ex", "Delay [ms]", field_type="float",
+                                  default=1.0, min_val=0.1, max_val=1000.0)
+        # Inhibitory subnet — eigene Synapse-Config + p/weight/delay
+        layout.addWidget(QLabel("Inhibitory Sub-Network", styleSheet="color:#EF5350; font-weight:bold;"))
+        self._add_field_to_layout(layout, "blob_syn_config_in", "Synapse (In)",
+                                  field_type="synapse_config", default='static_synapse')
+        self._add_field_to_layout(layout, "blob_p_in", "Connection p", field_type="float",
+                                  default=0.2, min_val=0.0, max_val=1.0)
+        self._add_field_to_layout(layout, "blob_weight_in", "Weight", field_type="float", default=-10.0)
+        self._add_field_to_layout(layout, "blob_delay_in", "Delay [ms]", field_type="float",
+                                  default=1.0, min_val=0.1, max_val=1000.0)
+        self._add_field_to_layout(layout, "blob_allow_autapses", "Allow Autapses",
+                                  field_type="bool", default=False)
         layout.addStretch(); return panel
 
     def _create_panel_cone(self):
@@ -1332,6 +1620,36 @@ class NodeParametersWidget(QWidget):
         self._add_field_to_layout(layout, "radius_bottom", "R Bottom", field_type="float", default=5.0)
         self._add_field_to_layout(layout, "radius_top", "R Top", field_type="float", default=1.0)
         self._add_field_to_layout(layout, "height", "Height", field_type="float", default=10.0)
+        # KRITISCH: Alle hier verwendeten widget-Keys MÜSSEN eindeutig zu Cone
+        # sein. CCW-Panel registriert dieselben generischen Keys (bidirectional,
+        # conn_rule, ccw_syn_config, ...) — wenn Cone die wieder verwendet,
+        # überschreibt das letzte registrierte Widget (Cone) die CCW-Einträge
+        # in self.widgets, sodass User-Edits am sichtbaren CCW-Widget nicht
+        # ankommen. Daher cone_*-Präfix + entsprechendes Mapping in
+        # TOOL_PARAM_KEYS['Cone'] für die generischen Output-Namen.
+        self._add_field_to_layout(layout, "cone_bidirectional", "Bidirectional", field_type="bool", default=False)
+        layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine))
+        # Connection rule
+        conn_rule_choices = ['similarity', 'one_to_one', 'all_to_all',
+                             'pairwise_bernoulli', 'fixed_indegree', 'fixed_outdegree']
+        self._add_field_to_layout(layout, "cone_conn_rule", "Connection Rule",
+                                  field_type="combo_text", choices=conn_rule_choices,
+                                  default='similarity')
+        self._add_field_to_layout(layout, "cone_conn_p", "Bernoulli p", field_type="float",
+                                  default=1.0, min_val=0.0, max_val=1.0)
+        self._add_field_to_layout(layout, "cone_conn_indegree", "Indegree", field_type="int",
+                                  default=10, min_val=1, max_val=100000)
+        self._add_field_to_layout(layout, "cone_conn_outdegree", "Outdegree", field_type="int",
+                                  default=10, min_val=1, max_val=100000)
+        # Synaptik (volle Synapse-Config) — eigene Cone-Keys, gemappt zu generic
+        self._add_field_to_layout(layout, "cone_syn_config", "Synapse",
+                                  field_type="synapse_config", default='static_synapse')
+        self._add_field_to_layout(layout, "cone_weight_ex", "Weight (ex)", field_type="float", default=30.0)
+        self._add_field_to_layout(layout, "cone_delay_ex", "Delay [ms]", field_type="float", default=1.0,
+                                  min_val=0.1, max_val=1000.0)
+        self._add_field_to_layout(layout, "cone_weight_in_factor", "Weight Inhib Factor",
+                                  field_type="float", default=1.0, min_val=0.0, max_val=100.0)
+        self._add_field_to_layout(layout, "cone_k", "Inhibition (k)", field_type="float", default=10.0)
         layout.addStretch(); return panel
 
     def _create_panel_grid(self):
@@ -1341,18 +1659,44 @@ class NodeParametersWidget(QWidget):
         self._add_field_to_layout(layout, "grid_side_length", "Side Length", field_type="int", default=10)
         layout.addStretch(); return panel
 
-    def _add_field_to_layout(self, layout, key, label, field_type="float", min_val=None, max_val=None, default=None):
+    def _add_field_to_layout(self, layout, key, label, field_type="float", min_val=None, max_val=None, default=None, choices=None):
         row = QHBoxLayout()
         row.addWidget(QLabel(f"{label}:", styleSheet="font-weight:bold; min-width:100px;"))
         if field_type == "int":
-            w = QSpinBox(); w.setRange(min_val or 0, max_val or 100000); w.setValue(default or 0)
+            w = QSpinBox()
+            w.setRange(min_val if min_val is not None else 0,
+                       max_val if max_val is not None else 100000)
+            w.setValue(default if default is not None else 0)
         elif field_type == "float":
-            w = QDoubleSpinBox(); w.setRange(min_val or -1000, max_val or 1000); w.setValue(default or 0.0)
+            w = QDoubleSpinBox()
+            w.setRange(min_val if min_val is not None else -1e6,
+                       max_val if max_val is not None else 1e6)
+            w.setDecimals(4)
+            w.setValue(default if default is not None else 0.0)
         elif field_type == "bool":
-            w = QCheckBox(); w.setChecked(default or False)
+            w = QCheckBox(); w.setChecked(bool(default) if default is not None else False)
+        elif field_type == "combo_text":
+            w = QComboBox()
+            for c in (choices or []):
+                w.addItem(c)
+            if default and default in (choices or []):
+                w.setCurrentText(default)
+            w.currentTextChanged.connect(self.on_change)
+            row.addWidget(w)
+            self.widgets[key] = {'type': 'combo_text', 'widget': w}
+            layout.addLayout(row); return
+        elif field_type == "synapse_config":
+            # Vollbreite, kein Row-Label; InlineSynapseConfig hat eigenen Header.
+            w = InlineSynapseConfig(label=label,
+                                    default_model=default if isinstance(default, str) else 'static_synapse',
+                                    collapsed=True)
+            w.valueChanged.connect(self.on_change)
+            layout.addWidget(w)
+            self.widgets[key] = {'type': 'synapse_config', 'widget': w}
+            return
         elif field_type == "vector3_int":
             w = None; ws = []
-            for p in ["X","Y","Z"]: s=QSpinBox(); s.setRange(1,1000); s.setPrefix(p); s.setValue(default or 10); s.valueChanged.connect(self.on_change); row.addWidget(s); ws.append(s)
+            for p in ["X","Y","Z"]: s=QSpinBox(); s.setRange(1,1000); s.setPrefix(p); s.setValue(default if default is not None else 10); s.valueChanged.connect(self.on_change); row.addWidget(s); ws.append(s)
             self.widgets[key] = {'type': 'vector3_int', 'widgets': ws}; layout.addLayout(row); return
             
         if w:
@@ -1432,6 +1776,7 @@ class NodeParametersWidget(QWidget):
             elif t=='bool': res[output_key]=w.isChecked()
             elif t=='combo': res[output_key]=w.currentData()
             elif t=='combo_text': res[output_key]=w.currentText()
+            elif t=='synapse_config': res[output_key]=w.get_value()  # dict
             elif t in ['vector3', 'vector3_int', 'prob_list']: res[output_key]=[s.value() for s in info['widgets']]
         
         if 'center_of_mass' in res: res['m'] = res['center_of_mass']
@@ -1474,6 +1819,7 @@ class NodeParametersWidget(QWidget):
             elif t=='bool': w.setChecked(bool(v))
             elif t=='combo': idx=w.findData(v); w.setCurrentIndex(idx) if idx>=0 else None
             elif t=='combo_text': w.setCurrentText(str(v))
+            elif t=='synapse_config': w.set_value(v)  # v is a dict
             elif t in ['vector3', 'vector3_int', 'prob_list']:
                 for i, s in enumerate(info['widgets']):
                     if i < len(v): s.setValue(v[i])
@@ -1845,27 +2191,18 @@ class GraphOverviewWidget(QWidget):
         
         self.tree = QTreeWidget()
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Element", "Details"])
+        self.tree.setHeaderLabels(["Element (Check to Hide/Show)", "Details"])
         self.tree.setColumnWidth(0, 240)
         self.tree.setStyleSheet("background-color: #1e1e1e; color: #e0e0e0; border: 1px solid #444;")
-        self.tree.itemClicked.connect(self._on_item_clicked)
-        self.tree.itemChanged.connect(self._on_item_changed)
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        
-        layout.addWidget(self.tree)
-        
-        self.status_label = QLabel("No graphs")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 5px;")
-        layout.addWidget(self.status_label)
-
         self.tree.setItemsExpandable(True)
-        self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Element (Check to Hide/Show)", "Details"])
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        # Signals nur EINMAL verbinden (vorher war jeder Connect 2x, was doppelte Handler-Aufrufe ausloeste)
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+
         self.tree.setStyleSheet("""
             QTreeWidget {
                 background-color: #1e1e1e;
@@ -1935,14 +2272,12 @@ class GraphOverviewWidget(QWidget):
         
         self.tree.setFrameShape(QFrame.Shape.NoFrame)
         self.tree.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-        
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        
+
         layout.addWidget(self.tree)
-        
+
         self.status_label = QLabel("No graphs")
-        self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 3px;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 5px;")
         layout.addWidget(self.status_label)
 
     def _show_context_menu(self, position):
@@ -1961,36 +2296,20 @@ class GraphOverviewWidget(QWidget):
         elif item_type == 'connection':
             conn_data = data.get('connection')
             conn_name = conn_data.get('name', 'Connection')
-            
+
             action_del = QAction(f"Delete (Rebuild)", self)
             action_del.triggered.connect(lambda: self.requestConnectionDeletion.emit(conn_data))
             menu.addAction(action_del)
-            
+
             action_sever = QAction(f"Sever Connection (Live, w=0)", self)
             action_sever.triggered.connect(lambda: self.requestLiveWeightChange.emit(conn_data, 0.0))
             menu.addAction(action_sever)
-            
+
             orig_weight = conn_data.get('params', {}).get('weight', 1.0)
             action_restore = QAction(f"Restore Weight (Live, w={orig_weight})", self)
             action_restore.triggered.connect(lambda: self.requestLiveWeightChange.emit(conn_data, float(orig_weight)))
             menu.addAction(action_restore)
-            
-            conn_data = data.get('connection')
-            conn_name = conn_data.get('name', 'Connection')
-            
-            action_del = QAction(f"Delete (Rebuild)", self)
-            action_del.triggered.connect(lambda: self.requestConnectionDeletion.emit(conn_data))
-            menu.addAction(action_del)
-            
-            action_sever = QAction(f"Sever Connection (Live, w=0)", self)
-            action_sever.triggered.connect(lambda: self.requestLiveWeightChange.emit(conn_data, 0.0))
-            menu.addAction(action_sever)
-            
-            orig_weight = conn_data.get('params', {}).get('weight', 1.0)
-            action_restore = QAction(f"Restore Weight (Live, w={orig_weight})", self)
-            action_restore.triggered.connect(lambda: self.requestLiveWeightChange.emit(conn_data, float(orig_weight)))
-            menu.addAction(action_restore)
-            
+
         elif item_type == 'device':
             dev_data = data.get('device')
             model = dev_data.get('model', 'Device')
@@ -2058,17 +2377,28 @@ class GraphOverviewWidget(QWidget):
     
     def _get_devices_for_pop(self, node, pop_idx):
 
-        
+        # FIX: Dedup per ID, falls im State noch alte Duplikate liegen (z.B. aus
+        # gespeicherten Graphen die mit dem frueheren Doppel-Append-Bug erzeugt wurden).
         dev_list = []
+        seen_ids = set()
         
+        def add_if_new(d):
+            dev_id = d.get('id')
+            # Fallback-Key wenn keine ID vorhanden ist
+            key = dev_id if dev_id is not None else (d.get('model'), d.get('target_pop_id'), id(d))
+            if key in seen_ids:
+                return
+            seen_ids.add(key)
+            dev_list.append(d)
+
         if hasattr(node, 'parameters') and 'devices' in node.parameters:
             for dev in node.parameters['devices']:
                 if dev.get('target_pop_id') == pop_idx:
-                    dev_list.append(dev)
+                    add_if_new(dev)
         elif hasattr(node, 'devices'):
             for dev in node.devices:
                 if dev.get('target_pop_id') == pop_idx:
-                    dev_list.append(dev)
+                    add_if_new(dev)
                     
         return dev_list
 
@@ -2240,11 +2570,18 @@ class GraphOverviewWidget(QWidget):
     def _get_connections_for_pop(self, node, pop_idx):
         if not hasattr(node, 'connections') or not node.connections:
             return []
-        
+
+        # FIX: Dedup per Connection-ID (schuetzt gegen alte Duplikate in gespeichertem State)
         result = []
+        seen_ids = set()
         for conn in node.connections:
             source = conn.get('source', {})
             if source.get('node_id') == node.id and source.get('pop_id') == pop_idx:
+                cid = conn.get('id')
+                key = cid if cid is not None else id(conn)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
                 result.append(conn)
         return result
     
@@ -2393,6 +2730,7 @@ class GraphCreatorWidget(QWidget):
 
 
     def init_ui(self):
+        import copy
         main_layout = QVBoxLayout(self)
         
         header_layout = QHBoxLayout()
@@ -2503,7 +2841,7 @@ class GraphCreatorWidget(QWidget):
         placeholder = QLabel("← Select a Node or Population", alignment=Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("font-size: 14px; color: #999;")
         self.editor_stack.addWidget(placeholder)
-        self.node_param_widget = NodeParametersWidget(node_parameters1.copy())
+        self.node_param_widget = NodeParametersWidget(copy.deepcopy(node_parameters1))
         self.node_param_widget.paramsChanged.connect(self.save_node_params)
         self.editor_stack.addWidget(self.node_param_widget)
         self.pop_param_widget = NeuronParametersWidget()
@@ -2633,6 +2971,9 @@ class GraphCreatorWidget(QWidget):
                     'params': pop.get('params', {}),
                     'polynomials': pop.get('polynomials', {})
                 }
+                # shape_params (Tool-Geometrie pro Pop) mitkopieren
+                if 'shape_params' in pop:
+                    clean_pop['shape_params'] = dict(pop['shape_params'])
                 clean_populations.append(clean_pop)
 
         data_to_copy = {
@@ -2705,6 +3046,7 @@ class GraphCreatorWidget(QWidget):
         
         node = self.node_list[self.current_node_idx]
         pop_idx = len(node['populations'])
+        tool_type = node['params'].get('tool_type', 'custom')
         
         default_polynomials = {
             'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
@@ -2712,11 +3054,26 @@ class GraphCreatorWidget(QWidget):
             'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
         }
         
-        node['populations'].append({
+        # Bei Tool-Types: shape_params aus aktuellem Tool-Panel snapshotten,
+        # bzw. von Defaults nehmen. Dadurch erbt die neue Pop sinnvolle Werte.
+        new_pop = {
             'model': 'iaf_psc_alpha',
             'params': {},
             'polynomials': default_polynomials
-        })
+        }
+        if tool_type != 'custom':
+            current_panel = self.node_param_widget.get_current_params()
+            shape_params = extract_shape_params(tool_type, current_panel)
+            # Falls gar nichts im Panel: pure Defaults
+            if not shape_params:
+                shape_params = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+            new_pop['shape_params'] = shape_params
+            # Modell aus Tool-Panel übernehmen falls gesetzt
+            tool_model = current_panel.get('tool_neuron_model')
+            if tool_model:
+                new_pop['model'] = tool_model
+        
+        node['populations'].append(new_pop)
         
         num_pops = len(node['populations'])
         self.node_param_widget.set_population_count(num_pops)
@@ -2821,19 +3178,18 @@ class GraphCreatorWidget(QWidget):
                 encoded_polynoms_per_type = [[]]
                 prob_vec = [1.0]
                 pop_nest_params = [{}]
+                # Shape-Params aus den Node-Globalen Werten ableiten
+                shape_params_per_pop = [extract_shape_params(tool_type, node['params'])]
             elif tool_type in ('Blob', 'Cone', 'CCW', 'Grid'):
-                # Bei Tool-Typen: tool_neuron_model hat Priorität über existierende Populations
-                selected_model = node['params'].get('tool_neuron_model', None)
-                model_changed = False
-                
-                if selected_model:
-                    # Prüfe ob sich das Modell geändert hat
-                    if populations:
-                        old_models = [pop.get('model') for pop in populations]
-                        model_changed = any(m != selected_model for m in old_models)
-                    neuron_models = [selected_model] * max(1, len(populations))
+                # WICHTIG: Pro Population eigenes neuron_model erlauben.
+                # Falls eine Population kein gültiges Modell hat, fällt sie auf
+                # den globalen tool_neuron_model-Default zurück.
+                fallback_model = node['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+                if populations:
+                    neuron_models = [pop.get('model') or fallback_model
+                                     for pop in populations]
                 else:
-                    neuron_models = [pop['model'] for pop in populations] if populations else ['iaf_psc_alpha']
+                    neuron_models = [fallback_model]
                 
                 types = list(range(len(populations))) if populations else [0]
                 
@@ -2852,11 +3208,21 @@ class GraphCreatorWidget(QWidget):
                 if not prob_vec or len(prob_vec) != num_pops:
                     prob_vec = [1.0 / num_pops] * num_pops if num_pops > 0 else [1.0]
                 
-                # Bei Modelländerung alte Parameter verwerfen
-                if model_changed:
-                    pop_nest_params = [{}] * len(neuron_models)
-                else:
-                    pop_nest_params = [pop.get('params', {}) for pop in populations] if populations else [{}]
+                # Pro-Pop NEST-Params (ohne den frühreren "model_changed reset",
+                # der per-Pop-Params killte wenn ein anderer Mix vorlag)
+                pop_nest_params = ([pop.get('params', {}) for pop in populations]
+                                    if populations else [{}])
+                
+                # Pro-Pop SHAPE-Params: Wenn pop['shape_params'] fehlt,
+                # aus den Node-Globalen Werten ableiten (Backward-Compat).
+                shape_params_per_pop = []
+                for pop in populations:
+                    sp = pop.get('shape_params')
+                    if not sp:
+                        sp = extract_shape_params(tool_type, node['params'])
+                    shape_params_per_pop.append(dict(sp))
+                if not shape_params_per_pop:
+                    shape_params_per_pop = [extract_shape_params(tool_type, node['params'])]
             else:
                 neuron_models = [pop['model'] for pop in populations]
                 types = list(range(len(populations)))
@@ -2879,6 +3245,7 @@ class GraphCreatorWidget(QWidget):
                     prob_vec = [p/s for p in prob_vec] if s > 0 else [1.0/num_pops]*num_pops
                 
                 pop_nest_params = [pop.get('params', {}) for pop in populations]
+                shape_params_per_pop = [{} for _ in populations]
 
             node_params = {
                 'grid_size': node['params'].get('grid_size', [10, 10, 10]),
@@ -2891,6 +3258,8 @@ class GraphCreatorWidget(QWidget):
                 'auto_spike_recorder': node['params'].get('auto_spike_recorder', False),
                 'auto_multimeter': node['params'].get('auto_multimeter', False),
                 'tool_type': tool_type,
+                # Diese Top-Level-Tool-Werte bleiben als FALLBACK / Default für den
+                # Fall dass shape_params_per_pop fehlt (Backward-Kompat).
                 'n_neurons': node['params'].get('n_neurons', 100),
                 'radius': node['params'].get('radius', 5.0),
                 'radius_top': node['params'].get('radius_top', 1.0),
@@ -2900,6 +3269,37 @@ class GraphCreatorWidget(QWidget):
                 
                 'k': node['params'].get('k', 10.0),
                 'bidirectional': node['params'].get('bidirectional', False),
+                
+                # CCW/Cone synaptic Defaults (Top-Level Fallback)
+                'ccw_syn_config': node['params'].get('ccw_syn_config',
+                                                     {'synapse_model': 'static_synapse', 'extra_params': {}}),
+                # Backward-Compat: alter scalar key bleibt für ältere Save-States
+                'ccw_syn_model': node['params'].get('ccw_syn_model', 'static_synapse'),
+                'ccw_weight_ex': node['params'].get('ccw_weight_ex', 30.0),
+                'ccw_delay_ex': node['params'].get('ccw_delay_ex', 1.0),
+                'weight_in_factor': node['params'].get('weight_in_factor', 1.0),
+                
+                # CCW/Cone connection-rule Defaults (für non-similarity Modi)
+                'conn_rule': node['params'].get('conn_rule', 'similarity'),
+                'conn_p': node['params'].get('conn_p', 1.0),
+                'conn_indegree': node['params'].get('conn_indegree', 10),
+                'conn_outdegree': node['params'].get('conn_outdegree', 10),
+                
+                # Blob synaptic Defaults
+                'blob_p_ex': node['params'].get('blob_p_ex', 0.8),
+                'blob_p_in': node['params'].get('blob_p_in', 0.2),
+                'blob_weight_ex': node['params'].get('blob_weight_ex', 2.0),
+                'blob_weight_in': node['params'].get('blob_weight_in', -10.0),
+                'blob_delay_ex': node['params'].get('blob_delay_ex', 1.0),
+                'blob_delay_in': node['params'].get('blob_delay_in', 1.0),
+                'blob_syn_config_ex': node['params'].get('blob_syn_config_ex',
+                                                          {'synapse_model': 'static_synapse', 'extra_params': {}}),
+                'blob_syn_config_in': node['params'].get('blob_syn_config_in',
+                                                          {'synapse_model': 'static_synapse', 'extra_params': {}}),
+                # Backward-Compat
+                'blob_syn_model_ex': node['params'].get('blob_syn_model_ex', 'static_synapse'),
+                'blob_syn_model_in': node['params'].get('blob_syn_model_in', 'static_synapse'),
+                'blob_allow_autapses': node['params'].get('blob_allow_autapses', False),
                 
                 'stretch_x': node['params'].get('stretch_x', 1.0),
                 'stretch_y': node['params'].get('stretch_y', 1.0),
@@ -2921,6 +3321,7 @@ class GraphCreatorWidget(QWidget):
                 'distribution': prob_vec,
                 'encoded_polynoms_per_type': encoded_polynoms_per_type,
                 'population_nest_params': pop_nest_params,
+                'shape_params_per_pop': shape_params_per_pop,  # NEU: pro-Pop Tool-Geometrie
                 'polynom_max_power': node['params'].get('polynom_max_power', 5),
                 'conn_prob': [],
                 'field': None,
@@ -2973,9 +3374,8 @@ class GraphCreatorWidget(QWidget):
             
         node = self.node_list[self.current_node_idx]
         
-        if len(node['populations']) <= 1:
-            QMessageBox.warning(self, "Cannot Delete", "Cannot delete the last population of a node.")
-            return
+        # User-Wunsch: letzte Pop darf gelöscht werden, kein Auto-Anlegen.
+        # Knoten bleibt dann ohne Pop, User muss explizit Add Pop klicken.
         
         prob_vec = node['params'].get('probability_vector', [])
         deleted_prob = 0.0
@@ -3053,22 +3453,46 @@ class GraphCreatorWidget(QWidget):
         node_data = self.node_list[node_idx]
         tool_type = node_data['params'].get('tool_type', 'custom')
 
+        # Auto-add EINE Default-Pop nur beim allerersten Anwählen (UX-Hilfe).
+        # Für Tool-Types: shape_params aus den Node-Defaults snapshotten,
+        # damit die erste Pop sinnvolle Werte hat.
         if tool_type != 'custom' and not node_data['populations']:
             model = node_data['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+            shape_params = extract_shape_params(tool_type, node_data['params'])
             node_data['populations'].append({
                 'model': model,
                 'params': {},
+                'shape_params': shape_params,
                 'polynomials': {'x': [], 'y': [], 'z': []}
             })
+            # WICHTIG: prob_vec mit der neuen Pop synchronisieren, sonst
+            # bleibt es [] und die Build-Validierung schlägt fehl.
+            node_data['params']['probability_vector'] = [1.0]
 
         num_pops = len(node_data['populations'])
         self.node_param_widget.set_population_count(num_pops)
-        self.node_param_widget.load_data(node_data['params'])
+        
+        # Tool-Panel: bei Tool-Types die Shape-Params der ersten Pop einmergen,
+        # damit der User die pop-spezifischen Werte sieht (statt veralteter
+        # Node-Globaler-Werte).
+        load_params = dict(node_data['params'])
+        if tool_type != 'custom' and num_pops > 0:
+            first_pop = node_data['populations'][0]
+            shape = first_pop.get('shape_params', {})
+            if not shape:
+                shape = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+                first_pop['shape_params'] = shape
+            load_params.update(shape)
+            load_params['tool_neuron_model'] = first_pop.get(
+                'model', load_params.get('tool_neuron_model'))
+        
+        self.node_param_widget.load_data(load_params)
         self.editor_stack.setCurrentIndex(1)
         
         self.update_population_list()
         
-        self.add_pop_btn.setEnabled(tool_type == 'custom')
+        # FIX: Add Pop ist jetzt für ALLE Tool-Typen erlaubt (Multi-Pop)
+        self.add_pop_btn.setEnabled(True)
 
     def load_structure_preset(self, name, models, probs, grid_size=[10,10,10]):
         print(f"Loading Structure Preset: {name}")
@@ -3112,18 +3536,41 @@ class GraphCreatorWidget(QWidget):
             if 'center_of_mass' in params:
                 params['m'] = params['center_of_mass'].copy()
             
-            num_pops = len(self.node_list[self.current_node_idx]['populations'])
+            node = self.node_list[self.current_node_idx]
+            num_pops = len(node['populations'])
             if num_pops > 0:
+                # Robuste prob_vec Behandlung: bei Mismatch oder Null-Summe
+                # gleichmäßig re-initialisieren (statt mit 0.0 padden).
                 current_probs = params.get('probability_vector', [])
-                while len(current_probs) < num_pops:
-                    current_probs.append(0.0)
-                if len(current_probs) > num_pops:
-                    current_probs = current_probs[:num_pops]
+                needs_reset = (
+                    not current_probs
+                    or len(current_probs) != num_pops
+                    or sum(current_probs) <= 1e-9
+                )
+                if needs_reset:
+                    current_probs = [1.0 / num_pops] * num_pops
                 params['probability_vector'] = current_probs
                 
                 self.node_param_widget.auto_save = False
                 self.node_param_widget.load_data(params)
                 self.node_param_widget.auto_save = True
+            
+            # Bei Tool-Types: Shape-Params auf die aktuell gewählte Pop spiegeln
+            # (oder Pop 0, wenn keine explizit gewählt). Tool-Type-Wechsel auf
+            # 'custom' überspringen.
+            tool_type = params.get('tool_type', 'custom')
+            if tool_type != 'custom' and num_pops > 0:
+                target_pop_idx = self.current_pop_idx if self.current_pop_idx is not None else 0
+                if 0 <= target_pop_idx < num_pops:
+                    target_pop = node['populations'][target_pop_idx]
+                    target_pop['shape_params'] = extract_shape_params(tool_type, params)
+                    # Modell aus Tool-Panel auch übernehmen
+                    tm = params.get('tool_neuron_model')
+                    if tm:
+                        target_pop['model'] = tm
+                        if 'button' in target_pop:
+                            target_pop['button'].setText(
+                                f"Pop {target_pop_idx+1}: {tm}")
             
             self.node_list[self.current_node_idx]['params'] = params
     
@@ -3162,13 +3609,38 @@ class GraphCreatorWidget(QWidget):
         
         pop = node['populations'][pop_idx]
         
-        # FIX: First set the model, then load saved params
-        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        # Tool-Panel im NodeParametersWidget mit den Shape-Params dieser Pop
+        # syncen, damit beim Zurückwechseln zum Node-Editor die richtigen
+        # Werte angezeigt werden. (Tool-Panel selbst ist gerade nicht sichtbar.)
+        tool_type = node['params'].get('tool_type', 'custom')
+        if tool_type != 'custom':
+            merged = dict(node['params'])
+            shape = pop.get('shape_params', {})
+            if not shape:
+                shape = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+                pop['shape_params'] = shape
+            merged.update(shape)
+            # Modell ins Tool-Panel
+            merged['tool_neuron_model'] = pop.get('model', merged.get('tool_neuron_model'))
+            self.node_param_widget.auto_save = False
+            self.node_param_widget.load_data(merged)
+            self.node_param_widget.auto_save = True
         
-        # FIX: Load saved parameters into the UI widgets AFTER model change
+        # KRITISCH: NEST-Param-Widget IMMER frisch aus dem Modell rebuilden.
+        # Vorher: bei leeren pop['params'] blieben Geist-Werte vom letzten Pop
+        # in der UI stehen und wurden beim "Save Parameters"-Click auf den
+        # neuen Pop kopiert. Jetzt: blockSignals + manueller on_model_changed
+        # garantiert clear_params + Default-Werte aus functional_models.json,
+        # SYNCHRON (kein QTimer mehr - das war die zweite Race).
+        self.pop_param_widget.blockSignals(True)
+        self.pop_param_widget.model_combo.blockSignals(True)
+        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        self.pop_param_widget.model_combo.blockSignals(False)
+        self.pop_param_widget.on_model_changed(pop['model'])
+        # Synchron load_params, NICHT via QTimer (race-prone)
         if pop.get('params'):
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self.pop_param_widget.load_params(pop['params']))
+            self.pop_param_widget.load_params(pop['params'])
+        self.pop_param_widget.blockSignals(False)
         
         self.editor_stack.setCurrentIndex(2)
     
@@ -3252,6 +3724,7 @@ class EditGraphWidget(QWidget):
         self.init_ui()
     
     def init_ui(self):
+        import copy
         main_layout = QVBoxLayout(self)
         
         selector_layout = QHBoxLayout()
@@ -3367,7 +3840,7 @@ class EditGraphWidget(QWidget):
         placeholder.setStyleSheet("font-size: 14px; color: #999;")
         self.editor_stack.addWidget(placeholder)
         
-        self.node_param_widget = NodeParametersWidget(node_parameters1.copy())
+        self.node_param_widget = NodeParametersWidget(copy.deepcopy(node_parameters1))
         self.node_param_widget.paramsChanged.connect(self.save_node_params)
         self.editor_stack.addWidget(self.node_param_widget)
         
@@ -3460,13 +3933,21 @@ class EditGraphWidget(QWidget):
         node_data_wrapper = self.node_list[target_node_idx]
         connections = node_data_wrapper['params'].get('connections', [])
         new_conns = [c for c in connections if c.get('id') != conn_id]
+        # FIX: Alle drei Connection-Referenzen konsistent aktualisieren, damit der
+        # Fallback in _build_node_params nicht auf eine alte Liste zurueckfaellt.
         node_data_wrapper['params']['connections'] = new_conns
-        
+
         if node_data_wrapper.get('original_node'):
             src_node_obj = node_data_wrapper['original_node']
+            # 1) Das Attribut
             if hasattr(src_node_obj, 'connections'):
                 src_node_obj.connections = [c for c in src_node_obj.connections if c.get('id') != conn_id]
-            
+            # 2) Der Parameter-Dict-Eintrag (WAR vorher nicht aktualisiert -> "alle Connections weg"-Bug)
+            if hasattr(src_node_obj, 'parameters') and 'connections' in src_node_obj.parameters:
+                src_node_obj.parameters['connections'] = [
+                    c for c in src_node_obj.parameters['connections'] if c.get('id') != conn_id
+                ]
+
             tgt_gid = conn_data['target']['graph_id']
             tgt_nid = conn_data['target']['node_id']
             tgt_node_obj = None
@@ -3630,9 +4111,7 @@ class EditGraphWidget(QWidget):
             
         node_wrapper = self.node_list[self.current_node_idx]
         
-        if len(node_wrapper['populations']) <= 1:
-            QMessageBox.warning(self, "Cannot Delete", "Cannot delete the last population of a node.")
-            return
+        # User-Wunsch: letzte Pop darf gelöscht werden, kein Auto-Anlegen.
         
         prob_vec = node_wrapper['params'].get('probability_vector', [])
         deleted_prob = 0.0
@@ -3784,8 +4263,13 @@ class EditGraphWidget(QWidget):
         
         # FIX: First try to get params from node.parameters (original source of truth)
         stored_pop_params = []
+        stored_shape_params = []
         if hasattr(node, 'parameters'):
             stored_pop_params = node.parameters.get('population_nest_params', [])
+            stored_shape_params = node.parameters.get('shape_params_per_pop', [])
+        
+        node_tool_type = (node.parameters.get('tool_type', 'custom')
+                          if hasattr(node, 'parameters') else 'custom')
         
         if hasattr(node, 'population') and node.population:
             for pop_idx, nest_pop in enumerate(node.population):
@@ -3818,7 +4302,16 @@ class EditGraphWidget(QWidget):
                         if len(poly_list) >= 3:
                             polynomials = {'x': poly_list[0], 'y': poly_list[1], 'z': poly_list[2]}
                 
-                populations.append({'model': model, 'params': params, 'polynomials': polynomials})
+                # Pro-Pop shape_params zurück-mappen (Backward-Compat: aus
+                # node.parameters globalen Tool-Werten falls fehlend)
+                pop_dict = {'model': model, 'params': params, 'polynomials': polynomials}
+                if node_tool_type != 'custom':
+                    if pop_idx < len(stored_shape_params) and stored_shape_params[pop_idx]:
+                        pop_dict['shape_params'] = dict(stored_shape_params[pop_idx])
+                    elif hasattr(node, 'parameters'):
+                        pop_dict['shape_params'] = extract_shape_params(
+                            node_tool_type, node.parameters)
+                populations.append(pop_dict)
         
         node_data = {
             'params': node.parameters.copy() if hasattr(node, 'parameters') else {},
@@ -3878,9 +4371,38 @@ class EditGraphWidget(QWidget):
                 node['button'].setStyleSheet("")
         self.remove_node_btn.setEnabled(len(self.node_list) > 1)
 
-        num_pops = len(self.node_list[node_idx]['populations'])
+        node_data = self.node_list[node_idx]
+        tool_type = node_data['params'].get('tool_type', 'custom')
+        
+        # Konsistent mit GraphCreatorWidget: Auto-add EINE Default-Pop bei
+        # leerem Tool-Type-Knoten + prob_vec setzen.
+        if tool_type != 'custom' and not node_data['populations']:
+            model = node_data['params'].get('tool_neuron_model', 'iaf_psc_alpha')
+            shape_params = extract_shape_params(tool_type, node_data['params'])
+            node_data['populations'].append({
+                'model': model,
+                'params': {},
+                'shape_params': shape_params,
+                'polynomials': {'x': [], 'y': [], 'z': []}
+            })
+            node_data['params']['probability_vector'] = [1.0]
+        
+        num_pops = len(node_data['populations'])
         self.node_param_widget.set_population_count(num_pops)
-        self.node_param_widget.load_data(self.node_list[node_idx]['params'])
+        
+        # Tool-Panel mit Shape-Params der ersten Pop mergen, falls Tool-Type
+        load_params = dict(node_data['params'])
+        if tool_type != 'custom' and num_pops > 0:
+            first_pop = node_data['populations'][0]
+            shape = first_pop.get('shape_params', {})
+            if not shape:
+                shape = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+                first_pop['shape_params'] = shape
+            load_params.update(shape)
+            load_params['tool_neuron_model'] = first_pop.get(
+                'model', load_params.get('tool_neuron_model'))
+        
+        self.node_param_widget.load_data(load_params)
         self.editor_stack.setCurrentIndex(1)
         
         self.update_population_list()
@@ -3889,16 +4411,38 @@ class EditGraphWidget(QWidget):
     def save_node_params(self, params):
         if self.current_node_idx is not None:
             params['m'] = params['center_of_mass'].copy()
-            num_pops = len(self.node_list[self.current_node_idx]['populations'])
+            node = self.node_list[self.current_node_idx]
+            num_pops = len(node['populations'])
             if num_pops > 0:
+                # Robuste prob_vec Behandlung (kein 0.0-Padding, das zu prob_vec=0 führt)
                 current_probs = params.get('probability_vector', [])
-                while len(current_probs) < num_pops: current_probs.append(0.0)
-                if len(current_probs) > num_pops: current_probs = current_probs[:num_pops]
+                needs_reset = (
+                    not current_probs
+                    or len(current_probs) != num_pops
+                    or sum(current_probs) <= 1e-9
+                )
+                if needs_reset:
+                    current_probs = [1.0 / num_pops] * num_pops
                 params['probability_vector'] = current_probs
                 
                 self.node_param_widget.auto_save = False
                 self.node_param_widget.load_data(params)
                 self.node_param_widget.auto_save = True
+            
+            # Tool-Type: Shape-Params auf aktuelle (oder erste) Pop spiegeln
+            tool_type = params.get('tool_type', 'custom')
+            if tool_type != 'custom' and num_pops > 0:
+                target_pop_idx = self.current_pop_idx if self.current_pop_idx is not None else 0
+                if 0 <= target_pop_idx < num_pops:
+                    target_pop = node['populations'][target_pop_idx]
+                    target_pop['shape_params'] = extract_shape_params(tool_type, params)
+                    tm = params.get('tool_neuron_model')
+                    if tm:
+                        target_pop['model'] = tm
+                        if 'button' in target_pop:
+                            target_pop['button'].setText(
+                                f"Pop {target_pop_idx+1}: {tm}")
+            
             self.node_list[self.current_node_idx]['params'] = params
     
     def add_population(self):
@@ -3906,13 +4450,24 @@ class EditGraphWidget(QWidget):
         self.save_current_population_params()
         node = self.node_list[self.current_node_idx]
         pop_idx = len(node['populations'])
+        tool_type = node['params'].get('tool_type', 'custom')
         
         default_polynomials = {
             'x': generate_biased_polynomial(axis_idx=0, max_degree=2),
             'y': generate_biased_polynomial(axis_idx=1, max_degree=2),
             'z': generate_biased_polynomial(axis_idx=2, max_degree=2)
         }
-        node['populations'].append({'model': 'iaf_psc_alpha', 'params': {}, 'polynomials': default_polynomials})
+        new_pop = {'model': 'iaf_psc_alpha', 'params': {}, 'polynomials': default_polynomials}
+        if tool_type != 'custom':
+            current_panel = self.node_param_widget.get_current_params()
+            shape_params = extract_shape_params(tool_type, current_panel)
+            if not shape_params:
+                shape_params = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+            new_pop['shape_params'] = shape_params
+            tool_model = current_panel.get('tool_neuron_model')
+            if tool_model:
+                new_pop['model'] = tool_model
+        node['populations'].append(new_pop)
         
         num_pops = len(node['populations'])
         self.node_param_widget.set_population_count(num_pops)
@@ -3949,14 +4504,30 @@ class EditGraphWidget(QWidget):
                 pop['button'].setStyleSheet("")
         pop = node['populations'][pop_idx]
         
-        # FIX: First set the model, then load saved params
-        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        # Tool-Panel mit pop-spezifischen shape_params syncen
+        tool_type = node['params'].get('tool_type', 'custom')
+        if tool_type != 'custom':
+            merged = dict(node['params'])
+            shape = pop.get('shape_params', {})
+            if not shape:
+                shape = dict(SHAPE_PARAM_DEFAULTS.get(tool_type, {}))
+                pop['shape_params'] = shape
+            merged.update(shape)
+            merged['tool_neuron_model'] = pop.get('model', merged.get('tool_neuron_model'))
+            self.node_param_widget.auto_save = False
+            self.node_param_widget.load_data(merged)
+            self.node_param_widget.auto_save = True
         
-        # FIX: Load saved parameters into the UI widgets AFTER model change
+        # KRITISCH: NEST-Param-Widget IMMER frisch rebuilden + SYNCHRON
+        # load_params (vorher QTimer war race-prone).
+        self.pop_param_widget.blockSignals(True)
+        self.pop_param_widget.model_combo.blockSignals(True)
+        self.pop_param_widget.model_combo.setCurrentText(pop['model'])
+        self.pop_param_widget.model_combo.blockSignals(False)
+        self.pop_param_widget.on_model_changed(pop['model'])
         if pop.get('params'):
-            # Use QTimer to ensure widgets are created after model change
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self.pop_param_widget.load_params(pop['params']))
+            self.pop_param_widget.load_params(pop['params'])
+        self.pop_param_widget.blockSignals(False)
         
         self.editor_stack.setCurrentIndex(2)
         self.remove_pop_btn.setEnabled(True)
@@ -3971,7 +4542,12 @@ class EditGraphWidget(QWidget):
         clean_populations = []
         if 'populations' in source_node:
             for pop in source_node['populations']:
-                clean_pop = {'model': pop.get('model'), 'params': pop.get('params', {}), 'polynomials': pop.get('polynomials', {})}
+                clean_pop = {'model': pop.get('model'),
+                             'params': pop.get('params', {}),
+                             'polynomials': pop.get('polynomials', {})}
+                # shape_params (Tool-Geometrie pro Pop) mitkopieren
+                if 'shape_params' in pop:
+                    clean_pop['shape_params'] = dict(pop['shape_params'])
                 clean_populations.append(clean_pop)
         
         data_to_copy = {'params': source_node['params'], 'populations': clean_populations}
@@ -4041,21 +4617,14 @@ class EditGraphWidget(QWidget):
             encoded_polynoms_per_type = [[]]
             prob_vec = [1.0]
             pop_nest_params = [{}]
+            shape_params_per_pop = [extract_shape_params(tool_type, raw_params)]
         elif tool_type in ('Blob', 'Cone', 'CCW', 'Grid'):
-            # Bei Tool-Typen: tool_neuron_model hat Priorität über existierende Populations
-            selected_model = raw_params.get('tool_neuron_model', None)
-            model_changed = False
-            
-            if selected_model:
-                # Prüfe ob sich das Modell geändert hat
-                if populations:
-                    old_models = [pop.get('model') for pop in populations]
-                    model_changed = any(m != selected_model for m in old_models)
-                # Wenn tool_neuron_model gesetzt ist, überschreibe alle Populations damit
-                neuron_models = [selected_model] * max(1, len(populations))
+            # Pro-Pop Modelle erlauben (statt globalem Override)
+            fallback_model = raw_params.get('tool_neuron_model', 'iaf_psc_alpha')
+            if populations:
+                neuron_models = [pop.get('model') or fallback_model for pop in populations]
             else:
-                # Fallback auf existierende Populations
-                neuron_models = [pop['model'] for pop in populations] if populations else ['iaf_psc_alpha']
+                neuron_models = [fallback_model]
             
             # Setze die anderen erforderlichen Variablen
             types = list(range(len(populations))) if populations else [0]
@@ -4073,11 +4642,18 @@ class EditGraphWidget(QWidget):
             if not prob_vec or len(prob_vec) != len(neuron_models):
                 prob_vec = [1.0 / len(neuron_models)] * len(neuron_models)
             
-            # WICHTIG: Bei Modelländerung die alten Parameter verwerfen (sie passen nicht zum neuen Modell)
-            if model_changed:
-                pop_nest_params = [{}] * len(neuron_models)
-            else:
-                pop_nest_params = [pop.get('params', {}) for pop in populations] if populations else [{}]
+            pop_nest_params = ([pop.get('params', {}) for pop in populations]
+                                if populations else [{}])
+            
+            # Pro-Pop Shape-Params (Backward-Compat: falls fehlend, aus Node-Globals)
+            shape_params_per_pop = []
+            for pop in populations:
+                sp = pop.get('shape_params')
+                if not sp:
+                    sp = extract_shape_params(tool_type, raw_params)
+                shape_params_per_pop.append(dict(sp))
+            if not shape_params_per_pop:
+                shape_params_per_pop = [extract_shape_params(tool_type, raw_params)]
         else:
             neuron_models = [pop['model'] for pop in populations]
             types = list(range(len(populations)))
@@ -4098,6 +4674,7 @@ class EditGraphWidget(QWidget):
                     prob_vec = []
             
             pop_nest_params = [pop.get('params', {}) for pop in populations]
+            shape_params_per_pop = [{} for _ in populations]
 
         old_com = raw_params.get('old_center_of_mass', None)
         if old_com is None and node_data.get('original_node'):
@@ -4119,17 +4696,33 @@ class EditGraphWidget(QWidget):
         sz = float(raw_params.get('stretch_z', 1.0))
         transform_matrix = [[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, sz]]
 
+        # FIX: Connections und Devices haben UNTERSCHIEDLICHE Source-of-Truth!
+        #
+        # - Connections werden ueber den Editor/ConnectionTool verwaltet und
+        #   landen in node_data['params']['connections'] (raw_params).
+        #   -> raw_params bevorzugen. Nur wenn raw_params keinen Eintrag hat
+        #      (z.B. neuer Node, noch nie editiert), auf original_node zurueckfallen.
+        #
+        # - Devices werden ueber den Device-Manager DIREKT auf dem Node-Objekt
+        #   modifiziert (node.devices, node.parameters['devices']), NICHT im
+        #   Editor-Dict. Der Editor-State ist deshalb fuer Devices veraltet.
+        #   -> original_node bevorzugen. Raw_params nur als Fallback.
+        #
+        # Vorher (falscher Fix): raw_params fuer BEIDES bevorzugt -> Devices gingen
+        # beim Save einer Connection-Aenderung verloren.
+
         existing_connections = []
         original_node = node_data.get('original_node')
-        
-        if original_node:
+
+        # Connections: Editor-State ist autoritativ WENN der Key existiert
+        # (auch wenn die Liste explizit leer ist - User hat alles geloescht).
+        if 'connections' in raw_params:
+            existing_connections = [copy.deepcopy(c) for c in raw_params['connections']]
+        elif original_node:
             if hasattr(original_node, 'connections') and original_node.connections:
                 existing_connections = [copy.deepcopy(c) for c in original_node.connections]
             elif hasattr(original_node, 'parameters') and 'connections' in original_node.parameters:
                 existing_connections = [copy.deepcopy(c) for c in original_node.parameters['connections']]
-        
-        if not existing_connections:
-            existing_connections = raw_params.get('connections', [])
 
         existing_devices = []
         if original_node:
@@ -4138,15 +4731,35 @@ class EditGraphWidget(QWidget):
                 source_list = original_node.devices
             elif hasattr(original_node, 'parameters') and 'devices' in original_node.parameters:
                 source_list = original_node.parameters['devices']
-            
+
             for d in source_list:
                 d_safe = d.copy()
                 if 'runtime_gid' in d_safe:
                     d_safe['runtime_gid'] = None
                 existing_devices.append(copy.deepcopy(d_safe))
-        
+
+        # Fallback fuer Devices: nur wenn original_node gar keine Devices hat,
+        # raw_params konsultieren (betrifft neu angelegte Nodes).
         if not existing_devices:
-            existing_devices = raw_params.get('devices', [])
+            raw_devs = raw_params.get('devices', None)
+            if raw_devs:
+                for d in raw_devs:
+                    d_safe = d.copy()
+                    if 'runtime_gid' in d_safe:
+                        d_safe['runtime_gid'] = None
+                    existing_devices.append(copy.deepcopy(d_safe))
+
+        # ID-basierte Deduplication gegen alte Doppelt-Append-Artefakte
+        seen_dev_ids = set()
+        deduped_devices = []
+        for d in existing_devices:
+            did = d.get('id')
+            key = did if did is not None else id(d)
+            if key in seen_dev_ids:
+                continue
+            seen_dev_ids.add(key)
+            deduped_devices.append(d)
+        existing_devices = deduped_devices
 
         for dev in existing_devices:
             if 'runtime_gid' in dev: dev['runtime_gid'] = None
@@ -4162,15 +4775,39 @@ class EditGraphWidget(QWidget):
             'probability_vector': prob_vec,
             'encoded_polynoms_per_type': encoded_polynoms_per_type,
             'population_nest_params': pop_nest_params,
+            'shape_params_per_pop': shape_params_per_pop,  # NEU: pro-Pop Tool-Geometrie
             'auto_spike_recorder': raw_params.get('auto_spike_recorder', False),
             'auto_multimeter': raw_params.get('auto_multimeter', False),
             
             'devices': existing_devices,
             'connections': existing_connections,
 
+            # Top-Level-Tool-Werte als FALLBACK / Default (Backward-Compat)
+            'ccw_syn_config': raw_params.get('ccw_syn_config',
+                                              {'synapse_model': 'static_synapse', 'extra_params': {}}),
             'ccw_syn_model': raw_params.get('ccw_syn_model', 'static_synapse'),
             'ccw_weight_ex': float(raw_params.get('ccw_weight_ex', 30.0)),
             'ccw_delay_ex': float(raw_params.get('ccw_delay_ex', 1.0)),
+            'weight_in_factor': float(raw_params.get('weight_in_factor', 1.0)),
+            # CCW/Cone connection-rule Defaults
+            'conn_rule': raw_params.get('conn_rule', 'similarity'),
+            'conn_p': float(raw_params.get('conn_p', 1.0)),
+            'conn_indegree': int(raw_params.get('conn_indegree', 10)),
+            'conn_outdegree': int(raw_params.get('conn_outdegree', 10)),
+            # Blob synaptic Defaults
+            'blob_p_ex': float(raw_params.get('blob_p_ex', 0.8)),
+            'blob_p_in': float(raw_params.get('blob_p_in', 0.2)),
+            'blob_weight_ex': float(raw_params.get('blob_weight_ex', 2.0)),
+            'blob_weight_in': float(raw_params.get('blob_weight_in', -10.0)),
+            'blob_delay_ex': float(raw_params.get('blob_delay_ex', 1.0)),
+            'blob_delay_in': float(raw_params.get('blob_delay_in', 1.0)),
+            'blob_syn_config_ex': raw_params.get('blob_syn_config_ex',
+                                                   {'synapse_model': 'static_synapse', 'extra_params': {}}),
+            'blob_syn_config_in': raw_params.get('blob_syn_config_in',
+                                                   {'synapse_model': 'static_synapse', 'extra_params': {}}),
+            'blob_syn_model_ex': raw_params.get('blob_syn_model_ex', 'static_synapse'),
+            'blob_syn_model_in': raw_params.get('blob_syn_model_in', 'static_synapse'),
+            'blob_allow_autapses': bool(raw_params.get('blob_allow_autapses', False)),
             'k': float(raw_params.get('k', 10.0)),
             'bidirectional': bool(raw_params.get('bidirectional', False)),
             'n_neurons': int(raw_params.get('n_neurons', 100)),
@@ -4247,6 +4884,23 @@ class EditGraphWidget(QWidget):
         from PyQt6.QtWidgets import QMessageBox
         reply = QMessageBox.question(self, 'Delete Graph', f"Really delete '{self.current_graph.graph_name}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
+            # WICHTIG: Erst alle Nodes des Graphen einzeln raeumen damit
+            # Cross-Graph-Predecessoren in ANDEREN Graphen ihre Connection-
+            # Eintraege auf den geloeschten Graph verlieren. Erst danach
+            # den Graph selbst aus der Liste werfen.
+            try:
+                if hasattr(self.current_graph, 'dispose'):
+                    self.current_graph.dispose()
+                else:
+                    # Fallback fuer aeltere neuron_toolbox-Versionen
+                    for node in list(self.current_graph.node_list):
+                        try:
+                            self.current_graph.remove_node(node)
+                        except Exception as e:
+                            print(f"delete_graph cleanup: {e}")
+            except Exception as e:
+                print(f"delete_graph dispose error: {e}")
+            
             self.graph_list.remove(self.current_graph)
             global _nest_simulation_has_run
             import nest
@@ -4983,9 +5637,22 @@ class ConnectionTool(QWidget):
             if param_name in ['weight', 'delay']: continue
             
             p_type = info.get('type', 'float'); p_default = info.get('default', 0.0)
+            p_min = info.get('min', -1000000.0)
+            p_max = info.get('max', 1000000.0)
+            p_decimals = info.get('decimals', 2)
+            p_step = info.get('step', None)
             widget = None
-            if p_type == 'float': widget = DoubleInputField(param_name, default_value=float(p_default))
-            elif p_type == 'integer': widget = IntegerInputField(param_name, default_value=int(p_default))
+            if p_type == 'float':
+                widget = DoubleInputField(
+                    param_name, default_value=float(p_default),
+                    min_val=float(p_min), max_val=float(p_max),
+                    decimals=int(p_decimals), step=p_step,
+                )
+            elif p_type == 'integer':
+                widget = IntegerInputField(
+                    param_name, default_value=int(p_default),
+                    min_val=int(p_min), max_val=int(p_max),
+                )
             if widget:
                 self.dynamic_syn_params_layout.addWidget(widget)
                 self.syn_param_widgets[param_name] = widget
@@ -5049,7 +5716,25 @@ class BlinkingNetworkWidget(QWidget):
         self.timer.start(30)
 
     def set_base_opacity(self, value):
-        pass
+        """Updates the resting opacity of all edges. Called by the opacity
+        slider. Range 0.0..1.0. Pumps the new value into the edge_intensities
+        array (which the animate-loop dampens toward base_opacity each tick),
+        and refreshes the cell_data so PyVista picks up the change live."""
+        try:
+            self.base_opacity = float(value)
+        except (TypeError, ValueError):
+            return
+        # Push to the live edge mesh so the change is visible without
+        # having to wait for a flash to fade.
+        if self.edge_intensities is not None:
+            self.edge_intensities = np.full_like(self.edge_intensities, self.base_opacity)
+            if self.edge_mesh is not None:
+                self.edge_mesh.cell_data["glow"] = self.edge_intensities
+                if hasattr(self, 'plotter'):
+                    try:
+                        self.plotter.update()
+                    except Exception:
+                        pass
 
     def build_scene(self):
         self.plotter.clear()
@@ -5229,24 +5914,24 @@ SYNAPSE_MODELS = {
         'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'unit': 'ms'},
     },
     'stdp_synapse': {
-        'weight': {'type': 'float', 'default': 1.0},
-        'delay': {'type': 'float', 'default': 1.0, 'min': 0.1},
-        'tau_plus': {'type': 'float', 'default': 20.0, 'unit': 'ms'},
-        'lambda': {'type': 'float', 'default': 0.01},
-        'alpha': {'type': 'float', 'default': 1.0},
-        'mu_plus': {'type': 'float', 'default': 1.0},
-        'mu_minus': {'type': 'float', 'default': 1.0},
-        'Wmax': {'type': 'float', 'default': 100.0},
+        'weight': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 1000.0, 'step': 0.1, 'decimals': 4},
+        'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0, 'step': 0.1, 'decimals': 2},
+        'tau_plus': {'type': 'float', 'default': 20.0, 'unit': 'ms', 'min': 0.1, 'max': 1000.0, 'step': 1.0, 'decimals': 2},
+        'lambda': {'type': 'float', 'default': 0.01, 'min': 0.0, 'max': 1.0, 'step': 0.001, 'decimals': 5},
+        'alpha': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.05, 'decimals': 3},
+        'mu_plus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.1, 'decimals': 2},
+        'mu_minus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.1, 'decimals': 2},
+        'Wmax': {'type': 'float', 'default': 3.5, 'min': 0.0, 'max': 10000.0, 'step': 0.1, 'decimals': 2},
     },
     'stdp_synapse_hom': {
-        'weight': {'type': 'float', 'default': 1.0},
-        'delay': {'type': 'float', 'default': 1.0, 'min': 0.1},
-        'tau_plus': {'type': 'float', 'default': 20.0},
-        'lambda': {'type': 'float', 'default': 0.01},
-        'alpha': {'type': 'float', 'default': 1.0},
-        'mu_plus': {'type': 'float', 'default': 1.0},
-        'mu_minus': {'type': 'float', 'default': 1.0},
-        'Wmax': {'type': 'float', 'default': 100.0},
+        'weight': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 1000.0, 'step': 0.1, 'decimals': 4},
+        'delay': {'type': 'float', 'default': 1.0, 'min': 0.1, 'max': 100.0, 'step': 0.1, 'decimals': 2},
+        'tau_plus': {'type': 'float', 'default': 20.0, 'min': 0.1, 'max': 1000.0, 'step': 1.0, 'decimals': 2},
+        'lambda': {'type': 'float', 'default': 0.01, 'min': 0.0, 'max': 1.0, 'step': 0.001, 'decimals': 5},
+        'alpha': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.05, 'decimals': 3},
+        'mu_plus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.1, 'decimals': 2},
+        'mu_minus': {'type': 'float', 'default': 1.0, 'min': 0.0, 'max': 10.0, 'step': 0.1, 'decimals': 2},
+        'Wmax': {'type': 'float', 'default': 3.5, 'min': 0.0, 'max': 10000.0, 'step': 0.1, 'decimals': 2},
     },
     'tsodyks_synapse': {
         'weight': {'type': 'float', 'default': 1.0},
@@ -5576,6 +6261,20 @@ class ConnectionExecutor:
                             
                             if not exists:
                                 src_node_obj.connections.append(copy.deepcopy(connection))
+                            
+                            # Backref pflegen: damit Node.remove() später
+                            # diese Connection in src_node_obj.connections
+                            # findet (über tgt_node.prev). add_neighbor ist
+                            # idempotent — bei CCW-Self-Loop egal, bei
+                            # Cross-Node-Ring kritisch.
+                            try:
+                                tgt_g = self.graphs.get(connection.get('target', {}).get('graph_id'))
+                                if tgt_g:
+                                    tgt_n = tgt_g.get_node(connection.get('target', {}).get('node_id'))
+                                    if tgt_n:
+                                        src_node_obj.add_neighbor(tgt_n)
+                            except Exception:
+                                pass
                 except Exception as e:
                     print(f"Warning: Could not save ring connection to model: {e}")
                 
@@ -5871,6 +6570,71 @@ class ConnectionQueueWidget(QWidget):
         self.status_label.setText(f"{n} connection{'s' if n != 1 else ''}")
 
 
+def prune_dangling_connections(
+    graphs: Dict[int, Any],
+    verbose: bool = True
+) -> int:
+    """
+    Walks every node.connections list and drops entries whose source or
+    target node no longer exists in the current graphs. Also walks the
+    parameters['connections'] mirror.
+    
+    This is the safety net for in-memory drift: cross-graph predecessors
+    that were never registered in node.prev (e.g. because the project
+    file was loaded with an older code path), or any other case where
+    Node.remove() couldn't reach a connection entry.
+    
+    Returns: number of dangling connections removed.
+    """
+    # Build a fast lookup of (graph_id, node_id) -> bool over what exists
+    # right now. Use the actual node_list as ground truth (not node_dict
+    # — that one was bugged for a while; this function is the cleanup).
+    alive = set()
+    for g in graphs.values():
+        for n in g.node_list:
+            alive.add((g.graph_id, n.id))
+    
+    def _is_alive(endpoint):
+        if not isinstance(endpoint, dict):
+            return False
+        return (endpoint.get('graph_id'), endpoint.get('node_id')) in alive
+    
+    removed = 0
+    for graph_id, graph in graphs.items():
+        for node in graph.node_list:
+            if not getattr(node, 'connections', None):
+                continue
+            kept = []
+            for conn in node.connections:
+                src_ok = _is_alive(conn.get('source', {}))
+                tgt_ok = _is_alive(conn.get('target', {}))
+                if src_ok and tgt_ok:
+                    kept.append(conn)
+                else:
+                    removed += 1
+                    if verbose:
+                        s = conn.get('source', {})
+                        t = conn.get('target', {})
+                        nm = conn.get('name', '?')
+                        why = []
+                        if not src_ok: why.append(f"src G{s.get('graph_id')}N{s.get('node_id')} gone")
+                        if not tgt_ok: why.append(f"tgt G{t.get('graph_id')}N{t.get('node_id')} gone")
+                        print(f"  prune: dropping {nm} ({', '.join(why)})")
+            node.connections = kept
+            
+            # Mirror in parameters['connections'] if present
+            if hasattr(node, 'parameters') and isinstance(node.parameters, dict):
+                if 'connections' in node.parameters and node.parameters['connections']:
+                    node.parameters['connections'] = [
+                        c for c in node.parameters['connections']
+                        if _is_alive(c.get('source', {})) and _is_alive(c.get('target', {}))
+                    ]
+    
+    if verbose and removed > 0:
+        print(f"prune_dangling_connections: dropped {removed} stale connection(s)")
+    return removed
+
+
 def create_nest_connections_from_stored(
     graphs: Dict[int, Any],
     verbose: bool = True
@@ -5884,6 +6648,11 @@ def create_nest_connections_from_stored(
         print("\n" + "="*60)
         print("RECREATING ALL STORED CONNECTIONS")
         print("="*60)
+    
+    # Safety net: drop any connection pointing at a node that no longer
+    # exists. Catches drift from older project loads, mid-session deletes
+    # that couldn't reach cross-graph predecessors, etc.
+    prune_dangling_connections(graphs, verbose=verbose)
     
     all_connections = []
     
@@ -6144,6 +6913,19 @@ def import_connections_from_dict(
             node = graphs[graph_id].get_node(node_id)
             if node is not None:
                 node.connections.append(copy.deepcopy(conn))
+                
+                # Backref pflegen: ohne add_neighbor sind nach Import alle
+                # prev-Listen leer und Node.remove() saeubert nichts.
+                try:
+                    tgt = conn.get('target', {})
+                    tgt_graph = graphs.get(tgt.get('graph_id'))
+                    if tgt_graph:
+                        tgt_node = tgt_graph.get_node(tgt.get('node_id'))
+                        if tgt_node:
+                            node.add_neighbor(tgt_node)
+                except Exception:
+                    pass
+                
                 imported += 1
     
     return imported
@@ -6501,7 +7283,7 @@ def add_save_load_buttons(main_window, Graph_class=None, target_layout=None):
         widget.show()
     
     main_window.save_load_widget = widget
-    print("Save/Load Buttons hinzugefügt")
+    print("Save/Load buttons added")
     return widget
 
 class SimulationControlWidget(QWidget):
@@ -7525,8 +8307,15 @@ class ToolsWidget(QWidget):
             "runtime_gid": None
         }
             
+        # FIX: node.parameters['devices'] und node.devices teilen sich oft dieselbe
+        # Listen-Referenz (shallow copy). Dann appenden beide Aufrufe auf DIESELBE Liste
+        # -> Device wird doppelt eingetragen.
+        if 'devices' not in target_node.parameters:
+            target_node.parameters['devices'] = []
         target_node.parameters['devices'].append(device_record)
-        target_node.devices.append(device_record)
+        # Nur zusaetzlich appenden, wenn es wirklich separate Listen sind
+        if target_node.devices is not target_node.parameters['devices']:
+            target_node.devices.append(device_record)
         print(f"  ✓ Saved to Node Parameters (Total: {len(target_node.parameters['devices'])})")
 
         try:
@@ -8719,8 +9508,12 @@ class SimulationViewWidget(QWidget):
                     "is_manual_monitor": True
                  }
                  
+                 # FIX: Doppel-Append vermeiden (siehe oben)
+                 if 'devices' not in target_node.parameters:
+                     target_node.parameters['devices'] = []
                  target_node.parameters['devices'].append(device_record)
-                 target_node.devices.append(device_record)
+                 if target_node.devices is not target_node.parameters['devices']:
+                     target_node.devices.append(device_record)
                  
                  elec_id = self.next_electrode_id; self.next_electrode_id += 1
                  letter = f"M{elec_id}"
