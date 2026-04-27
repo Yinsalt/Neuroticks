@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSlider, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSizePolicy, QStackedWidget, QMessageBox, QProgressBar,
     QGridLayout, QFileDialog,QDoubleSpinBox,QTreeWidgetItemIterator,QInputDialog,
-    QFrame
+    QFrame, QDialog, QScrollArea, QDialogButtonBox
 )
 from ExtraTab import ExtraTabWidget
 import WidgetLib
@@ -1627,9 +1627,14 @@ class MainWindow(QMainWindow):
         
         self.tool_stack.addWidget(self.connection_tool)
         
+        # The "Population Examples" tab now hosts an Examples-folder browser.
+        # The old StructuresWidget (cortical regions) is still instantiated
+        # for backward compat (callers might use it via self.structures_widget)
+        # but is not added to the tool_stack — its slot belongs to examples.
         self.structures_widget = StructuresWidget()
         self.structures_widget.structureSelected.connect(self.on_structure_selected)
-        self.tool_stack.addWidget(self.structures_widget)
+        self.examples_widget = _ExamplesPage(main_window=self)
+        self.tool_stack.addWidget(self.examples_widget)
         
         self.tools_widget = ToolsWidget()
         self.tools_widget.update_graphs(graph_list)
@@ -3797,6 +3802,269 @@ class MainWindow(QMainWindow):
 
 
 
+    # ═══════════════════════════════════════════════════════════════
+    #  EXAMPLES — Examples/ folder browser
+    # ═══════════════════════════════════════════════════════════════
+
+    def _examples_dir(self):
+        """Return Path to the Examples/ folder. Create it if missing."""
+        import os
+        from pathlib import Path
+        # Sit next to Main.py so it's portable across installs
+        here = Path(os.path.dirname(os.path.abspath(__file__)))
+        d = here / "Examples"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"Examples dir create failed: {e}")
+        return d
+    
+    def _scan_examples(self):
+        """
+        Scan Examples/ for *.json files. Returns one entry per file:
+            (filepath, display_label, graph_count)
+        Files that don't parse or contain no graphs are skipped.
+        Multi-graph files import as a bundle so cross-graph connections
+        between them stay intact.
+        """
+        import json
+        from pathlib import Path
+        d = self._examples_dir()
+        results = []
+        if not d.exists():
+            return results
+        for fp in sorted(d.glob("*.json")):
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            graphs = data.get('graphs')
+            if isinstance(graphs, list) and graphs:
+                results.append((str(fp), fp.stem, len(graphs)))
+            elif 'graph' in data:
+                # Single-graph format
+                results.append((str(fp), fp.stem, 1))
+        return results
+    
+    def _refresh_examples_buttons(self):
+        """Tells the Examples page to re-scan the folder and rebuild buttons."""
+        if hasattr(self, 'examples_widget') and self.examples_widget is not None:
+            self.examples_widget.rebuild()
+    
+    def _on_example_clicked(self, filepath, display_label, graph_count):
+        """Ask for a displacement, then import the entire file (all graphs
+        with their cross-graph connections preserved) into the scene."""
+        import os
+        title = os.path.basename(filepath)
+        dlg = _DisplacementDialog(
+            f"{title} — {graph_count} graph(s)",
+            parent=self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        dx, dy, dz = dlg.get_displacement()
+        try:
+            self._import_example_file(filepath, np.array([dx, dy, dz], dtype=float))
+        except Exception as e:
+            self.status_bar.show_error(f"Example import failed: {e}")
+            print(f"Example import failed: {e}")
+            import traceback; traceback.print_exc()
+    
+    def _import_example_file(self, filepath, displacement):
+        """
+        Import ALL graphs in a file as a bundle, shifted by `displacement`.
+        Cross-graph connections between graphs in the same file stay intact
+        because every old graph_id is rewritten consistently to its new id.
+        Cross-graph connections that pointed at IDs not contained in the
+        file are left as-is (they would be dangling anyway and get pruned
+        on reset).
+        """
+        import json
+        import os
+        with open(filepath, 'r', encoding='utf-8') as f:
+            project_data = json.load(f)
+        
+        graphs_to_load = project_data.get('graphs', [])
+        if not graphs_to_load and 'graph' in project_data:
+            g_only = project_data['graph'].copy()
+            g_only['nodes'] = project_data.get('nodes', [])
+            graphs_to_load = [g_only]
+        if not graphs_to_load:
+            raise ValueError(f"No graphs in {os.path.basename(filepath)}")
+        
+        # Allocate consecutive new IDs for every graph in the file
+        next_id = max((g.graph_id for g in graph_list), default=-1) + 1
+        id_mapping = {}
+        for i, g_data in enumerate(graphs_to_load):
+            old_id = int(g_data.get('graph_id', i))
+            id_mapping[old_id] = next_id + i
+        
+        self.status_bar.set_status(
+            f"Importing {len(graphs_to_load)} graph(s) from "
+            f"{os.path.basename(filepath)}...",
+            color="#2E7D32",
+        )
+        QApplication.processEvents()
+        
+        new_graphs = []
+        for g_data in graphs_to_load:
+            old_id = int(g_data.get('graph_id', 0))
+            new_graph_id = id_mapping[old_id]
+            graph_name = g_data.get('graph_name', f'Imported_{new_graph_id}')
+            
+            # Shifted init position
+            init_pos = np.array(g_data.get('init_position', [0, 0, 0]), dtype=float) + displacement
+            
+            graph = Graph(
+                graph_name=graph_name,
+                graph_id=new_graph_id,
+                parameter_list=[],
+                polynom_max_power=g_data.get('polynom_max_power', 5),
+                polynom_decay=g_data.get('polynom_decay', 0.8),
+                position=init_pos.tolist(),
+                max_nodes=g_data.get('max_nodes', 100),
+            )
+            
+            nodes_data = sorted(g_data.get('nodes', []), key=lambda x: x.get('id', 0))
+            
+            for nd in nodes_data:
+                params = nd.get('parameters', {}).copy()
+                params['id'] = nd.get('id', 0)
+                params['name'] = nd.get('name', f"Node_{params['id']}")
+                params['graph_id'] = new_graph_id
+                
+                if 'center_of_mass' in nd:
+                    params['center_of_mass'] = (
+                        np.array(nd['center_of_mass'], dtype=float) + displacement
+                    )
+                elif 'center_of_mass' in params:
+                    params['center_of_mass'] = (
+                        np.array(params['center_of_mass'], dtype=float) + displacement
+                    )
+                
+                shifted_positions = None
+                if nd.get('positions'):
+                    shifted_positions = [
+                        np.array(p, dtype=float) + displacement
+                        for p in nd['positions']
+                    ]
+                
+                # Rewrite graph_ids in connection source/target via id_mapping.
+                # IDs not in the mapping (refs to graphs outside the file)
+                # are kept as-is — they may be dangling and prune_dangling
+                # will catch them on next reset.
+                adjusted_connections = []
+                for conn in nd.get('connections', []):
+                    new_conn = copy.deepcopy(conn)
+                    if 'source' in new_conn and new_conn['source']:
+                        old_src = new_conn['source'].get('graph_id')
+                        if old_src in id_mapping:
+                            new_conn['source']['graph_id'] = id_mapping[old_src]
+                    if 'target' in new_conn and new_conn['target']:
+                        old_tgt = new_conn['target'].get('graph_id')
+                        if old_tgt in id_mapping:
+                            new_conn['target']['graph_id'] = id_mapping[old_tgt]
+                    adjusted_connections.append(new_conn)
+                params['connections'] = adjusted_connections
+                
+                cleaned_devices = []
+                for dev in nd.get('devices', []):
+                    d_copy = copy.deepcopy(dev)
+                    d_copy['runtime_gid'] = None
+                    cleaned_devices.append(d_copy)
+                params['devices'] = cleaned_devices
+                
+                is_root = (nd.get('id', 0) == 0)
+                parent_id = nd.get('parent_id')
+                parent = graph.get_node(parent_id) if parent_id is not None else None
+                
+                new_node = graph.create_node(
+                    parameters=params,
+                    other=parent,
+                    is_root=is_root,
+                    auto_build=False,
+                )
+                
+                if shifted_positions is not None:
+                    new_node.positions = shifted_positions
+                    if 'center_of_mass' in params:
+                        new_node.center_of_mass = np.array(params['center_of_mass'], dtype=float)
+                
+                new_node.devices = cleaned_devices
+                new_node.connections = adjusted_connections
+                
+                if 'neuron_models' in nd:
+                    new_node.neuron_models = nd['neuron_models']
+                if 'types' in nd:
+                    new_node.types = nd['types']
+                    new_node.population = [None] * len(nd['types'])
+            
+            # Intra-graph prev/next
+            for nd in nodes_data:
+                node = graph.get_node(nd.get('id'))
+                if not node: continue
+                for nid in nd.get('next_ids', []):
+                    nxt = graph.get_node(nid)
+                    if nxt and nxt not in node.next: node.next.append(nxt)
+                for pid in nd.get('prev_ids', []):
+                    prv = graph.get_node(pid)
+                    if prv and prv not in node.prev: node.prev.append(prv)
+            
+            # Populate NEST
+            for node in graph.node_list:
+                if not hasattr(node, 'positions') or not node.positions:
+                    node.build()
+                elif all(len(p) == 0 for p in node.positions if p is not None):
+                    node.build()
+                node.populate_node()
+            
+            graph_list.append(graph)
+            new_graphs.append(graph)
+        
+        WidgetLib.next_graph_id = max(g.graph_id for g in graph_list) + 1
+        
+        # Cross-graph backref pass over EVERY graph (so backrefs work
+        # both within the imported bundle and to existing graphs).
+        global_lookup = {(g.graph_id, n.id): n for g in graph_list for n in g.node_list}
+        for g in new_graphs:
+            for node in g.node_list:
+                for conn in node.connections or []:
+                    tgt = conn.get('target', {}) or {}
+                    tn = global_lookup.get((tgt.get('graph_id'), tgt.get('node_id')))
+                    if tn is not None:
+                        node.add_neighbor(tn)
+        
+        # Build NEST connections for all newly imported graphs
+        graphs_dict = {g.graph_id: g for g in graph_list}
+        executor = ConnectionExecutor(graphs_dict)
+        all_new_conns = []
+        for g in new_graphs:
+            for n in g.node_list:
+                if hasattr(n, 'connections'):
+                    all_new_conns.extend(n.connections)
+        success, fail, _ = executor.execute_all(all_new_conns)
+        
+        # Refresh UI
+        if hasattr(self, 'tools_widget'):
+            self.tools_widget.update_graphs(graph_list)
+        self.update_visualizations()
+        self.graph_overview.update_tree()
+        if hasattr(self, 'connection_tool'):
+            self.connection_tool.refresh()
+        if hasattr(self, 'graph_editor'):
+            self.graph_editor.refresh_graph_list()
+        if hasattr(self, 'blink_widget'):
+            self.blink_widget.build_scene()
+        
+        graph_names = ", ".join(g.graph_name for g in new_graphs)
+        self.status_bar.show_success(
+            f"Imported {len(new_graphs)} graph(s) [{graph_names}] — "
+            f"{success} conns, {fail} failed"
+        )
+
     def merge_graphs_dialog(self):
 
         filepath, _ = QFileDialog.getOpenFileName(
@@ -4103,6 +4371,187 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 
+
+
+class _ExamplesPage(QWidget):
+    """
+    The "Population Examples" tab: lists every *.json file inside the
+    Examples/ folder. Each file is a button — clicking opens a sub-list
+    of all graphs the file contains, then a displacement dialog, then
+    the import.
+    
+    The actual scanning and importing logic lives on MainWindow
+    (_scan_examples, _import_example_file). This widget is just the UI.
+    """
+    
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main = main_window
+        self._build_ui()
+        self.rebuild()
+    
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        
+        # Header
+        header_frame = QFrame()
+        header_frame.setStyleSheet("background-color: #2b2b2b; border-bottom: 1px solid #444;")
+        hl = QVBoxLayout(header_frame)
+        hl.setContentsMargins(10, 10, 10, 10)
+        title = QLabel("EXAMPLES")
+        title.setStyleSheet("font-weight: bold; font-size: 14px; color: #66BB6A;")
+        hl.addWidget(title)
+        info = QLabel(
+            "Click a file to import its graphs into the current scene. "
+            "You'll be asked for a 3D displacement so the new graph "
+            "doesn't overlap existing ones."
+        )
+        info.setStyleSheet("color: #888; font-style: italic;")
+        info.setWordWrap(True)
+        hl.addWidget(info)
+        # Folder path + rescan button
+        bottom_row = QHBoxLayout()
+        self._path_label = QLabel("")
+        self._path_label.setStyleSheet("color: #666; font-size: 10px; font-family: monospace;")
+        bottom_row.addWidget(self._path_label, 1)
+        rescan_btn = QPushButton("⟳ Rescan")
+        rescan_btn.setFixedHeight(24)
+        rescan_btn.setStyleSheet("""
+            QPushButton { background: #263238; color: #ECEFF1;
+                          border: 1px solid #455A64; border-radius: 4px;
+                          padding: 2px 10px; font-size: 11px; }
+            QPushButton:hover { background: #37474F; border: 1px solid #607D8B; }
+        """)
+        rescan_btn.clicked.connect(self.rebuild)
+        bottom_row.addWidget(rescan_btn)
+        hl.addLayout(bottom_row)
+        outer.addWidget(header_frame)
+        
+        # Scrollable list of example files
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background-color: #1e1e1e;")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._container = QWidget()
+        self._container.setStyleSheet("background-color: #1e1e1e;")
+        self._inner_layout = QVBoxLayout(self._container)
+        self._inner_layout.setSpacing(4)
+        self._inner_layout.setContentsMargins(10, 10, 10, 10)
+        self._inner_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll.setWidget(self._container)
+        outer.addWidget(scroll, 1)
+    
+    def rebuild(self):
+        """Re-scans the folder and rebuilds the file-button list."""
+        # Wipe
+        while self._inner_layout.count():
+            item = self._inner_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        
+        try:
+            self._path_label.setText(str(self.main._examples_dir()))
+        except Exception:
+            self._path_label.setText("Examples/")
+        
+        entries = self.main._scan_examples()
+        if not entries:
+            hint = QLabel(
+                f"<i>No example files yet.</i><br><br>"
+                f"Drop <code>*.json</code> files into:<br>"
+                f"<b>{self.main._examples_dir()}</b><br><br>"
+                f"Each file imports as a complete bundle (all graphs + connections)."
+            )
+            hint.setTextFormat(Qt.TextFormat.RichText)
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: #888; font-size: 12px; padding: 20px;")
+            hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            self._inner_layout.addWidget(hint)
+            return
+        
+        # One button per file. The whole file is imported as a bundle so
+        # cross-graph connections between graphs in the same file stay
+        # intact. Files that contain a single graph still work.
+        import os
+        for fp, label, count in entries:
+            btn = QPushButton(label)
+            btn.setMinimumHeight(48)
+            btn.setMinimumWidth(220)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1B5E20; color: #C8E6C9;
+                    border: 1px solid #2E7D32; border-radius: 6px;
+                    padding: 8px 14px; font-weight: bold; font-size: 13px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #2E7D32; border: 1px solid #66BB6A;
+                    color: white;
+                }
+            """)
+            count_word = "graph" if count == 1 else "graphs"
+            btn.setToolTip(
+                f"Import {os.path.basename(fp)} ({count} {count_word}) "
+                f"as a complete bundle."
+            )
+            # Show the count subtly inside the button text
+            btn.setText(f"{label}    [{count} {count_word}]")
+            btn.clicked.connect(
+                lambda checked, p=fp, lab=label, c=count:
+                self.main._on_example_clicked(p, lab, c)
+            )
+            self._inner_layout.addWidget(btn)
+        
+        self._inner_layout.addStretch()
+
+
+class _DisplacementDialog(QDialog):
+    """Tiny modal dialog: asks the user for a 3D offset (dx, dy, dz)
+    before importing an example graph. Returns (dx, dy, dz) on accept."""
+    
+    def __init__(self, graph_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Import: {graph_name}")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(10)
+        
+        info = QLabel(
+            f"Where to place <b>{graph_name}</b>?<br>"
+            "<i style='color:#888'>The graph will be shifted by this offset "
+            "so it doesn't overlap existing graphs.</i>"
+        )
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        # Three spinboxes
+        self.dx = QDoubleSpinBox(); self.dx.setRange(-1e6, 1e6); self.dx.setDecimals(3); self.dx.setSingleStep(1.0); self.dx.setPrefix("dx = ")
+        self.dy = QDoubleSpinBox(); self.dy.setRange(-1e6, 1e6); self.dy.setDecimals(3); self.dy.setSingleStep(1.0); self.dy.setPrefix("dy = ")
+        self.dz = QDoubleSpinBox(); self.dz.setRange(-1e6, 1e6); self.dz.setDecimals(3); self.dz.setSingleStep(1.0); self.dz.setPrefix("dz = ")
+        for w in (self.dx, self.dy, self.dz):
+            w.setFixedHeight(28)
+        row = QHBoxLayout()
+        row.addWidget(self.dx); row.addWidget(self.dy); row.addWidget(self.dz)
+        layout.addLayout(row)
+        
+        # Buttons
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+    
+    def get_displacement(self):
+        return self.dx.value(), self.dy.value(), self.dz.value()
 
 
 if __name__ == "__main__":

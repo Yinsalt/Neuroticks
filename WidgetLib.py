@@ -684,33 +684,81 @@ class PositionDialog(QDialog):
     
 
 def create_nest_mask(mask_type: str, params: Dict[str, Any]) -> Optional[Any]:
+    """
+    Builds a NEST spatial connection mask. Supported types:
+      - 'spherical' / 'sphere'                : symmetric, radius
+      - 'rectangular' / 'box'                 : symmetric cube around origin
+      - 'box_asym'                            : independent lower_left / upper_right
+      - 'doughnut'                            : sphere minus inner sphere
+      - 'elliptical'                          : 2D ellipse (major/minor)
+      - 'ellipsoidal'                         : 3D ellipsoid (three axes)
+    
+    All types support optional 'anchor': [dx,dy,dz] to offset the mask
+    center from the source neuron (asymmetric receptive fields).
+    """
     try:
         r_outer = float(params.get('mask_radius', params.get('radius', params.get('outer_radius', 1.0))))
         r_inner = float(params.get('mask_inner_radius', params.get('inner_radius', params.get('inner', 0.0))))
         
+        anchor = params.get('anchor', None)
+        use_anchor = bool(params.get('use_anchor', False)) and anchor is not None
+        
         if mask_type in ('spherical', 'sphere'):
-            return nest.CreateMask('spherical', {'radius': r_outer})
+            spec = {'radius': r_outer}
+            if use_anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('spherical', spec)
             
         elif mask_type in ('rectangular', 'box'):
             s = r_outer 
-            return nest.CreateMask('rectangular', {
+            spec = {
                 'lower_left': [-s, -s, -s],
                 'upper_right': [s, s, s]
-            })
+            }
+            if use_anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('rectangular', spec)
+        
+        elif mask_type == 'box_asym':
+            # Independent corners — receptive field doesn't have to be cubic.
+            ll = params.get('lower_left', [-r_outer, -r_outer, -r_outer])
+            ur = params.get('upper_right', [r_outer, r_outer, r_outer])
+            spec = {'lower_left': list(ll), 'upper_right': list(ur)}
+            if use_anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('rectangular', spec)
             
         elif mask_type == 'doughnut':
-            m_outer = nest.CreateMask('spherical', {'radius': r_outer})
+            outer_spec = {'radius': r_outer}
+            if use_anchor: outer_spec['anchor'] = list(anchor)
+            m_outer = nest.CreateMask('spherical', outer_spec)
             
             if r_inner > 0:
-                m_inner = nest.CreateMask('spherical', {'radius': r_inner})
+                inner_spec = {'radius': r_inner}
+                if use_anchor: inner_spec['anchor'] = list(anchor)
+                m_inner = nest.CreateMask('spherical', inner_spec)
                 return m_outer & ~m_inner
             else:
                 return m_outer
             
         elif mask_type == 'elliptical':
-             major = float(params.get('major_axis', 1.0))
-             minor = float(params.get('minor_axis', 0.5))
-             return nest.CreateMask('elliptical', {'major_axis': major, 'minor_axis': minor})
+             major = float(params.get('major_axis', params.get('mask_major', 2.0 * r_outer)))
+             minor = float(params.get('minor_axis', params.get('mask_minor', r_outer)))
+             spec = {'major_axis': major, 'minor_axis': minor}
+             if use_anchor: spec['anchor'] = list(anchor)
+             # NEST uses 'elliptical' for 2D, 'ellipsoidal' for 3D layers.
+             # Try elliptical first, fall back if NEST complains.
+             try:
+                 return nest.CreateMask('elliptical', spec)
+             except Exception:
+                 # Promote to 3D ellipsoidal with polar = minor as fallback
+                 spec3 = dict(spec); spec3['polar_axis'] = minor
+                 return nest.CreateMask('ellipsoidal', spec3)
+        
+        elif mask_type == 'ellipsoidal':
+             major = float(params.get('major_axis', params.get('mask_major', 2.0 * r_outer)))
+             minor = float(params.get('minor_axis', params.get('mask_minor', r_outer)))
+             polar = float(params.get('polar_axis', params.get('mask_polar', minor)))
+             spec = {'major_axis': major, 'minor_axis': minor, 'polar_axis': polar}
+             if use_anchor: spec['anchor'] = list(anchor)
+             return nest.CreateMask('ellipsoidal', spec)
 
     except Exception as e:
         print(f"Mask Creation Error: {e}")
@@ -743,6 +791,115 @@ def create_distance_dependent_weight(base_weight: float,
     except Exception as e:
         print(f"Distance weight creation failed: {e}, using base weight")
         return base_weight
+
+
+def create_distance_dependent_probability(p_max: float,
+                                          profile: str = 'constant',
+                                          sigma: float = 1.0) -> Any:
+    """
+    Builds a NEST connection-probability expression.
+    
+    profile = 'constant'    -> p_max (no distance dependence)
+            = 'gaussian'    -> p_max * exp(-d^2 / (2 * sigma^2))
+            = 'exponential' -> p_max * exp(-d / sigma)
+            = 'linear'      -> max(0, p_max * (1 - d / sigma))
+    
+    Used in conn_spec for pairwise_bernoulli with spatial mask.
+    """
+    try:
+        if profile == 'constant':
+            return float(p_max)
+        
+        dist = nest.spatial.distance
+        s = sigma if sigma > 0 else 1.0
+        import nest.math as nm
+        
+        if profile == 'gaussian':
+            return float(p_max) * nm.exp(-(dist / s) ** 2 / 2.0)
+        elif profile == 'exponential':
+            return float(p_max) * nm.exp(-dist / s)
+        elif profile == 'linear':
+            # NEST will clip to [0,1] internally; use max() to be safe.
+            return nm.max(0.0, float(p_max) * (1.0 - dist / s))
+        else:
+            return float(p_max)
+    except Exception as e:
+        print(f"Distance-dependent p creation failed: {e}, using constant {p_max}")
+        return float(p_max)
+
+
+def create_distance_dependent_delay(base_delay: float,
+                                    factor: float = 0.0,
+                                    mode: str = 'linear') -> Any:
+    """
+    Builds a NEST distance-dependent delay expression.
+    
+    mode = 'linear'      -> base_delay + d * factor   (axon-like: faster=smaller factor)
+         = 'inverse'     -> base_delay + factor / max(d, 1e-3) (rare, mostly debug)
+    
+    factor=0 returns the scalar base_delay (back-compat).
+    """
+    try:
+        if abs(factor) < 1e-12:
+            return float(base_delay)
+        dist = nest.spatial.distance
+        if mode == 'linear':
+            return float(base_delay) + dist * float(factor)
+        elif mode == 'inverse':
+            return float(base_delay) + float(factor) / nest.math.max(dist, 1e-3)
+        else:
+            return float(base_delay)
+    except Exception as e:
+        print(f"Distance-dependent delay creation failed: {e}, using base {base_delay}")
+        return float(base_delay)
+
+
+def create_anisotropic_weight(base_weight: float,
+                               theta_deg: float = 0.0,
+                               freq: float = 1.0,
+                               mode: str = 'cosine',
+                               sigma: float = 1.0) -> Any:
+    """
+    Direction-encoded synapse weight — for orientation-tuned receptive fields,
+    Gabor-like profiles, etc. Uses NEST's nest.spatial.target_pos /
+    source_pos to project the displacement vector onto a preferred axis.
+    
+    theta_deg : preferred orientation in degrees (counter-clockwise from +x)
+    freq      : spatial frequency (cycles per spatial unit)
+    mode      : 'cosine'  ->  base * cos(2π · freq · projection)
+                'gabor'   ->  base * cos(2π · freq · projection) · exp(-d²/(2σ²))
+    sigma     : envelope width for gabor mode
+    
+    Used as syn_spec['weight']. Only meaningful when both source and target
+    populations have spatial positions.
+    """
+    try:
+        import math
+        import nest.math as nm
+        theta_rad = math.radians(theta_deg)
+        cos_t = math.cos(theta_rad)
+        sin_t = math.sin(theta_rad)
+        
+        # Displacement vector source -> target
+        dx = nest.spatial.target_pos.x - nest.spatial.source_pos.x
+        dy = nest.spatial.target_pos.y - nest.spatial.source_pos.y
+        # Project onto preferred axis (theta)
+        projection = cos_t * dx + sin_t * dy
+        
+        carrier = nm.cos(2.0 * math.pi * float(freq) * projection)
+        
+        if mode == 'cosine':
+            return float(base_weight) * carrier
+        elif mode == 'gabor':
+            d = nest.spatial.distance
+            s = sigma if sigma > 0 else 1.0
+            envelope = nm.exp(-(d / s) ** 2 / 2.0)
+            return float(base_weight) * carrier * envelope
+        else:
+            return float(base_weight) * carrier
+    except Exception as e:
+        print(f"Anisotropic weight failed: {e}, using base {base_weight}")
+        return float(base_weight)
     
 
 
@@ -1177,19 +1334,27 @@ class SynapseCreationWidget(QWidget):
 
 
 def create_nest_mask_safe(mask_type, params):
+    """Build a NEST mask. Optional 'anchor': [dx,dy,dz] offsets the mask
+    center relative to the source neuron — needed for asymmetric receptive
+    fields and retinotopic shifts."""
+    anchor = params.get('anchor', None)
     try:
         if mask_type in ('sphere', 'spherical'):
-            return nest.CreateMask('spherical', {'r': params.get('radius', 1.0)})
+            spec = {'r': params.get('radius', 1.0)}
+            if anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('spherical', spec)
         elif mask_type in ('box', 'rectangular'):
             s = params.get('size', 1.0)
-            return nest.CreateMask('rectangular', {
-                'lower_left': [-s, -s, -s], 'upper_right': [s, s, s]
-            })
+            spec = {'lower_left': [-s, -s, -s], 'upper_right': [s, s, s]}
+            if anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('rectangular', spec)
         elif mask_type == 'doughnut':
-            return nest.CreateMask('doughnut', {
+            spec = {
                 'inner_radius': params.get('inner', 0.2),
-                'outer_radius': params.get('outer', 1.0)
-            })
+                'outer_radius': params.get('outer', 1.0),
+            }
+            if anchor: spec['anchor'] = list(anchor)
+            return nest.CreateMask('doughnut', spec)
     except Exception as e:
         print(f"⚠ Mask: {e}")
     return None
@@ -5578,9 +5743,50 @@ class ConnectionTool(QWidget):
     def _init_spatial_tab(self):
         layout = QVBoxLayout(self.tab_spatial)
         layout.addWidget(QLabel("Connects neurons based on spatial positions.", styleSheet="color: #AAA; font-style: italic;"))
+        
+        # ── Rule selection (allow fixed_indegree/outdegree with mask too) ──
+        rule_form = QFormLayout()
+        self.spatial_rule_combo = QComboBox()
+        self.spatial_rule_combo.addItems([
+            "pairwise_bernoulli", "fixed_indegree", "fixed_outdegree"
+        ])
+        self.spatial_rule_combo.setToolTip(
+            "pairwise_bernoulli: each pair connects with probability p\n"
+            "fixed_indegree:     each target picks N sources within mask\n"
+            "fixed_outdegree:    each source picks N targets within mask"
+        )
+        rule_form.addRow("Connection Rule:", self.spatial_rule_combo)
+        self.spatial_indegree_spin = QSpinBox()
+        self.spatial_indegree_spin.setRange(1, 100000); self.spatial_indegree_spin.setValue(10)
+        self.spatial_outdegree_spin = QSpinBox()
+        self.spatial_outdegree_spin.setRange(1, 100000); self.spatial_outdegree_spin.setValue(10)
+        self.spatial_indegree_label = QLabel("Indegree (per target):")
+        self.spatial_outdegree_label = QLabel("Outdegree (per source):")
+        rule_form.addRow(self.spatial_indegree_label, self.spatial_indegree_spin)
+        rule_form.addRow(self.spatial_outdegree_label, self.spatial_outdegree_spin)
+        # Hide indegree/outdegree until needed
+        self.spatial_indegree_label.setVisible(False); self.spatial_indegree_spin.setVisible(False)
+        self.spatial_outdegree_label.setVisible(False); self.spatial_outdegree_spin.setVisible(False)
+        layout.addLayout(rule_form)
+        self.spatial_rule_combo.currentTextChanged.connect(self._on_spatial_rule_changed)
+        
+        # ── Mask geometry ──
+        mask_box = QGroupBox("Mask Geometry")
+        mask_layout = QVBoxLayout(mask_box)
         form = QFormLayout()
         self.mask_type_combo = QComboBox()
-        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
+        self.mask_type_combo.addItems([
+            "sphere", "box", "box_asym", "doughnut", "elliptical", "ellipsoidal"
+        ])
+        self.mask_type_combo.setToolTip(
+            "sphere       : symmetric, single radius\n"
+            "box          : symmetric cube of side 2·radius\n"
+            "box_asym     : independent lower_left / upper_right corners\n"
+            "doughnut     : sphere minus inner sphere\n"
+            "elliptical   : 2D ellipse — major/minor axes\n"
+            "ellipsoidal  : 3D ellipsoid — major/minor/polar axes"
+        )
+        self.mask_type_combo.currentTextChanged.connect(self._on_mask_type_changed)
         form.addRow("Mask Shape:", self.mask_type_combo)
         self.radius_spin = QDoubleSpinBox()
         self.radius_spin.setRange(0.01, 1000.0); self.radius_spin.setValue(0.5)
@@ -5588,18 +5794,193 @@ class ConnectionTool(QWidget):
         self.inner_radius_spin = QDoubleSpinBox()
         self.inner_radius_spin.setRange(0.0, 1000.0); self.inner_radius_spin.setValue(0.0)
         form.addRow("Inner Radius:", self.inner_radius_spin)
-        layout.addLayout(form)
-        dist_layout = QHBoxLayout()
-        self.dist_dep_check = QCheckBox("Scale Weight by Distance")
-        self.dist_dep_check.toggled.connect(lambda c: [self.dist_factor_spin.setEnabled(c), self.dist_offset_spin.setEnabled(c)])
-        self.dist_factor_spin = QDoubleSpinBox(); self.dist_factor_spin.setEnabled(False); self.dist_factor_spin.setValue(1.0)
-        self.dist_offset_spin = QDoubleSpinBox(); self.dist_offset_spin.setEnabled(False); self.dist_offset_spin.setValue(0.0)
-        dist_layout.addWidget(self.dist_dep_check); dist_layout.addWidget(self.dist_factor_spin); dist_layout.addWidget(self.dist_offset_spin)
-        layout.addLayout(dist_layout)
-        prob_layout = QHBoxLayout()
-        self.spatial_prob_spin = QDoubleSpinBox(); self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
-        prob_layout.addWidget(QLabel("Probability (p):")); prob_layout.addWidget(self.spatial_prob_spin)
-        layout.addLayout(prob_layout); layout.addStretch()
+        mask_layout.addLayout(form)
+        
+        # Asymmetric box fields (only used when mask_type='box_asym')
+        self.box_asym_box = QGroupBox("Asymmetric Box (lower_left / upper_right)")
+        ab_layout = QVBoxLayout(self.box_asym_box)
+        ab_top = QHBoxLayout()
+        self.ll_x = QDoubleSpinBox(); self.ll_x.setRange(-1000, 1000); self.ll_x.setValue(-0.5); self.ll_x.setPrefix("ll_x=")
+        self.ll_y = QDoubleSpinBox(); self.ll_y.setRange(-1000, 1000); self.ll_y.setValue(-0.5); self.ll_y.setPrefix("ll_y=")
+        self.ll_z = QDoubleSpinBox(); self.ll_z.setRange(-1000, 1000); self.ll_z.setValue(-0.5); self.ll_z.setPrefix("ll_z=")
+        for w in (self.ll_x, self.ll_y, self.ll_z):
+            w.setDecimals(3); w.setSingleStep(0.1); ab_top.addWidget(w)
+        ab_layout.addLayout(ab_top)
+        ab_bot = QHBoxLayout()
+        self.ur_x = QDoubleSpinBox(); self.ur_x.setRange(-1000, 1000); self.ur_x.setValue(0.5); self.ur_x.setPrefix("ur_x=")
+        self.ur_y = QDoubleSpinBox(); self.ur_y.setRange(-1000, 1000); self.ur_y.setValue(0.5); self.ur_y.setPrefix("ur_y=")
+        self.ur_z = QDoubleSpinBox(); self.ur_z.setRange(-1000, 1000); self.ur_z.setValue(0.5); self.ur_z.setPrefix("ur_z=")
+        for w in (self.ur_x, self.ur_y, self.ur_z):
+            w.setDecimals(3); w.setSingleStep(0.1); ab_bot.addWidget(w)
+        ab_layout.addLayout(ab_bot)
+        mask_layout.addWidget(self.box_asym_box)
+        self.box_asym_box.setVisible(False)
+        
+        # Elliptical / ellipsoidal axes
+        self.ellipsoid_box = QGroupBox("Ellipsoid Axes")
+        el_layout = QHBoxLayout(self.ellipsoid_box)
+        self.major_axis_spin = QDoubleSpinBox(); self.major_axis_spin.setRange(0.001, 1000); self.major_axis_spin.setValue(2.0); self.major_axis_spin.setPrefix("major=")
+        self.minor_axis_spin = QDoubleSpinBox(); self.minor_axis_spin.setRange(0.001, 1000); self.minor_axis_spin.setValue(1.0); self.minor_axis_spin.setPrefix("minor=")
+        self.polar_axis_spin = QDoubleSpinBox(); self.polar_axis_spin.setRange(0.001, 1000); self.polar_axis_spin.setValue(1.0); self.polar_axis_spin.setPrefix("polar=")
+        for w in (self.major_axis_spin, self.minor_axis_spin, self.polar_axis_spin):
+            w.setDecimals(3); w.setSingleStep(0.1); el_layout.addWidget(w)
+        mask_layout.addWidget(self.ellipsoid_box)
+        self.ellipsoid_box.setVisible(False)
+        
+        layout.addWidget(mask_box)
+        
+        # ── Anchor offset (asymmetric receptive fields) ──
+        anchor_box = QGroupBox("Mask Anchor Offset (asymmetric RF)")
+        anchor_box.setCheckable(True); anchor_box.setChecked(False)
+        anchor_box.setToolTip("Shifts the mask center relative to the source neuron. "
+                              "Useful for retinotopic offsets, directional receptive fields.")
+        anchor_layout = QHBoxLayout(anchor_box)
+        self.anchor_x = QDoubleSpinBox(); self.anchor_x.setRange(-1000, 1000); self.anchor_x.setValue(0.0); self.anchor_x.setPrefix("dx=")
+        self.anchor_y = QDoubleSpinBox(); self.anchor_y.setRange(-1000, 1000); self.anchor_y.setValue(0.0); self.anchor_y.setPrefix("dy=")
+        self.anchor_z = QDoubleSpinBox(); self.anchor_z.setRange(-1000, 1000); self.anchor_z.setValue(0.0); self.anchor_z.setPrefix("dz=")
+        for w in (self.anchor_x, self.anchor_y, self.anchor_z):
+            w.setDecimals(3); w.setSingleStep(0.1)
+            anchor_layout.addWidget(w)
+        self.anchor_box = anchor_box
+        layout.addWidget(anchor_box)
+        
+        # ── Distance-dependent probability ──
+        prob_box = QGroupBox("Connection Probability")
+        prob_layout_v = QVBoxLayout(prob_box)
+        prob_top = QHBoxLayout()
+        prob_top.addWidget(QLabel("p_max:"))
+        self.spatial_prob_spin = QDoubleSpinBox()
+        self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
+        self.spatial_prob_spin.setSingleStep(0.05); self.spatial_prob_spin.setDecimals(3)
+        prob_top.addWidget(self.spatial_prob_spin)
+        prob_top.addWidget(QLabel("Profile:"))
+        self.prob_profile_combo = QComboBox()
+        self.prob_profile_combo.addItems(["constant", "gaussian", "exponential", "linear"])
+        self.prob_profile_combo.setToolTip(
+            "constant: p = p_max\n"
+            "gaussian: p = p_max · exp(-d² / (2σ²))\n"
+            "exponential: p = p_max · exp(-d / σ)\n"
+            "linear: p = p_max · max(0, 1 - d/σ)"
+        )
+        prob_top.addWidget(self.prob_profile_combo)
+        prob_layout_v.addLayout(prob_top)
+        prob_sigma_row = QHBoxLayout()
+        prob_sigma_row.addWidget(QLabel("σ (decay scale):"))
+        self.prob_sigma_spin = QDoubleSpinBox()
+        self.prob_sigma_spin.setRange(0.001, 1000.0); self.prob_sigma_spin.setValue(1.0)
+        self.prob_sigma_spin.setSingleStep(0.1); self.prob_sigma_spin.setDecimals(3)
+        self.prob_sigma_spin.setEnabled(False)
+        prob_sigma_row.addWidget(self.prob_sigma_spin)
+        prob_sigma_row.addStretch()
+        prob_layout_v.addLayout(prob_sigma_row)
+        self.prob_profile_combo.currentTextChanged.connect(
+            lambda t: self.prob_sigma_spin.setEnabled(t != "constant")
+        )
+        layout.addWidget(prob_box)
+        
+        # ── Distance-dependent weight ──
+        wbox = QGroupBox("Distance-Dependent Weight")
+        wbox.setCheckable(True); wbox.setChecked(False)
+        wbox_layout = QVBoxLayout(wbox)
+        w_top = QHBoxLayout()
+        w_top.addWidget(QLabel("Mode:"))
+        self.weight_mode_combo = QComboBox()
+        self.weight_mode_combo.addItems(["linear", "exponential", "gaussian"])
+        self.weight_mode_combo.setToolTip(
+            "linear:      w = base + d · factor + offset\n"
+            "exponential: w = base · exp(-d · factor)\n"
+            "gaussian:    w = base · exp(-(d/factor)²)   (factor = σ)"
+        )
+        w_top.addWidget(self.weight_mode_combo)
+        w_top.addStretch()
+        wbox_layout.addLayout(w_top)
+        w_params = QHBoxLayout()
+        w_params.addWidget(QLabel("factor:"))
+        self.dist_factor_spin = QDoubleSpinBox()
+        self.dist_factor_spin.setRange(-1000.0, 1000.0); self.dist_factor_spin.setValue(1.0)
+        self.dist_factor_spin.setDecimals(4); self.dist_factor_spin.setSingleStep(0.1)
+        w_params.addWidget(self.dist_factor_spin)
+        w_params.addWidget(QLabel("offset:"))
+        self.dist_offset_spin = QDoubleSpinBox()
+        self.dist_offset_spin.setRange(-1000.0, 1000.0); self.dist_offset_spin.setValue(0.0)
+        self.dist_offset_spin.setDecimals(4); self.dist_offset_spin.setSingleStep(0.1)
+        w_params.addWidget(self.dist_offset_spin)
+        wbox_layout.addLayout(w_params)
+        self.dist_dep_check = wbox
+        self.weight_box = wbox
+        layout.addWidget(wbox)
+        
+        # ── Distance-dependent delay ──
+        dbox = QGroupBox("Distance-Dependent Delay (axonal conduction)")
+        dbox.setCheckable(True); dbox.setChecked(False)
+        dbox.setToolTip(
+            "delay(d) = base_delay + d · delay_factor\n"
+            "delay_factor in ms per spatial unit (1 / conduction velocity)."
+        )
+        dbox_layout = QHBoxLayout(dbox)
+        dbox_layout.addWidget(QLabel("delay_factor (ms/unit):"))
+        self.delay_factor_spin = QDoubleSpinBox()
+        self.delay_factor_spin.setRange(0.0, 1000.0); self.delay_factor_spin.setValue(1.0)
+        self.delay_factor_spin.setDecimals(4); self.delay_factor_spin.setSingleStep(0.1)
+        dbox_layout.addWidget(self.delay_factor_spin)
+        dbox_layout.addStretch()
+        self.delay_box = dbox
+        layout.addWidget(dbox)
+        
+        # ── Anisotropic (orientation-tuned) weight — gabor / V1-like ──
+        anibox = QGroupBox("Anisotropic Weight (orientation tuning)")
+        anibox.setCheckable(True); anibox.setChecked(False)
+        anibox.setToolTip(
+            "Direction-encoded weight using NEST spatial.target_pos / source_pos.\n"
+            "cosine: w = base · cos(2π · freq · projection_onto_θ)\n"
+            "gabor:  cosine carrier · gaussian envelope (V1 simple-cell-like)\n"
+            "Only meaningful when both source and target have spatial layouts."
+        )
+        ani_layout = QVBoxLayout(anibox)
+        ani_top = QHBoxLayout()
+        ani_top.addWidget(QLabel("Mode:"))
+        self.ani_mode_combo = QComboBox()
+        self.ani_mode_combo.addItems(["cosine", "gabor"])
+        ani_top.addWidget(self.ani_mode_combo)
+        ani_top.addStretch()
+        ani_layout.addLayout(ani_top)
+        ani_params = QHBoxLayout()
+        ani_params.addWidget(QLabel("θ (deg):"))
+        self.ani_theta_spin = QDoubleSpinBox()
+        self.ani_theta_spin.setRange(-360, 360); self.ani_theta_spin.setValue(0.0)
+        self.ani_theta_spin.setSingleStep(15); self.ani_theta_spin.setDecimals(2)
+        ani_params.addWidget(self.ani_theta_spin)
+        ani_params.addWidget(QLabel("freq (cyc/unit):"))
+        self.ani_freq_spin = QDoubleSpinBox()
+        self.ani_freq_spin.setRange(0.001, 1000); self.ani_freq_spin.setValue(0.5)
+        self.ani_freq_spin.setSingleStep(0.1); self.ani_freq_spin.setDecimals(4)
+        ani_params.addWidget(self.ani_freq_spin)
+        ani_params.addWidget(QLabel("σ (gabor):"))
+        self.ani_sigma_spin = QDoubleSpinBox()
+        self.ani_sigma_spin.setRange(0.001, 1000); self.ani_sigma_spin.setValue(1.0)
+        self.ani_sigma_spin.setSingleStep(0.1); self.ani_sigma_spin.setDecimals(3)
+        ani_params.addWidget(self.ani_sigma_spin)
+        ani_layout.addLayout(ani_params)
+        self.aniso_box = anibox
+        layout.addWidget(anibox)
+        
+        layout.addStretch()
+    
+    def _on_spatial_rule_changed(self, rule):
+        """Show indegree/outdegree fields only when relevant."""
+        is_in = (rule == "fixed_indegree")
+        is_out = (rule == "fixed_outdegree")
+        self.spatial_indegree_label.setVisible(is_in)
+        self.spatial_indegree_spin.setVisible(is_in)
+        self.spatial_outdegree_label.setVisible(is_out)
+        self.spatial_outdegree_spin.setVisible(is_out)
+    
+    def _on_mask_type_changed(self, mask_type):
+        """Show only the param fields relevant for the chosen mask shape."""
+        self.box_asym_box.setVisible(mask_type == "box_asym")
+        self.ellipsoid_box.setVisible(mask_type in ("elliptical", "ellipsoidal"))
+        # Polar axis is only meaningful for full 3D ellipsoidal
+        self.polar_axis_spin.setEnabled(mask_type == "ellipsoidal")
 
     def _init_topological_tab(self):
         layout = QVBoxLayout(self.tab_topo)
@@ -5669,7 +6050,50 @@ class ConnectionTool(QWidget):
             'use_spatial': is_spatial
         }
         if is_spatial:
-            params.update({'rule': 'pairwise_bernoulli', 'p': self.spatial_prob_spin.value(), 'mask_type': self.mask_type_combo.currentText(), 'mask_radius': self.radius_spin.value(), 'mask_inner_radius': self.inner_radius_spin.value(), 'distance_dependent_weight': self.dist_dep_check.isChecked(), 'dist_factor': self.dist_factor_spin.value(), 'dist_offset': self.dist_offset_spin.value()})
+            rule = self.spatial_rule_combo.currentText()
+            params.update({
+                'rule': rule,
+                'p': self.spatial_prob_spin.value(),
+                'mask_type': self.mask_type_combo.currentText(),
+                'mask_radius': self.radius_spin.value(),
+                'mask_inner_radius': self.inner_radius_spin.value(),
+                # Asymmetric box corners (used when mask_type='box_asym')
+                'lower_left': [self.ll_x.value(), self.ll_y.value(), self.ll_z.value()],
+                'upper_right': [self.ur_x.value(), self.ur_y.value(), self.ur_z.value()],
+                # Ellipsoid axes (used when mask_type='elliptical' or 'ellipsoidal')
+                'major_axis': self.major_axis_spin.value(),
+                'minor_axis': self.minor_axis_spin.value(),
+                'polar_axis': self.polar_axis_spin.value(),
+                # Distance-dependent weight (group-box checked = enabled)
+                'distance_dependent_weight': self.weight_box.isChecked(),
+                'weight_mode': self.weight_mode_combo.currentText(),
+                'dist_factor': self.dist_factor_spin.value(),
+                'dist_offset': self.dist_offset_spin.value(),
+                # Distance-dependent probability profile
+                'p_profile': self.prob_profile_combo.currentText(),
+                'p_sigma': self.prob_sigma_spin.value(),
+                # Distance-dependent delay
+                'distance_dependent_delay': self.delay_box.isChecked(),
+                'delay_factor': self.delay_factor_spin.value(),
+                # Anchor offset
+                'use_anchor': self.anchor_box.isChecked(),
+                'anchor': [
+                    self.anchor_x.value(),
+                    self.anchor_y.value(),
+                    self.anchor_z.value(),
+                ],
+                # Anisotropic (orientation-tuned) weight
+                'anisotropic_weight': self.aniso_box.isChecked(),
+                'aniso_mode': self.ani_mode_combo.currentText(),
+                'aniso_theta_deg': self.ani_theta_spin.value(),
+                'aniso_freq': self.ani_freq_spin.value(),
+                'aniso_sigma': self.ani_sigma_spin.value(),
+            })
+            # Include indegree/outdegree only when the chosen rule needs it
+            if rule == 'fixed_indegree':
+                params['indegree'] = self.spatial_indegree_spin.value()
+            elif rule == 'fixed_outdegree':
+                params['outdegree'] = self.spatial_outdegree_spin.value()
         else:
             rule = self.rule_combo.currentText(); params['rule'] = rule
             if rule == 'fixed_indegree': params['indegree'] = self.indegree_spin.value()
@@ -6099,16 +6523,24 @@ def validate_delay(delay: float, resolution: float = None) -> float:
 def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List[str]]:
     warnings = []
     
-
     gui_keys = {
         'use_spatial',
         'mask_type', 'mask_radius', 'mask_inner_radius', 'mask_size',
+        'lower_left', 'upper_right',
+        'major_axis', 'minor_axis', 'polar_axis',
         'distance_dependent_weight', 'dist_factor', 'dist_offset',
+        'weight_mode',
+        'p_profile', 'p_sigma',
+        'distance_dependent_delay', 'delay_factor',
+        'use_anchor', 'anchor',
+        'anisotropic_weight', 'aniso_mode',
+        'aniso_theta_deg', 'aniso_freq', 'aniso_sigma',
         'custom_name', 'base_model', 'topology_type'
     }
 
     rule = params.get('rule', 'all_to_all')
     synapse_model = params.get('synapse_model', 'static_synapse')
+    use_spatial = bool(params.get('use_spatial', False))
     
     conn_spec = {'rule': rule}
     
@@ -6123,12 +6555,62 @@ def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List
     if rule == 'fixed_total_number' and 'N' not in conn_spec: conn_spec['N'] = 10
     if rule == 'pairwise_bernoulli' and 'p' not in conn_spec: conn_spec['p'] = 0.1
     
+    # Distance-dependent connection probability — only meaningful for bernoulli
+    if use_spatial and rule == 'pairwise_bernoulli':
+        profile = params.get('p_profile', 'constant')
+        sigma = float(params.get('p_sigma', 1.0))
+        p_max = float(conn_spec.get('p', 1.0))
+        if profile != 'constant':
+            try:
+                conn_spec['p'] = create_distance_dependent_probability(p_max, profile, sigma)
+            except Exception as e:
+                warnings.append(f"distance-dep p ({profile}) failed: {e} → using constant {p_max}")
+                conn_spec['p'] = p_max
+    
     conn_spec['allow_autapses'] = params.get('allow_autapses', True)
     conn_spec['allow_multapses'] = params.get('allow_multapses', True)
     
     syn_spec = {'synapse_model': synapse_model}
-    syn_spec['weight'] = float(params.get('weight', 1.0))
-    syn_spec['delay'] = validate_delay(float(params.get('delay', 1.0)))
+    
+    # Weight: scalar / distance-dependent / anisotropic
+    base_weight = float(params.get('weight', 1.0))
+    if use_spatial and params.get('anisotropic_weight'):
+        try:
+            syn_spec['weight'] = create_anisotropic_weight(
+                base_weight,
+                theta_deg=float(params.get('aniso_theta_deg', 0.0)),
+                freq=float(params.get('aniso_freq', 1.0)),
+                mode=params.get('aniso_mode', 'cosine'),
+                sigma=float(params.get('aniso_sigma', 1.0)),
+            )
+        except Exception as e:
+            warnings.append(f"anisotropic weight failed: {e} → using base {base_weight}")
+            syn_spec['weight'] = base_weight
+    elif use_spatial and params.get('distance_dependent_weight'):
+        mode = params.get('weight_mode', 'linear')
+        factor = float(params.get('dist_factor', 1.0))
+        offset = float(params.get('dist_offset', 0.0))
+        try:
+            syn_spec['weight'] = create_distance_dependent_weight(
+                base_weight, factor, offset, mode
+            )
+        except Exception as e:
+            warnings.append(f"distance-dep weight failed: {e} → using base {base_weight}")
+            syn_spec['weight'] = base_weight
+    else:
+        syn_spec['weight'] = base_weight
+    
+    # Delay: scalar or distance-dependent
+    base_delay = validate_delay(float(params.get('delay', 1.0)))
+    if use_spatial and params.get('distance_dependent_delay'):
+        factor = float(params.get('delay_factor', 0.0))
+        try:
+            syn_spec['delay'] = create_distance_dependent_delay(base_delay, factor, 'linear')
+        except Exception as e:
+            warnings.append(f"distance-dep delay failed: {e} → using base {base_delay}")
+            syn_spec['delay'] = base_delay
+    else:
+        syn_spec['delay'] = base_delay
     
     if 'receptor_type' in params and params['receptor_type'] != 0:
         syn_spec['receptor_type'] = int(params['receptor_type'])
@@ -6140,8 +6622,6 @@ def validate_connection_params(params: Dict[str, Any]) -> Tuple[Dict, Dict, List
             known_syn_params.add(param_name)
             if param_name in params:
                 syn_spec[param_name] = params[param_name]
-    
-    
     
     handled_keys = {'rule', 'synapse_model', 'weight', 'delay',
                     'allow_autapses', 'allow_multapses', 'indegree',
@@ -6316,18 +6796,45 @@ class ConnectionExecutor:
                     'r': params.get('mask_radius', 1.0),
                     'inner_radius': params.get('mask_inner_radius', 0.0),
                     'outer_radius': params.get('mask_radius', 1.0),
-                    'size': params.get('mask_radius', 1.0)
+                    'mask_inner_radius': params.get('mask_inner_radius', 0.0),
+                    'mask_radius': params.get('mask_radius', 1.0),
+                    'size': params.get('mask_radius', 1.0),
+                    'use_anchor': params.get('use_anchor', False),
+                    'anchor': params.get('anchor', None),
+                    # Asymmetric box and ellipsoid axes pass-through
+                    'lower_left': params.get('lower_left', None),
+                    'upper_right': params.get('upper_right', None),
+                    'major_axis': params.get('major_axis', None),
+                    'minor_axis': params.get('minor_axis', None),
+                    'polar_axis': params.get('polar_axis', None),
                 }
                 
+                # Map old aliases to canonical names; new types pass through.
                 mask_type_map = {
                     'sphere': 'spherical', 'spherical': 'spherical',
                     'box': 'rectangular', 'rectangular': 'rectangular',
-                    'doughnut': 'doughnut'
+                    'box_asym': 'box_asym',
+                    'doughnut': 'doughnut',
+                    'elliptical': 'elliptical',
+                    'ellipsoidal': 'ellipsoidal',
                 }
                 actual_type = mask_type_map.get(mask_type, 'spherical')
                 mask = create_nest_mask(actual_type, mask_params)
                 if mask is not None:
                     conn_spec['mask'] = mask
+                
+                # Distance-dependent connection probability (gauss/exp/linear).
+                if 'bernoulli' in rule:
+                    profile = params.get('p_profile', 'constant')
+                    if profile != 'constant':
+                        p_max = float(params.get('p', 1.0))
+                        sigma = float(params.get('p_sigma', 1.0))
+                        try:
+                            conn_spec['p'] = create_distance_dependent_probability(
+                                p_max, profile, sigma
+                            )
+                        except Exception as e:
+                            print(f"distance-dep p failed: {e} (using constant {p_max})")
             
             base_model = params.get('synapse_model', 'static_synapse')
             no_delay = base_model in ['gap_junction', 'rate_connection_instantaneous']
@@ -6337,7 +6844,15 @@ class ConnectionExecutor:
                 'synapse_model', 'weight', 'delay',
                 'allow_autapses', 'allow_multapses', 'receptor_type',
                 'use_spatial', 'mask_type', 'mask_radius', 'mask_inner_radius',
+                'lower_left', 'upper_right',
+                'major_axis', 'minor_axis', 'polar_axis',
                 'distance_dependent_weight', 'dist_factor', 'dist_offset',
+                'weight_mode',
+                'p_profile', 'p_sigma',
+                'distance_dependent_delay', 'delay_factor',
+                'use_anchor', 'anchor',
+                'anisotropic_weight', 'aniso_mode',
+                'aniso_theta_deg', 'aniso_freq', 'aniso_sigma',
                 'custom_name', 'no_delay', 'base_model'
             }
             
@@ -6360,16 +6875,32 @@ class ConnectionExecutor:
             syn_spec = {'synapse_model': final_model}
             
             weight = float(params.get('weight', 1.0))
-            if params.get('use_spatial') and params.get('distance_dependent_weight'):
+            if params.get('use_spatial') and params.get('anisotropic_weight'):
+                # Anisotropic (orientation-tuned) takes precedence over plain
+                # distance-dependent weight if both are accidentally enabled.
+                syn_spec['weight'] = create_anisotropic_weight(
+                    weight,
+                    theta_deg=float(params.get('aniso_theta_deg', 0.0)),
+                    freq=float(params.get('aniso_freq', 1.0)),
+                    mode=params.get('aniso_mode', 'cosine'),
+                    sigma=float(params.get('aniso_sigma', 1.0)),
+                )
+            elif params.get('use_spatial') and params.get('distance_dependent_weight'):
+                mode = params.get('weight_mode', 'linear')
                 factor = float(params.get('dist_factor', 1.0))
                 offset = float(params.get('dist_offset', 0.0))
-                syn_spec['weight'] = create_distance_dependent_weight(weight, factor, offset)
+                syn_spec['weight'] = create_distance_dependent_weight(weight, factor, offset, mode)
             else:
                 syn_spec['weight'] = weight
             
             if not no_delay:
                 delay = float(params.get('delay', 1.0))
-                syn_spec['delay'] = max(delay, nest.resolution)
+                base_delay = max(delay, nest.resolution)
+                if params.get('use_spatial') and params.get('distance_dependent_delay'):
+                    factor = float(params.get('delay_factor', 0.0))
+                    syn_spec['delay'] = create_distance_dependent_delay(base_delay, factor, 'linear')
+                else:
+                    syn_spec['delay'] = base_delay
             
             receptor = params.get('receptor_type')
             if receptor is not None and receptor != 0:
