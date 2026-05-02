@@ -4022,6 +4022,42 @@ class Graph:
         v = v / np.linalg.norm(v)
         return v * length
     
+    def _allocate_node_id(self, requested_id=None):
+        """
+        Picks the ID for a new node. Strategy:
+        
+        1. If `requested_id` is a non-negative int AND not already used in
+           this graph -> honour it (used for save_changes / JSON-restore
+           paths where existing IDs must be preserved).
+        2. Otherwise scan [0, max(used)+1] and return the FIRST free slot.
+           This fills holes left by previously-deleted nodes instead of
+           cascading IDs upwards.
+        
+        `_next_id` is updated to (max_used + 1) for backward-compat with
+        any code that still reads it directly.
+        """
+        used = set()
+        for n in self.node_list:
+            try:
+                nid = int(getattr(n, 'id', -1))
+                if nid >= 0:
+                    used.add(nid)
+            except (TypeError, ValueError):
+                pass
+        
+        if (isinstance(requested_id, (int, np.integer))
+                and requested_id >= 0
+                and int(requested_id) not in used):
+            chosen = int(requested_id)
+        else:
+            chosen = 0
+            while chosen in used:
+                chosen += 1
+        
+        used.add(chosen)
+        self._next_id = (max(used) + 1) if used else 0
+        return chosen
+
     def create_node(self,
                     parameters=None,
                     other=None,
@@ -4029,12 +4065,17 @@ class Graph:
                     displacement=None,
                     displacement_factor=1.0,
                     auto_build=False):
-        node_id = self._next_id
-        
         if parameters:
             params = parameters.copy()
         else:
             params = {}
+        
+        # Pull a possibly-requested ID out of params BEFORE we overwrite it.
+        # Callers that want to preserve a specific ID (save_changes, JSON
+        # restore) put it in parameters['id']. If it's missing/invalid/
+        # already-taken, _allocate_node_id falls back to first-free-slot.
+        requested_id = params.get('id', None)
+        node_id = self._allocate_node_id(requested_id=requested_id)
         
         actual_factor = params.get('displacement_factor', displacement_factor)
 
@@ -4077,7 +4118,8 @@ class Graph:
         self.node_dict[new_node.name] = new_node
         self.node_dict[new_node.id] = new_node
         
-        self._next_id += 1
+        # _next_id is maintained by _allocate_node_id (max(used)+1), no
+        # bump needed here.
         self.node_list.append(new_node)
         self.nodes += 1
         if self.root is None:
@@ -4246,9 +4288,561 @@ class Graph:
     
 
     
+    # ─────────────────────────────────────────────────────────────────
+    #  THIN-MODE JSON I/O
+    # ─────────────────────────────────────────────────────────────────
+    #  load_from_json / load_all_from_json: rekonstruiere Graph(en) aus
+    #  einer JSON die nur die Parameter enthält. Zentrale Idee:
+    #
+    #    • positions im JSON LEER  → node.build() läuft → frische
+    #      WFC-/Tool-Positionen aus den Parametern.
+    #    • positions im JSON VOLL  → werden direkt übernommen, build()
+    #      wird übersprungen (so überlebt eine stochastische WFC-
+    #      Realisierung das Speichern unverändert).
+    #
+    #  populate_node() läuft danach immer (NEST-Populationen + Auto-
+    #  Devices). Connections werden optional verdrahtet.
+    #
+    #  Format-Toleranz: akzeptiert sowohl das single-graph Format
+    #  ({meta, graph, nodes}) als auch das Projekt-Format ({meta,
+    #  graphs:[...]}) — beides was im Projekt produziert wird.
+    # ─────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_json(cls,
+                  source,
+                  *,
+                  populate=True,
+                  build_connections=False,
+                  graph_index=0,
+                  external_graphs=None,
+                  override_graph_id=None,
+                  verbose=True):
+        """
+        Rekonstruiere einen einzelnen Graph aus einer 'thin' JSON.
+        
+        Parameters
+        ----------
+        source : str | Path | dict
+            Pfad zur JSON oder bereits geladenes dict.
+        populate : bool
+            Wenn True: nach Position-Setup für jeden Node populate_node()
+            aufrufen → erzeugt NEST-Populationen + Auto-Devices.
+        build_connections : bool
+            Wenn True: nach allen Nodes die in node.connections gespeicherten
+            NEST-Connections aufbauen. Cross-Graph-Targets müssen via
+            external_graphs erreichbar sein, sonst werden sie still
+            übersprungen (Node._build_single_connection returned dann).
+        graph_index : int
+            Wenn das File mehrere Graphen enthält ('graphs'-Liste): welcher
+            soll geladen werden. Default 0.
+        external_graphs : dict | None
+            {graph_id: Graph} bereits geladene Graphen, deren Nodes Targets
+            für die Connections dieses neuen Graphen sein können.
+        override_graph_id : int | None
+            Erzwinge eine andere graph_id (für ID-Remapping beim Append).
+        verbose : bool
+            Progress-Output.
+        
+        Returns
+        -------
+        Graph
+        """
+        data = cls._read_thin_json(source)
+        g_data, nodes_data = cls._extract_graph_block(data, graph_index=graph_index)
+        return cls._build_from_block(
+            g_data, nodes_data,
+            populate=populate,
+            build_connections=build_connections,
+            external_graphs=external_graphs,
+            override_graph_id=override_graph_id,
+            verbose=verbose,
+        )
+
+    @classmethod
+    def load_all_from_json(cls,
+                           source,
+                           *,
+                           populate=True,
+                           build_connections=True,
+                           id_offset=0,
+                           verbose=True):
+        """
+        Lade ALLE Graphen aus einer Projekt-JSON. Cross-Graph-Connections
+        innerhalb des Files werden korrekt verdrahtet wenn
+        build_connections=True.
+        
+        Parameters
+        ----------
+        id_offset : int
+            Wird auf jede graph_id beim Laden addiert. Wichtig wenn man
+            in eine bestehende Session einlädt und Kollisionen vermeiden
+            will. Connection-Targets werden mit-remappt — innerhalb der
+            geladenen Menge bleibt also alles konsistent.
+        
+        Returns
+        -------
+        list[Graph]
+        """
+        data = cls._read_thin_json(source)
+        
+        # Single-graph file? Wrappe in 1-Element-Projekt
+        if 'graphs' in data:
+            graph_blocks = data['graphs']
+        elif 'graph' in data:
+            graph_blocks = [{
+                **data['graph'],
+                'nodes': data.get('nodes', []),
+            }]
+        else:
+            raise ValueError("JSON enthält weder 'graphs' noch 'graph'-Schlüssel")
+        
+        # ID-Remap-Plan: ALT → NEU.  Auch Cross-Graph-Connection-Targets
+        # in den connections müssen wir mit-remappen, sonst zeigen die
+        # Connections nach dem Laden auf die falschen Graph-IDs.
+        if id_offset:
+            id_map = {}
+            for g_data in graph_blocks:
+                old_gid = int(g_data.get('graph_id', 0))
+                id_map[old_gid] = old_gid + id_offset
+            cls._remap_connection_graph_ids(graph_blocks, id_map)
+        
+        loaded = []
+        for i, g_data in enumerate(graph_blocks):
+            override_gid = (int(g_data.get('graph_id', i)) + id_offset) if id_offset else None
+            g = cls._build_from_block(
+                g_data, g_data.get('nodes', []),
+                populate=populate,
+                build_connections=False,  # erst nach allen Graphen
+                external_graphs=None,
+                override_graph_id=override_gid,
+                verbose=verbose,
+            )
+            loaded.append(g)
+        
+        # Jetzt wo alle Graphen + Populationen existieren: Connections
+        # graph-übergreifend verdrahten.
+        if build_connections and loaded:
+            registry = {g.graph_id: g for g in loaded}
+            for g in loaded:
+                if verbose:
+                    print(f"  Wiring connections for Graph {g.graph_id} ({g.graph_name})...")
+                g.build_connections(external_graphs=registry)
+        
+        return loaded
+
+    def to_json(self,
+                filepath,
+                *,
+                include_positions='auto',
+                include_devices=True,
+                include_connections=True,
+                indent=2,
+                verbose=True):
+        """
+        Speichere diesen Graph als thin JSON. Format ist kompatibel mit
+        from_json() UND mit dem bestehenden WidgetLib.load_graph() (single-
+        graph Format mit top-level 'graph' + 'nodes').
+        
+        Parameters
+        ----------
+        include_positions : bool | 'auto'
+            False         → positions immer leer → Loader baut via build() neu.
+                            Klein, ideal für deterministische Tools
+                            (Cone/Blob/CCW). Bei stochastischen WFC-custom-
+                            Nodes geht die Realisierung verloren.
+            True          → positions immer mitspeichern.
+            'auto' (def.) → positions NUR für tool_type='custom' (WFC)
+                            mitspeichern, weil das die nicht-deterministischen
+                            Nodes sind. Tool-basierte Nodes werden frisch
+                            regeneriert. Kleinster sinnvoller Footprint
+                            ohne Realisierungs-Verlust.
+        include_devices : bool
+            Nur deaktivieren wenn man eine reine Struktur-Vorlage haben
+            will.
+        include_connections : bool
+            Nur deaktivieren wenn man Connections separat verwalten will.
+        """
+        from pathlib import Path
+        
+        nodes_data = []
+        for node in self.node_list:
+            # Per-Node entscheiden ob Positionen mitgespeichert werden:
+            #   True / False  → wie spezifiziert
+            #   'auto'        → nur für WFC-custom Nodes
+            if include_positions == 'auto':
+                tt = (node.parameters or {}).get('tool_type', 'custom')
+                include_pos_for_this = (tt == 'custom')
+            else:
+                include_pos_for_this = bool(include_positions)
+            
+            nd = self._serialize_node(
+                node,
+                include_positions=include_pos_for_this,
+                include_devices=include_devices,
+                include_connections=include_connections,
+            )
+            nodes_data.append(nd)
+        
+        out = {
+            'meta': {
+                'version': 'thin-1.0',
+                'type': 'neuroticks_thin_graph',
+                'include_positions': include_positions,
+            },
+            'graph': {
+                'graph_id': int(self.graph_id),
+                'graph_name': self.graph_name,
+                'max_nodes': int(self.max_nodes) if self.max_nodes else len(nodes_data),
+                'init_position': list(self.init_position.tolist()) if isinstance(
+                    self.init_position, np.ndarray) else list(self.init_position),
+                'polynom_max_power': int(self.polynom_max_power),
+                'polynom_decay': float(self.polynom_decay),
+            },
+            'nodes': nodes_data,
+        }
+        
+        fp = Path(filepath)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        with open(fp, 'w', encoding='utf-8') as f:
+            json.dump(out, f, indent=indent)
+        
+        if verbose:
+            n_with_pos = sum(1 for nd in nodes_data if nd['positions'])
+            n_total = len(nodes_data)
+            mode_str = ("auto: WFC-only" if include_positions == 'auto'
+                        else ("with positions" if include_positions
+                              else "thin (no positions)"))
+            print(f"Graph '{self.graph_name}' ({n_total} nodes, "
+                  f"{n_with_pos}/{n_total} with positions) → {fp}  [{mode_str}]")
+        return str(fp)
+
+    # ── Interne Helfer für die Thin-Mode-I/O ──────────────────────────
+
+    @staticmethod
+    def _read_thin_json(source):
+        """Akzeptiert Pfad-String, Path-Objekt oder bereits geladenes dict."""
+        if isinstance(source, dict):
+            return source
+        from pathlib import Path
+        p = Path(source)
+        if not p.exists():
+            raise FileNotFoundError(f"Thin graph JSON nicht gefunden: {p}")
+        with open(p, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    @staticmethod
+    def _extract_graph_block(data, graph_index=0):
+        """
+        Toleriert beide Formate:
+          • {graph: {...}, nodes: [...]}                  (single-graph)
+          • {graphs: [{..., nodes: [...]}, ...]}          (Projekt)
+        Returns: (graph_metadata_dict, nodes_list)
+        """
+        if 'graphs' in data:
+            graphs = data['graphs']
+            if not graphs:
+                raise ValueError("JSON 'graphs' ist leer")
+            if graph_index >= len(graphs):
+                raise IndexError(
+                    f"graph_index={graph_index} aber nur {len(graphs)} Graphen im File"
+                )
+            g_data = graphs[graph_index]
+            return g_data, g_data.get('nodes', [])
+        if 'graph' in data:
+            return data['graph'], data.get('nodes', [])
+        # Notfall-Fallback: vielleicht ist das ganze dict schon ein graph-block
+        if 'nodes' in data:
+            return data, data['nodes']
+        raise ValueError("JSON enthält weder 'graphs', 'graph' noch 'nodes'")
+
+    @staticmethod
+    def _remap_connection_graph_ids(graph_blocks, id_map):
+        """
+        In-place: setze in jeder Connection source.graph_id und
+        target.graph_id gemäß id_map. Connections die auf Graphen außerhalb
+        der id_map zeigen bleiben unverändert (zeigen dann ggf. auf bereits
+        geladene Graphen).
+        
+        Wichtig: graph_id der Graphen/Nodes selbst wird NICHT mutiert —
+        das macht override_graph_id im Build-Pfad. Sonst würden wir den
+        Offset zweimal anwenden.
+        """
+        for g_data in graph_blocks:
+            for nd in g_data.get('nodes', []):
+                for conn in nd.get('connections', []) or []:
+                    src = conn.get('source', {}) or {}
+                    tgt = conn.get('target', {}) or {}
+                    if 'graph_id' in src and int(src['graph_id']) in id_map:
+                        src['graph_id'] = id_map[int(src['graph_id'])]
+                    if 'graph_id' in tgt and int(tgt['graph_id']) in id_map:
+                        tgt['graph_id'] = id_map[int(tgt['graph_id'])]
+
+    @classmethod
+    def _build_from_block(cls,
+                           g_data,
+                           nodes_data,
+                           *,
+                           populate=True,
+                           build_connections=False,
+                           external_graphs=None,
+                           override_graph_id=None,
+                           verbose=True):
+        """
+        Kern-Routine: nimmt das graph-Metadata-dict + die nodes-Liste und
+        baut daraus einen frischen Graph. Wird von from_json /
+        load_all_from_json geteilt.
+        """
+        graph_id = int(override_graph_id) if override_graph_id is not None \
+                   else int(g_data.get('graph_id', 0))
+        
+        graph = cls(
+            graph_name=g_data.get('graph_name', f'ThinGraph_{graph_id}'),
+            graph_id=graph_id,
+            parameter_list=[],
+            polynom_max_power=int(g_data.get('polynom_max_power', 5)),
+            polynom_decay=float(g_data.get('polynom_decay', 0.8)),
+            position=g_data.get('init_position', [0.0, 0.0, 0.0]),
+            max_nodes=int(g_data.get('max_nodes', len(nodes_data) or 1)),
+        )
+        
+        # Stabile Reihenfolge nach ID — root wird so verlässlich identifiziert
+        # und _allocate_node_id kann saubere IDs vergeben.
+        nodes_data_sorted = sorted(nodes_data, key=lambda x: int(x.get('id', 0)))
+        
+        if verbose:
+            print(f"\n[thin-load] Graph {graph_id} ({graph.graph_name}): "
+                  f"{len(nodes_data_sorted)} nodes")
+        
+        # Erste Phase: Nodes erstellen, Positionen setup, populate_node().
+        for nd in nodes_data_sorted:
+            graph._apply_node_data(nd, populate=populate, override_graph_id=graph_id,
+                                   verbose=verbose)
+        
+        # Zweite Phase: Topologie (parent/next/prev) wiederherstellen.
+        graph._reconstruct_topology(nodes_data_sorted, verbose=verbose)
+        
+        # Dritte Phase (optional): Connections bauen.
+        if build_connections:
+            registry = {graph.graph_id: graph}
+            if external_graphs:
+                registry.update(external_graphs)
+            graph.build_connections(external_graphs=external_graphs)
+        
+        return graph
+
+    def _apply_node_data(self, nd, *, populate=True, override_graph_id=None,
+                         verbose=True):
+        """
+        Erzeuge einen einzelnen Node aus einem gespeicherten node-dict.
+        Genau hier sitzt die Fallunterscheidung positions vs. build().
+        """
+        # Parameter aus dem 'parameters'-Feld nehmen, mit den Top-Level-
+        # Feldern angereichert (so wie load_all_graphs_dialog es macht).
+        raw_params = (nd.get('parameters', {}) or {}).copy()
+        node_id = int(nd.get('id', 0))
+        node_name = nd.get('name', f'Node_{node_id}')
+        gid = int(override_graph_id) if override_graph_id is not None \
+              else int(nd.get('graph_id', self.graph_id))
+        
+        raw_params['id'] = node_id
+        raw_params['name'] = node_name
+        raw_params['graph_id'] = gid
+        # Connections werden im params-dict erwartet (Node.__init__ liest sie da)
+        raw_params['connections'] = nd.get('connections', raw_params.get('connections', []))
+        
+        # Devices: top-level hat Vorrang, sonst params-internes
+        if 'devices' in nd:
+            raw_params['devices'] = nd['devices']
+        
+        # types / neuron_models: top-level übersteuert NICHT, wenn params
+        # bereits welche hat (da können sie schon aus früheren Edits sein)
+        if 'types' in nd and 'types' not in raw_params:
+            raw_params['types'] = nd['types']
+        if 'neuron_models' in nd and 'neuron_models' not in raw_params:
+            raw_params['neuron_models'] = nd['neuron_models']
+        
+        # center_of_mass + Init-Position: setzen wir vorzugsweise aus dem
+        # gespeicherten Wert, sonst bleibt's beim Default
+        if 'center_of_mass' in nd:
+            raw_params['center_of_mass'] = list(nd['center_of_mass'])
+            raw_params['m'] = list(nd['center_of_mass'])
+        
+        new_node = self.create_node(
+            parameters=raw_params,
+            is_root=(node_id == 0),
+            auto_build=False,
+        )
+        
+        # Sync für populate_node() — kennt diesen Pfad als Fallback
+        new_node.population_nest_params = raw_params.get('population_nest_params', [])
+        
+        if 'distribution' in nd and nd['distribution']:
+            new_node.distribution = nd['distribution']
+        
+        # ─── ZENTRALE FALLUNTERSCHEIDUNG ──────────────────────────────
+        saved_positions = nd.get('positions', None)
+        has_saved_positions = bool(saved_positions)  # nicht None UND nicht leer
+        
+        if has_saved_positions:
+            # Übernehme gespeicherte Positionen direkt (z.B. WFC-Realisierung
+            # die so nicht reproduzierbar ist) — build() wird übersprungen.
+            new_node.positions = [np.array(pos, dtype=float) for pos in saved_positions]
+            if 'center_of_mass' in nd:
+                new_node.center_of_mass = np.array(nd['center_of_mass'], dtype=float)
+            if verbose:
+                print(f"  Node {node_id} ({node_name}): {len(new_node.positions)} pop(s) "
+                      f"from saved positions [skip build()]")
+        else:
+            # Keine Positionen gespeichert → komplett aus den Parametern
+            # neu generieren. Funktioniert für alle tool_types: 'custom'
+            # läuft durch wave_collapse, 'CCW'/'Blob'/'Cone'/'Grid' durch
+            # ihre jeweiligen Generatoren.
+            try:
+                new_node.build()
+                if verbose:
+                    n_pops = len([p for p in new_node.positions if p is not None])
+                    tt = raw_params.get('tool_type', 'custom')
+                    print(f"  Node {node_id} ({node_name}): {n_pops} pop(s) "
+                          f"freshly built (tool_type={tt})")
+            except Exception as e:
+                print(f"  ⚠ Node {node_id} ({node_name}): build() failed: {e}")
+                # Trotzdem weiter — populate_node() wird sich beschweren wenn nötig
+        
+        # ──────────────────────────────────────────────────────────────
+        # populate_node() erstellt die NEST-Populationen aus self.positions
+        # plus die Auto-Devices wenn aktiviert. Devices die explizit im
+        # JSON stehen werden ebenfalls instantiiert (parameters['devices']).
+        if populate:
+            try:
+                new_node.populate_node()
+            except Exception as e:
+                print(f"  ⚠ Node {node_id} ({node_name}): populate_node() failed: {e}")
+        
+        return new_node
+
+    def _reconstruct_topology(self, nodes_data, verbose=True):
+        """
+        Stellt parent / next / prev Beziehungen aus den gespeicherten
+        IDs wieder her. Cross-Graph-Beziehungen werden hier nicht
+        adressiert (nur same-graph, wie im Original-Loader auch).
+        """
+        node_map = {n.id: n for n in self.node_list}
+        
+        for nd in nodes_data:
+            nid = int(nd.get('id', -1))
+            node = node_map.get(nid)
+            if node is None:
+                continue
+            
+            parent_id = nd.get('parent_id', None)
+            if parent_id is not None and parent_id in node_map:
+                node.parent = node_map[parent_id]
+            
+            for next_id in nd.get('next_ids', []) or []:
+                tgt = node_map.get(int(next_id))
+                if tgt is not None and tgt not in node.next:
+                    node.next.append(tgt)
+                    if node not in tgt.prev:
+                        tgt.prev.append(node)
+            
+            for prev_id in nd.get('prev_ids', []) or []:
+                src = node_map.get(int(prev_id))
+                if src is not None and src not in node.prev:
+                    node.prev.append(src)
+                    if node not in src.next:
+                        src.next.append(node)
+
+    def _serialize_node(self, node, *,
+                         include_positions=False,
+                         include_devices=True,
+                         include_connections=True):
+        """Konvertiere einen Node in ein JSON-fähiges dict (für to_json)."""
+        # parameters klonen, devices ggf. raus (die werden top-level abgelegt)
+        safe_params = {}
+        for k, v in (node.parameters or {}).items():
+            if k == 'devices':
+                continue
+            safe_params[k] = _thin_clean_value(v)
+        
+        positions_out = []
+        if include_positions and getattr(node, 'positions', None):
+            for pos in node.positions:
+                if isinstance(pos, np.ndarray):
+                    positions_out.append(pos.tolist())
+                elif pos is None:
+                    positions_out.append([])
+                else:
+                    positions_out.append(list(pos))
+        
+        devices_out = []
+        if include_devices:
+            src_devs = getattr(node, 'devices', []) or []
+            if not src_devs and 'devices' in (node.parameters or {}):
+                src_devs = node.parameters['devices']
+            for dev in src_devs:
+                dc = dict(dev)
+                dc.pop('runtime_gid', None)
+                if 'params' in dc:
+                    dc['params'] = _thin_clean_value(dc['params'])
+                devices_out.append(dc)
+        
+        connections_out = []
+        if include_connections:
+            for conn in (node.connections or []):
+                connections_out.append({
+                    'id': conn.get('id'),
+                    'name': conn.get('name'),
+                    'source': conn.get('source'),
+                    'target': conn.get('target'),
+                    'params': _thin_clean_value(conn.get('params', {})),
+                })
+        
+        return {
+            'id': int(node.id),
+            'name': node.name,
+            'graph_id': int(getattr(node, 'graph_id', self.graph_id)),
+            'parameters': safe_params,
+            'positions': positions_out,
+            'center_of_mass': (node.center_of_mass.tolist()
+                               if isinstance(node.center_of_mass, np.ndarray)
+                               else list(node.center_of_mass)),
+            'connections': connections_out,
+            'devices': devices_out,
+            'types': list(getattr(node, 'types', [])),
+            'neuron_models': list(getattr(node, 'neuron_models', [])),
+            'distribution': list(getattr(node, 'distribution', []) or []),
+            'parent_id': (node.parent.id if getattr(node, 'parent', None) else None),
+            'next_ids': [n.id for n in getattr(node, 'next', [])],
+            'prev_ids': [n.id for n in getattr(node, 'prev', [])],
+        }
 
     def __repr__(self):
         return f"Graph(nodes={self.nodes}, edges={sum(len(n.next) for n in self.node_list)})"
+
+
+def _thin_clean_value(v):
+    """Rekursive np→python Konvertierung für JSON-Serialisierung.
+    Selbst-enthalten — keine Abhängigkeit zu WidgetLib._clean_params."""
+    if isinstance(v, dict):
+        return {k: _thin_clean_value(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_thin_clean_value(x) for x in v]
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    if isinstance(v, (np.bool_,)):
+        return bool(v)
+    # NEST NodeCollection wenn vorhanden
+    try:
+        if hasattr(nest, 'NodeCollection') and isinstance(v, nest.NodeCollection):
+            return v.tolist()
+    except Exception:
+        pass
+    return v
 
 
 def createGraph(parameter_list=None, max_nodes=10, graph_id=0):

@@ -429,15 +429,55 @@ class MainWindow(QMainWindow):
         new_action.triggered.connect(self.new_project_dialog)
         file_menu.addAction(new_action)
         
-        save_action = QAction("Save Project", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_all_graphs_dialog)
-        file_menu.addAction(save_action)
+        file_menu.addSeparator()
         
-        load_action = QAction("Load Project", self)
+        # ── LOAD (kernel reset, replaces current session) ───────────
+        load_action = QAction("Load Graph", self)
         load_action.setShortcut("Ctrl+O")
         load_action.triggered.connect(self.load_all_graphs_dialog)
         file_menu.addAction(load_action)
+        
+        file_menu.addSeparator()
+        
+        # ── SAVE (current session → file) ────────────────────────────
+        save_fat_action = QAction("Save as Fat Graph", self)
+        save_fat_action.setShortcut("Ctrl+S")
+        save_fat_action.setStatusTip(
+            "Save with positions. Larger file, exact reproduction."
+        )
+        save_fat_action.triggered.connect(self.save_all_graphs_dialog)
+        file_menu.addAction(save_fat_action)
+        
+        save_thin_action = QAction("Save as Thin Graph", self)
+        save_thin_action.setShortcut("Ctrl+Shift+S")
+        save_thin_action.setStatusTip(
+            "Save without positions (or WFC-only). Loader regenerates "
+            "via build() — frees you from position-constraint editing."
+        )
+        save_thin_action.triggered.connect(self.save_thin_graphs_dialog)
+        file_menu.addAction(save_thin_action)
+        
+        file_menu.addSeparator()
+        
+        # ── IMPORT (additive, no kernel reset) ───────────────────────
+        import_fat_action = QAction("Import Fat Subgraph…", self)
+        import_fat_action.setShortcut("Ctrl+I")
+        import_fat_action.setStatusTip(
+            "Append a graph file (with positions) to the current session. "
+            "Full feature support (anisotropic / spatial / distance-dep). "
+            "Auto-shifts graph_ids on collision."
+        )
+        import_fat_action.triggered.connect(self.merge_graphs_dialog)
+        file_menu.addAction(import_fat_action)
+        
+        import_thin_action = QAction("Import Thin Subgraph…", self)
+        import_thin_action.setShortcut("Ctrl+Shift+I")
+        import_thin_action.setStatusTip(
+            "Append a thin graph file (positions empty → rebuilt via "
+            "build()) to the current session. Toolbox-based loader."
+        )
+        import_thin_action.triggered.connect(self.load_thin_graphs_dialog)
+        file_menu.addAction(import_thin_action)
         
         file_menu.addSeparator()
         
@@ -1627,6 +1667,14 @@ class MainWindow(QMainWindow):
         
         self.tool_stack.addWidget(self.connection_tool)
         
+        # Connection Editor — separate page for editing existing connections.
+        # Routed to from the graph-overview when the user clicks an arrow.
+        # Trigger network rebuild on update so NEST-side reflects the
+        # changed synapse model / weight / spatial spec.
+        self.connection_editor = ConnectionEditorWidget(graph_list=graph_list)
+        self.connection_editor.connectionUpdated.connect(self._on_connection_edited)
+        self.tool_stack.addWidget(self.connection_editor)
+        
         # The "Population Examples" tab now hosts an Examples-folder browser.
         # The old StructuresWidget (cortical regions) is still instantiated
         # for backward compat (callers might use it via self.structures_widget)
@@ -1665,7 +1713,7 @@ class MainWindow(QMainWindow):
         return layout
     
     def on_device_tree_click(self, device_data):
-        self.set_tool_page(4)
+        self.set_tool_page(5)
         self.tools_widget.open_device_editor(device_data)
         self.status_bar.set_status(f"Editing Device: {device_data.get('model')}", "#FF9800")
 
@@ -1778,8 +1826,36 @@ class MainWindow(QMainWindow):
 
 
     def _on_overview_conn_selected(self, connection_data):
-        self.set_tool_page(1)
-        self.graph_editor.load_connection_editor(connection_data)
+        # Open the standalone Connection Editor on tool-page 3.
+        # Used to dispatch into Graph Inspector — that path got too crowded
+        # so editing existing connections lives on its own page now.
+        self.set_tool_page(3)
+        self.connection_editor.load_connection(connection_data)
+    
+    def _on_connection_edited(self, conn_data):
+        """Called when ConnectionEditor.apply_changes runs. Triggers a
+        rebuild so NEST reflects the new synapse model / weight / spatial
+        spec. Connection data is already mutated in place — we just need
+        to invalidate the existing NEST projections and recreate them."""
+        try:
+            self.status_bar.set_status(
+                f"Rebuilding network after connection edit: {conn_data.get('name','?')}",
+                color="#673AB7",
+            )
+            QApplication.processEvents()
+            # Full rebuild path — same one used after device updates.
+            _invalidate_nest_refs(graph_list)
+            nest.ResetKernel()
+            if getattr(self, 'structural_plasticity_enabled', False):
+                try: nest.EnableStructuralPlasticity()
+                except Exception: pass
+            self.rebuild_all_graphs(reset_nest=False, verbose=False)
+            self.update_visualizations()
+            self.graph_overview.update_tree()
+            self.status_bar.show_success("Connection updated.")
+        except Exception as e:
+            print(f"Rebuild after connection edit failed: {e}")
+            self.status_bar.show_error("Rebuild failed; see console.")
 
 
     
@@ -1936,9 +2012,10 @@ class MainWindow(QMainWindow):
         nav_items = [
             ("Network Builder", 0),
             ("Graph Inspector", 1),
-            ("Connectivity", 2),
-            ("Population Examples", 3),
-            ("Instrumentation", 4)
+            ("Connection Creator", 2),
+            ("Connection Editor", 3),
+            ("Population Examples", 4),
+            ("Instrumentation", 5)
         ]
 
         for label, idx in nav_items:
@@ -1960,7 +2037,6 @@ class MainWindow(QMainWindow):
         col2_layout.addWidget(create_header("KERNEL"))
         
         ops_items = [
-            ("Import Sub-Graph", self.merge_graphs_dialog),
             ("Refresh Connectivity", self.reconnect_network),
             ("Reinstantiate Network", self.rebuild_all_graphs)
         ]
@@ -1972,25 +2048,65 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(func)
             col2_layout.addWidget(btn)
 
+        # ── GRAPH I/O column ─────────────────────────────────────────
+        # Aufgespalten in 5 explizite Aktionen damit der Mental Model
+        # klar ist:
+        #   IMPORT (additiv)    : append an laufende Session, kein
+        #                         Kernel-Reset, IDs werden automatisch
+        #                         geshiftet wenn Kollision droht.
+        #   LOAD                : ersetzt Session komplett (Kernel-Reset).
+        #   SAVE THIN/FAT       : aktuelle Session → Datei.
+        # Thin = ohne (oder nur WFC) Positionen, build() rekonstruiert.
+        # Fat  = mit Positionen, exakte Reproduktion.
         col3_layout = QVBoxLayout()
         col3_layout.setSpacing(5)
-        col3_layout.addWidget(create_header("PROJECT"))
+        col3_layout.addWidget(create_header("GRAPH I/O"))
         
-        io_items = [
-            ("Save Project", self.save_all_graphs_dialog),
-            ("Load Project", self.load_all_graphs_dialog)
+        # Distinct styles damit der User die drei Aktionsklassen optisch
+        # unterscheidet (Import = additiv, Load = destruktiv, Save = output)
+        import_btn_style = """
+            QPushButton {
+                background-color: #1B5E20; color: #C8E6C9;
+                border: 1px solid #2E7D32; border-radius: 6px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2E7D32; border: 1px solid #66BB6A; color: white; }
+        """
+        load_btn_style = """
+            QPushButton {
+                background-color: #4A148C; color: #E1BEE7;
+                border: 1px solid #6A1B9A; border-radius: 6px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #6A1B9A; border: 1px solid #BA68C8; color: white; }
+        """
+        # io_btn_style is already defined above (used for Save buttons here)
+        
+        graph_io_items = [
+            # (label, callback, style, tooltip)
+            ("Import Thin Subgraph", self.load_thin_graphs_dialog, import_btn_style,
+             "Append a thin graph (positions empty → rebuilt). Toolbox loader."),
+            ("Import Fat Subgraph",  self.merge_graphs_dialog,      import_btn_style,
+             "Append a fat graph (with positions). Full feature support."),
+            ("Load Graph",           self.load_all_graphs_dialog,   load_btn_style,
+             "Replace current session with a project file (kernel reset)."),
+            ("Save as Thin Graph",   self.save_thin_graphs_dialog,  io_btn_style,
+             "Save current session without positions (or WFC-only auto)."),
+            ("Save as Fat Graph",    self.save_all_graphs_dialog,   io_btn_style,
+             "Save current session with positions."),
         ]
         
-        for label, func in io_items:
+        for label, func, style, tip in graph_io_items:
             btn = QPushButton(label)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            btn.setStyleSheet(io_btn_style)
+            btn.setStyleSheet(style)
+            btn.setToolTip(tip)
             btn.clicked.connect(func)
             col3_layout.addWidget(btn)
 
+        # Stretch-Faktoren angepasst: GRAPH I/O hat jetzt 5 Buttons,
+        # bekommt etwas mehr Platz.
         main_layout.addLayout(col1_layout, 4)
-        main_layout.addLayout(col2_layout, 3)
-        main_layout.addLayout(col3_layout, 2)
+        main_layout.addLayout(col2_layout, 2)
+        main_layout.addLayout(col3_layout, 4)
 
         wrapper_layout = QHBoxLayout()
         wrapper_layout.setContentsMargins(0,0,0,0)
@@ -2006,7 +2122,7 @@ class MainWindow(QMainWindow):
             return
 
         filepath, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
+            self, "Save as Fat Graph", "", "JSON Files (*.json);;All Files (*)"
         )
 
         if filepath:
@@ -3590,7 +3706,7 @@ class MainWindow(QMainWindow):
 
     def load_all_graphs_dialog(self):
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "Load Project", "", "JSON Files (*.json);;All Files (*)"
+            self, "Load Graph", "", "JSON Files (*.json);;All Files (*)"
         )
 
         if not filepath:
@@ -3683,16 +3799,24 @@ class MainWindow(QMainWindow):
                         auto_build=False
                     )
                     
-                    if nd.get('positions'):
-                        new_node.positions = [np.array(pos) for pos in nd['positions']]
+                    # NUR Struktur + Positionen hier setzen — populate_node
+                    # läuft am Ende zentral via rebuild_all_graphs(reset_nest=
+                    # False). Damit verhalten sich Load-Graph und
+                    # Reinstantiate-Network exakt gleich, und es gibt
+                    # keine doppelten NEST-Populationen.
+                    saved_positions = nd.get('positions')
+                    if saved_positions:
+                        new_node.positions = [np.array(pos) for pos in saved_positions]
+                    # else: positions bleiben leer — rebuild_all_graphs ruft
+                    # build() für jeden Node mit leerer self.positions auf.
                     
                     if nd.get('distribution'):
                         new_node.distribution = nd['distribution']
                     
-                    # FIX: Sync population_nest_params to node attribute BEFORE populate_node
+                    # population_nest_params auf den Node syncen — das sieht
+                    # populate_node() später als Fallback wenn parameters
+                    # leer sind.
                     new_node.population_nest_params = params.get('population_nest_params', [])
-                    
-                    new_node.populate_node()
 
                 graph_list.append(graph)
                 print(f"Graph '{graph.graph_name}' loaded (ID: {gid}).")
@@ -3761,6 +3885,33 @@ class MainWindow(QMainWindow):
                             pass
 
 
+            # ─── ZENTRALER POPULATE-PASS via rebuild_all_graphs ───────
+            # Statt populate_node inline im Main-Loop (was bei thin-Files
+            # mit leeren positions[] für Cone/Blob/CCW/Grid leere
+            # Populationen erzeugte) delegieren wir an die identische
+            # Logik die der "Reinstantiate Network" Button nutzt:
+            #   1. Pro Node: build() falls self.positions leer
+            #   2. populate_node() für alle
+            # Kernel ist bereits oben mit nest.ResetKernel() gewipt,
+            # deshalb reset_nest=False (sonst wären die Topologie-Refs
+            # nochmal invalidiert).
+            self.status_bar.set_status("Building NEST populations...", color="#FF9800")
+            self.status_bar.set_progress(70)
+            QApplication.processEvents()
+            
+            rebuild_stats = self.rebuild_all_graphs(
+                target_graphs=graph_list,
+                reset_nest=False,
+                rebuild_positions=False,
+                verbose=True,
+            )
+            print(f"[Load] Rebuild summary: {rebuild_stats['nodes_rebuilt']} nodes, "
+                  f"{rebuild_stats['populations_created']} populations, "
+                  f"{len(rebuild_stats['errors'])} errors")
+            if rebuild_stats['errors']:
+                for err in rebuild_stats['errors'][:10]:
+                    print(f"  ✗ {err}")
+
             if hasattr(self, 'tools_widget'):
                 self.tools_widget.update_graphs(graph_list)
                 
@@ -3799,6 +3950,298 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Load Error", str(e))
+
+
+
+    # ════════════════════════════════════════════════════════════════
+    #  THIN-MODE LOADING / SAVING
+    #  Append-only Loader für Graphen aus 'thin' JSONs (positions
+    #  optional). Kein Kernel-Reset, kein Pos-Constraint — Graphen
+    #  werden additiv an die laufende Session angehängt. graph_ids
+    #  werden automatisch um einen Offset verschoben falls eine
+    #  Kollision mit existierenden Graphen droht. Connection-Targets
+    #  innerhalb der geladenen Menge werden mit-remappt; cross-graph-
+    #  refs auf bereits geladene Graphen bleiben gültig.
+    # ════════════════════════════════════════════════════════════════
+
+    def load_thin_graphs_dialog(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Thin Graph(s)", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not filepath:
+            return
+        
+        global graph_list
+        try:
+            self.status_bar.set_status("Loading thin graph(s)...", color="#2196F3")
+            self.status_bar.set_progress(10)
+            QApplication.processEvents()
+            
+            # Peek: welche graph_ids will das File belegen?
+            with open(filepath, 'r', encoding='utf-8') as f:
+                preview = json.load(f)
+            
+            if 'graphs' in preview:
+                wanted_ids = [int(g.get('graph_id', i)) for i, g in enumerate(preview['graphs'])]
+            elif 'graph' in preview:
+                wanted_ids = [int(preview['graph'].get('graph_id', 0))]
+            else:
+                wanted_ids = [0]
+            
+            existing_ids = {g.graph_id for g in graph_list}
+            collision = bool(existing_ids & set(wanted_ids))
+            
+            if collision and existing_ids:
+                # Schiebe alle gewollten IDs um (max(existing)+1 - min(wanted))
+                # nach oben — bewahrt relative Abstände, vermeidet Kollisionen.
+                offset = (max(existing_ids) + 1) - min(wanted_ids)
+            else:
+                offset = 0
+            
+            print(f"\n[ThinLoad] file wants graph_ids={wanted_ids}, "
+                  f"existing={sorted(existing_ids)}, offset={offset}")
+            
+            self.status_bar.set_progress(25)
+            QApplication.processEvents()
+            
+            # Toolbox macht den Heavy-Lifting Teil: Nodes erstellen,
+            # Positionen (build() oder direkt aus JSON), populate_node()
+            # für NEST-Populationen + Auto-Devices, Topologie restaurieren.
+            # build_connections=False weil wir gleich die WidgetLib-Routine
+            # nehmen für vollen Feature-Support (anisotropic / spatial /
+            # distance-dependent).
+            # populate=False: NEST-Populationen erstellen wir gleich
+            # zentral via rebuild_all_graphs — die selbe Routine die der
+            # "Reinstantiate Network" Button benutzt. Damit verhalten sich
+            # Import-Thin und Reinstantiate-Network exakt gleich.
+            new_graphs = Graph.load_all_from_json(
+                filepath,
+                populate=False,
+                build_connections=False,
+                id_offset=offset,
+                verbose=True,
+            )
+            
+            self.status_bar.set_progress(60)
+            QApplication.processEvents()
+            
+            # Anhängen + WidgetLib-Counter mit-tracken
+            for g in new_graphs:
+                graph_list.append(g)
+                if g.graph_id >= WidgetLib.next_graph_id:
+                    WidgetLib.next_graph_id = g.graph_id + 1
+            
+            # ─── ZENTRALER POPULATE-PASS via rebuild_all_graphs ───────
+            # Gleiche Routine wie der "Reinstantiate Network" Button.
+            # reset_nest=False, weil wir append-only laden — wir wollen
+            # die existierende Session nicht wegwerfen. Pro neuem Node:
+            #   1. build() falls self.positions leer (thin-mode)
+            #   2. populate_node() erstellt NEST-Populationen
+            self.status_bar.set_status("Building NEST populations...", color="#FF9800")
+            self.status_bar.set_progress(70)
+            QApplication.processEvents()
+            
+            rebuild_stats = self.rebuild_all_graphs(
+                target_graphs=new_graphs,
+                reset_nest=False,
+                rebuild_positions=False,
+                verbose=True,
+            )
+            print(f"[ThinLoad] Rebuild summary: {rebuild_stats['nodes_rebuilt']} nodes, "
+                  f"{rebuild_stats['populations_created']} populations, "
+                  f"{len(rebuild_stats['errors'])} errors")
+            if rebuild_stats['errors']:
+                for err in rebuild_stats['errors'][:10]:
+                    print(f"  ✗ {err}")
+            
+            self.status_bar.set_status("Wiring connections (new graphs only)...")
+            self.status_bar.set_progress(80)
+            QApplication.processEvents()
+            
+            # Connections: NUR für die neu geladenen Graphen aufbauen
+            # (existierende sind schon im Kernel). Lookups gehen aber
+            # gegen die VOLLE Registry — sonst können Cross-Graph-
+            # Connections in die existierende Session nicht aufgelöst
+            # werden.
+            from WidgetLib import validate_connection_params
+            full_registry = {g.graph_id: g for g in graph_list}
+            created = 0
+            failed = 0
+            
+            for ng in new_graphs:
+                for node in ng.node_list:
+                    for conn in (node.connections or []):
+                        try:
+                            src = conn.get('source', {}) or {}
+                            tgt = conn.get('target', {}) or {}
+                            sg = full_registry.get(int(src.get('graph_id', -1)))
+                            tg = full_registry.get(int(tgt.get('graph_id', -1)))
+                            if sg is None or tg is None:
+                                failed += 1
+                                continue
+                            sn = sg.get_node(int(src.get('node_id', -1)))
+                            tn = tg.get_node(int(tgt.get('node_id', -1)))
+                            if sn is None or tn is None:
+                                failed += 1
+                                continue
+                            sp_id = int(src.get('pop_id', 0))
+                            tp_id = int(tgt.get('pop_id', 0))
+                            if (sp_id >= len(sn.population) or tp_id >= len(tn.population)
+                                or sn.population[sp_id] is None or tn.population[tp_id] is None):
+                                failed += 1
+                                continue
+                            sp = sn.population[sp_id]
+                            tp = tn.population[tp_id]
+                            if len(sp) == 0 or len(tp) == 0:
+                                failed += 1
+                                continue
+                            
+                            cs, ss, _w = validate_connection_params(conn.get('params', {}))
+                            if cs.get('rule') == 'one_to_one' and len(sp) != len(tp):
+                                print(f"  ✗ {conn.get('name', '?')}: one_to_one size mismatch "
+                                      f"({len(sp)} vs {len(tp)})")
+                                failed += 1
+                                continue
+                            nest.Connect(sp, tp, cs, ss)
+                            created += 1
+                        except Exception as e:
+                            print(f"  ✗ Connection {conn.get('name', '?')}: {e}")
+                            failed += 1
+            
+            self.status_bar.set_status("Refreshing view...")
+            self.status_bar.set_progress(95)
+            QApplication.processEvents()
+            
+            if hasattr(self, 'tools_widget'):
+                self.tools_widget.update_graphs(graph_list)
+            self.update_visualizations()
+            self.graph_overview.update_tree()
+            self.connection_tool.refresh()
+            self.graph_editor.refresh_graph_list()
+            if hasattr(self, 'graph_builder'):
+                self.graph_builder.reset()
+            
+            offset_msg = f" (id_offset={offset})" if offset else ""
+            msg = (f"Thin-loaded {len(new_graphs)} graph(s){offset_msg}. "
+                   f"Connections: {created} created, {failed} failed.")
+            self.status_bar.show_success("Thin graph(s) loaded.")
+            print(f"\n{msg}")
+            QMessageBox.information(self, "Load Complete", msg)
+        
+        except Exception as e:
+            self.status_bar.show_error(f"Thin load failed: {e}")
+            print(f"Thin load failed: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Load Error", str(e))
+
+    def save_thin_graphs_dialog(self):
+        if not graph_list:
+            QMessageBox.warning(self, "Save Error", "No graphs to save!")
+            return
+        
+        # Drei Optionen: Auto (WFC-only), Always-Include, Never-Include.
+        # Auto ist der intelligente Default — speichert Positionen NUR
+        # für tool_type='custom' (WFC, nicht-deterministisch). Tools wie
+        # Cone/Blob/CCW werden auf load() frisch regeneriert (deterministisch
+        # aus den Parametern), sparen also Filesize ohne Verlust.
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle("Save Thin Graph(s)")
+        msg.setText("How to handle positions?")
+        msg.setInformativeText(
+            "• AUTO  = save positions only for WFC-custom nodes (the only "
+            "non-deterministic case). Cone/Blob/CCW get rebuilt from "
+            "parameters on load. Recommended.\n"
+            "• YES   = always save positions (preserves every realization, "
+            "largest file).\n"
+            "• NO    = never save positions (smallest file, but stochastic "
+            "WFC realizations will differ on reload)."
+        )
+        btn_auto = msg.addButton("Auto (WFC only)", QMessageBox.ButtonRole.AcceptRole)
+        btn_yes  = msg.addButton("Always Include", QMessageBox.ButtonRole.YesRole)
+        btn_no   = msg.addButton("Thin (No Positions)", QMessageBox.ButtonRole.NoRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is btn_auto:
+            include_positions = 'auto'
+        elif clicked is btn_yes:
+            include_positions = True
+        elif clicked is btn_no:
+            include_positions = False
+        else:
+            return
+        
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Thin Graph(s)", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not filepath:
+            return
+        if not filepath.endswith('.json'):
+            filepath += '.json'
+        
+        # Falls nur ein Graph: schreibe single-graph Format (kompatibel
+        # mit WidgetLib.load_graph). Mehrere Graphen → Projekt-Format.
+        try:
+            real_graphs = [g for g in graph_list if not getattr(g, 'is_virtual', False)]
+            if not real_graphs:
+                QMessageBox.warning(self, "Save Error", "No real graphs to save (all virtual).")
+                return
+            
+            if len(real_graphs) == 1:
+                real_graphs[0].to_json(filepath, include_positions=include_positions, verbose=True)
+            else:
+                # Projekt-Format: serialisiere jeden Graph einzeln, packe in graphs[].
+                # Für 'auto' wird per-Node entschieden (siehe to_json).
+                project_data = {
+                    'meta': {
+                        'version': 'thin-1.0',
+                        'type': 'neuroticks_thin_project',
+                        'include_positions': include_positions,
+                        'timestamp': str(np.datetime64('now')),
+                    },
+                    'graphs': []
+                }
+                for g in real_graphs:
+                    nodes_data = []
+                    for node in g.node_list:
+                        if include_positions == 'auto':
+                            tt = (node.parameters or {}).get('tool_type', 'custom')
+                            include_pos_for_this = (tt == 'custom')
+                        else:
+                            include_pos_for_this = bool(include_positions)
+                        nodes_data.append(g._serialize_node(
+                            node,
+                            include_positions=include_pos_for_this,
+                            include_devices=True,
+                            include_connections=True,
+                        ))
+                    project_data['graphs'].append({
+                        'graph_id': int(g.graph_id),
+                        'graph_name': g.graph_name,
+                        'max_nodes': int(g.max_nodes) if g.max_nodes else len(nodes_data),
+                        'init_position': (g.init_position.tolist()
+                                          if isinstance(g.init_position, np.ndarray)
+                                          else list(g.init_position)),
+                        'polynom_max_power': int(g.polynom_max_power),
+                        'polynom_decay': float(g.polynom_decay),
+                        'nodes': nodes_data,
+                    })
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(project_data, f, indent=2)
+                tag = ("auto" if include_positions == 'auto'
+                       else "with positions" if include_positions
+                       else "thin (no positions)")
+                print(f"Thin project saved: {len(real_graphs)} graphs → {filepath}  [{tag}]")
+            
+            self.status_bar.show_success(f"Thin graph(s) saved to {filepath}")
+        except Exception as e:
+            self.status_bar.show_error(f"Save failed: {e}")
+            print(f"Thin save failed: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Save Error", str(e))
 
 
 

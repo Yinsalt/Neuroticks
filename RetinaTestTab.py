@@ -687,17 +687,20 @@ class RetinaTestTabWidget(QWidget):
             self._log(f"Baue Retina  scale={scale}  variant={variant}  @ {pos}", color="#4FC3F7")
             QApplication.processEvents()
 
-            params, neuron_params = get_config(scale, variant)
-            params = deepcopy(params); neuron_params = deepcopy(neuron_params)
+            params, neuron_params, feeder_cfg = get_config(scale, variant)
+            params = deepcopy(params)
+            neuron_params = deepcopy(neuron_params)
+            feeder_cfg = deepcopy(feeder_cfg)
             params['origin'] = pos
-            # Input-Resolution auf Target-Groesse vom Video anpassen
+            # Input-Resolution auf Target-Groesse vom Video anpassen.
+            # Wichtig: input_resolution lebt im FEEDER-Config, nicht in params.
             tw = self.spin_target_w.value(); th = self.spin_target_h.value()
-            params['input_resolution'] = (th, tw)
+            feeder_cfg['input_resolution'] = (th, tw)
 
             self.retina = Retina(params=params, neuron_params=neuron_params, verbose=False)
             self.retina.build()
             self.retina.connect()
-            self.feeder = self.retina.create_input_feeder({})
+            self.feeder = self.retina.create_input_feeder(feeder_cfg)
 
             # Spike-Recorder fuer jede Ganglion-Pop (fuer Live-Stats)
             for name, pop in self.retina.get_output_populations().items():
