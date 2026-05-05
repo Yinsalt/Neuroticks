@@ -397,6 +397,8 @@ __all__ = [
     'EditGraphWidget',
     'GraphOverviewWidget',
     'ConnectionTool',
+    'ConnectionEditorWidget',
+    'ConnectionParamWidget',
     'ToolsWidget',
     'SimulationControlWidget',
     'graph_parameters',
@@ -4237,17 +4239,37 @@ class EditGraphWidget(QWidget):
         if 'button' in node_data:
             self.node_list_layout.removeWidget(node_data['button'])
             node_data['button'].deleteLater()
+        
+        # Stable ID of the node being removed. Held BEFORE we touch the
+        # graph so we can still reference it for the cross-graph sweep
+        # below even if the node object gets cleaned out.
+        deleted_node_id = node_data['params'].get('id', None)
+        deleted_graph_id = self.current_graph_id
             
         if self.current_graph and node_data.get('original_node'):
             original_node = node_data['original_node']
+            # Graph.remove_node -> Node.remove() walks self.prev to drop
+            # incoming refs from same-graph predecessors. That covers
+            # the connected-graph case but not the editor case where
+            # `prev` may be incompletely populated (no connect() run yet,
+            # cross-graph wiring delayed, etc.). The explicit sweep below
+            # is the belt-and-braces version.
             self.current_graph.remove_node(original_node)
+        
+        # Explicit cross-graph + same-graph sweep: drop ANY connection in
+        # ANY graph whose target points at the deleted node. Mirrors the
+        # power of the GraphOverview's per-connection deletion path.
+        if deleted_node_id is not None:
+            self._sweep_incoming_connections(deleted_graph_id, deleted_node_id)
             
+        # NO ID-cascading. Keep stable IDs so cross-graph references
+        # in OTHER graphs that point at this graph's surviving nodes
+        # still resolve correctly. The button label uses LIST POSITION
+        # for human readability ("Node 1 of 5"), not ID.
         for i, node in enumerate(self.node_list):
-            node['params']['id'] = i
-            old_name = node['params'].get('name', '')
-            if old_name.startswith("Node_"):
-                node['params']['name'] = f"Node_{i}"
-            node['button'].setText(f"Node {i + 1}: {node['params']['name']}")
+            stable_id = node['params'].get('id', i)
+            stable_name = node['params'].get('name', f'Node_{stable_id}')
+            node['button'].setText(f"Node {i + 1}: {stable_name}")
             try: node['button'].clicked.disconnect()  # May not be connected
             except RuntimeError: pass  # No connections
             node['button'].clicked.connect(lambda checked=False, idx=i: self.select_node(idx))
@@ -4269,6 +4291,70 @@ class EditGraphWidget(QWidget):
                 if widget is not None:
                     widget.setParent(None)
                     widget.deleteLater()
+    
+    def _sweep_incoming_connections(self, deleted_graph_id, deleted_node_id):
+        """
+        Walks every node in every graph and strips connections whose
+        target points at (deleted_graph_id, deleted_node_id). Also
+        rewrites the editor-side node_list mirror for the currently-
+        loaded graph so a subsequent save_changes can't resurrect the
+        old refs.
+        
+        Why both sides: graph node objects are the source of truth at
+        runtime, but `_build_node_params` reads from
+        `node_data['params']['connections']` (raw_params) FIRST during
+        save (see comment block in _build_node_params). If we only
+        clean the graph object and leave the editor mirror dirty,
+        the save would re-introduce the dangling refs.
+        """
+        def _points_at_deleted(conn):
+            tgt = conn.get('target', {}) or {}
+            return (tgt.get('graph_id') == deleted_graph_id and
+                    tgt.get('node_id') == deleted_node_id)
+        
+        removed_count = 0
+        
+        for graph in self.graph_list:
+            for node in graph.node_list:
+                # 1) Strip from the live attribute list
+                if hasattr(node, 'connections') and node.connections:
+                    before = len(node.connections)
+                    node.connections = [c for c in node.connections
+                                        if not _points_at_deleted(c)]
+                    removed_count += before - len(node.connections)
+                
+                # 2) Strip from parameters['connections'] mirror
+                if (hasattr(node, 'parameters')
+                        and isinstance(node.parameters, dict)
+                        and 'connections' in node.parameters
+                        and node.parameters['connections']):
+                    node.parameters['connections'] = [
+                        c for c in node.parameters['connections']
+                        if not _points_at_deleted(c)
+                    ]
+                
+                # 3) Drop topology backref if isolated now
+                if (hasattr(node, 'next') and node.next):
+                    for tgt_node in list(node.next):
+                        if (getattr(tgt_node, 'graph_id', None) == deleted_graph_id
+                                and getattr(tgt_node, 'id', None) == deleted_node_id):
+                            try: node.next.remove(tgt_node)
+                            except ValueError: pass
+        
+        # 4) Editor mirror: same-graph node_list dicts. Each holds its
+        #    own raw_params['connections']. Rewriting these here means
+        #    save_changes won't resurrect the dropped entries.
+        for nd in self.node_list:
+            params = nd.get('params', {})
+            conns = params.get('connections')
+            if conns:
+                params['connections'] = [c for c in conns
+                                          if not _points_at_deleted(c)]
+        
+        if removed_count:
+            print(f"_sweep_incoming_connections: dropped {removed_count} "
+                  f"connection(s) targeting (g={deleted_graph_id}, "
+                  f"n={deleted_node_id})")
 
     def remove_population(self):
         if self.current_node_idx is None or self.current_pop_idx is None:
@@ -4498,14 +4584,34 @@ class EditGraphWidget(QWidget):
     def add_node(self):
         import copy
         node_idx = len(self.node_list)
+        
+        # FIX: Stable-ID allocation. List-position is fine for the button
+        # label but NOT for params['id'] — if a previous Node_2 was
+        # deleted, the gap [0,1,3,4] should be filled with id=2, not
+        # id=4. Otherwise we'd have id-collisions or unreachable slots,
+        # and Graph.create_node's free-slot search would do the right
+        # thing at save time anyway — but doing it here keeps the editor
+        # state consistent with what the eventual save will produce.
+        used_ids = set()
+        for n in self.node_list:
+            try:
+                nid = int(n['params'].get('id', -1))
+                if nid >= 0:
+                    used_ids.add(nid)
+            except (TypeError, ValueError):
+                pass
+        new_id = 0
+        while new_id in used_ids:
+            new_id += 1
+        
         node_btn = QPushButton(f"Node {node_idx + 1} (NEW)")
         node_btn.setMinimumHeight(50)
         node_btn.clicked.connect(lambda checked=False, idx=node_idx: self.select_node(idx))
         self.node_list_layout.addWidget(node_btn)
         
         node_params = copy.deepcopy(node_parameters1)
-        node_params['id'] = node_idx
-        node_params['name'] = f"Node_{node_idx}"
+        node_params['id'] = new_id
+        node_params['name'] = f"Node_{new_id}"
         node_params['probability_vector'] = []
         node_params['m'] = [0.0, 0.0, 0.0]
         node_params['center_of_mass'] = [0.0, 0.0, 0.0]
@@ -4931,7 +5037,13 @@ class EditGraphWidget(QWidget):
 
         return {
             'name': raw_params.get('name', f'Node_{node_idx}'),
-            'id': node_idx,
+            # FIX: Preserve the stable ID from raw_params instead of
+            # overwriting with list-position node_idx. Without this, every
+            # save_changes would compact IDs sequentially (cascade), which
+            # silently breaks cross-graph connections that still point at
+            # the OLD ID of surviving nodes. node_idx is only the fallback
+            # for brand-new nodes whose params dict has no id yet.
+            'id': raw_params.get('id', node_idx),
             'graph_id': self.current_graph_id,
             'tool_type': tool_type,
             'neuron_models': neuron_models,
@@ -5214,7 +5326,11 @@ class EditGraphWidget(QWidget):
         
         self.current_graph.node_list.clear()
         self.current_graph.nodes = 0
-        self.current_graph._next_id = 0
+        # FIX: Also clear node_dict so stale name/id->node mappings can't
+        # block _allocate_node_id from honoring requested IDs from
+        # _build_node_params. _next_id no longer needs an explicit reset
+        # — Graph._allocate_node_id derives it from used IDs each call.
+        self.current_graph.node_dict = {}
         
         for node_idx, node_data in enumerate(self.node_list):
             node_params = self._build_node_params(node_idx, node_data)
@@ -5549,6 +5665,42 @@ class ConnectionTool(QWidget):
         syn_layout.addRow(opts_layout)
         
         middle_col.addWidget(syn_group)
+        
+        # ── Dopamine source picker (for stdp_dopamine_synapse) ──────
+        # Only visible when a dopamine-modulated synapse model is
+        # selected. Picks the population that drives the synapse's
+        # volume_transmitter (the dopaminergic projection neurons).
+        self.da_group = QGroupBox("Dopamine Source")
+        self.da_group.setStyleSheet(
+            "QGroupBox { border: 1px solid #E91E63; font-weight: bold; "
+            "margin-top: 10px; } QGroupBox::title { color: #E91E63; }"
+        )
+        da_layout = QFormLayout(self.da_group)
+        
+        self.da_graph_combo = QComboBox()
+        self.da_graph_combo.currentIndexChanged.connect(self.on_da_graph_changed)
+        da_layout.addRow("Graph:", self.da_graph_combo)
+        
+        self.da_node_combo = QComboBox()
+        self.da_node_combo.currentIndexChanged.connect(self.on_da_node_changed)
+        da_layout.addRow("Node:", self.da_node_combo)
+        
+        self.da_pop_combo = QComboBox()
+        da_layout.addRow("Pop:", self.da_pop_combo)
+        
+        da_help = QLabel(
+            "Pop providing dopamine spikes. Drives the volume_transmitter "
+            "that modulates plasticity. For test setups you may pick the "
+            "same pop as source/target — the connection will build but "
+            "won't learn anything biologically meaningful."
+        )
+        da_help.setWordWrap(True)
+        da_help.setStyleSheet("color: #aaa; font-style: italic; font-size: 11px;")
+        da_layout.addRow(da_help)
+        
+        self.da_group.setVisible(False)
+        middle_col.addWidget(self.da_group)
+        
         middle_col.addStretch()
         
         scroll_area.setWidget(middle_container)
@@ -5620,6 +5772,8 @@ class ConnectionTool(QWidget):
             self.on_source_graph_changed(0)
         for row in self.target_rows:
             row.refresh_data(self.graph_list)
+        # Keep DA-source combos in sync with the same graph list.
+        self._refresh_da_graph_combo()
 
     def on_source_graph_changed(self, index):
         self.source_node_combo.clear()
@@ -5646,6 +5800,54 @@ class ConnectionTool(QWidget):
                 model = safe_get_model(pop, "empty")
                 self.source_pop_combo.addItem(f"Pop {i}: {model}", i)
 
+    def _refresh_da_graph_combo(self):
+        """Populate the DA-source graph combo. Called from refresh_graph_list."""
+        if not hasattr(self, 'da_graph_combo'):
+            return
+        self.da_graph_combo.blockSignals(True)
+        self.da_graph_combo.clear()
+        for graph in self.graph_list:
+            name = getattr(graph, 'graph_name', f'Graph {graph.graph_id}')
+            self.da_graph_combo.addItem(f"{name} (ID: {graph.graph_id})", graph.graph_id)
+        self.da_graph_combo.blockSignals(False)
+        if len(self.graph_list) > 0:
+            self.on_da_graph_changed(0)
+
+    def on_da_graph_changed(self, index):
+        if not hasattr(self, 'da_node_combo'):
+            return
+        self.da_node_combo.clear()
+        self.da_pop_combo.clear()
+        if index < 0:
+            return
+        graph_id = self.da_graph_combo.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if not graph:
+            return
+        for node in graph.node_list:
+            self.da_node_combo.addItem(f"{node.name} (ID: {node.id})", node.id)
+        if len(graph.node_list) > 0:
+            self.on_da_node_changed(0)
+
+    def on_da_node_changed(self, index):
+        if not hasattr(self, 'da_pop_combo'):
+            return
+        self.da_pop_combo.clear()
+        if index < 0:
+            return
+        graph_id = self.da_graph_combo.currentData()
+        node_id = self.da_node_combo.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if not graph:
+            return
+        node = next((n for n in graph.node_list if n.id == node_id), None)
+        if not node:
+            return
+        if hasattr(node, 'population') and node.population:
+            for i, pop in enumerate(node.population):
+                model = safe_get_model(pop, "empty")
+                self.da_pop_combo.addItem(f"Pop {i}: {model}", i)
+
     def add_connection(self):
         s_gid = self.source_graph_combo.currentData()
         s_nid = self.source_node_combo.currentData()
@@ -5657,6 +5859,24 @@ class ConnectionTool(QWidget):
 
         base_params = self._get_current_params()
         base_name = self.conn_name_input.text().strip() or "Conn"
+        
+        # If a dopamine synapse is selected, capture the DA-source pick now
+        # (same value applies to all target rows in this batch).
+        da_source_for_batch = None
+        syn_model = base_params.get('synapse_model', '')
+        if 'stdp_dopamine' in syn_model:
+            da_gid = self.da_graph_combo.currentData()
+            da_nid = self.da_node_combo.currentData()
+            da_pid = self.da_pop_combo.currentData()
+            if None in [da_gid, da_nid, da_pid]:
+                self.status_label.setText(
+                    "Dopamine source not fully selected — required for "
+                    f"{syn_model}."
+                )
+                return
+            da_source_for_batch = {
+                'graph_id': da_gid, 'node_id': da_nid, 'pop_id': da_pid
+            }
         
         count_added = 0
         
@@ -5679,6 +5899,8 @@ class ConnectionTool(QWidget):
                 'target': {'graph_id': t_gid, 'node_id': t_nid, 'pop_id': t_pid},
                 'params': params_copy
             }
+            if da_source_for_batch is not None:
+                conn_dict['da_source'] = copy.deepcopy(da_source_for_batch)
             
             self.connections.append(conn_dict)
             self.next_conn_id += 1
@@ -5851,7 +6073,7 @@ class ConnectionTool(QWidget):
         prob_top.addWidget(QLabel("p_max:"))
         self.spatial_prob_spin = QDoubleSpinBox()
         self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
-        self.spatial_prob_spin.setSingleStep(0.05); self.spatial_prob_spin.setDecimals(3)
+        self.spatial_prob_spin.setSingleStep(0.001); self.spatial_prob_spin.setDecimals(4)
         prob_top.addWidget(self.spatial_prob_spin)
         prob_top.addWidget(QLabel("Profile:"))
         self.prob_profile_combo = QComboBox()
@@ -5994,7 +6216,7 @@ class ConnectionTool(QWidget):
         self.indegree_spin = QSpinBox(); self.indegree_spin.setRange(1, 100000); self.indegree_spin.setValue(10)
         self.outdegree_spin = QSpinBox(); self.outdegree_spin.setRange(1, 100000); self.outdegree_spin.setValue(10)
         self.total_num_spin = QSpinBox(); self.total_num_spin.setRange(1, 1000000); self.total_num_spin.setValue(100)
-        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1)
+        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1); self.topo_prob_spin.setDecimals(4); self.topo_prob_spin.setSingleStep(0.001)
         self.on_rule_changed("all_to_all"); layout.addStretch()
 
     def on_rule_changed(self, rule):
@@ -6011,6 +6233,11 @@ class ConnectionTool(QWidget):
             item = self.dynamic_syn_params_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         self.syn_param_widgets.clear()
+        
+        # Toggle DA-source picker visibility — only dopa synapses need it
+        if hasattr(self, 'da_group'):
+            self.da_group.setVisible('stdp_dopamine' in (model_name or ''))
+        
         if model_name not in SYNAPSE_MODELS: return
         params = SYNAPSE_MODELS[model_name]
         
@@ -6645,6 +6872,10 @@ class ConnectionExecutor:
         self.graphs = graphs
         self._connection_counter = 0
         self._created_models: List[str] = []
+        # Note: dopamine volume_transmitters are managed by the shared
+        # module-level cache in neuron_toolbox (_DOPA_VT_CACHE) so that
+        # both this executor and the Node._build_single_connection path
+        # see the same vt's. See get_or_create_dopa_vt / clear_dopa_vt_cache.
     
     def _get_next_connection_id(self) -> int:
         self._connection_counter += 1
@@ -6671,6 +6902,17 @@ class ConnectionExecutor:
             return None, f"Pop {pop_id} is empty"
         
         return pop, None
+    
+    def _get_or_create_vt(self, da_source: Dict[str, int]):
+        """
+        Thin wrapper around the shared module-level dopa-vt cache from
+        neuron_toolbox. Kept as an instance method so call sites in
+        execute_connection don't need to change.
+        """
+        return get_or_create_dopa_vt(
+            da_source,
+            graph_registry=self.graphs,
+        )
     
 
 
@@ -6740,7 +6982,16 @@ class ConnectionExecutor:
                                     exists = True; break
                             
                             if not exists:
-                                src_node_obj.connections.append(copy.deepcopy(connection))
+                                conn_copy = copy.deepcopy(connection)
+                                src_node_obj.connections.append(conn_copy)
+                                # Sync mit parameters['connections'] -- beide sind
+                                # Save-Quellen (Main.py 2092 + 2098). Drift hier
+                                # erzeugt inkonsistente JSON-Saves (outer hat conn,
+                                # inner nicht). Gleiche Referenz, damit GUI-Edits
+                                # in beide Listen propagieren.
+                                if 'connections' not in src_node_obj.parameters:
+                                    src_node_obj.parameters['connections'] = []
+                                src_node_obj.parameters['connections'].append(conn_copy)
                             
                             # Backref pflegen: damit Node.remove() später
                             # diese Connection in src_node_obj.connections
@@ -6839,6 +7090,23 @@ class ConnectionExecutor:
             base_model = params.get('synapse_model', 'static_synapse')
             no_delay = base_model in ['gap_junction', 'rate_connection_instantaneous']
             
+            # Dopamine-modulated synapses need a volume_transmitter bound at
+            # CopyModel time, otherwise NEST refuses with BadProperty. Each
+            # dopa connection must declare a 'da_source' field naming the pop
+            # that provides dopamine spikes. vt's are cached per DA source so
+            # multiple dopa connections from the same DA pop share one vt.
+            vt_for_this_conn = None
+            if 'stdp_dopamine' in base_model:
+                da_source_info = connection.get('da_source')
+                if da_source_info is None:
+                    return False, (
+                        f"{base_model} requires 'da_source' field "
+                        "(specify which population provides dopamine spikes)"
+                    )
+                vt_for_this_conn, vt_err = self._get_or_create_vt(da_source_info)
+                if vt_err:
+                    return False, f"VT setup failed: {vt_err}"
+            
             control_keys = {
                 'rule', 'indegree', 'outdegree', 'N', 'p',
                 'synapse_model', 'weight', 'delay',
@@ -6860,6 +7128,16 @@ class ConnectionExecutor:
                 k: v for k, v in params.items()
                 if k not in control_keys and v is not None
             }
+            
+            # Inject vt into model_params — must happen even if model_params
+            # was otherwise empty, else CopyModel won't trigger and we'd
+            # connect with the unbound base model (BadProperty).
+            if vt_for_this_conn is not None:
+                try:
+                    vt_prop_name, vt_prop_value = dopa_vt_to_param_value(vt_for_this_conn)
+                    model_params[vt_prop_name] = vt_prop_value
+                except Exception as e:
+                    return False, f"vt property setup failed: {e}"
             
             final_model = base_model
             if model_params:
@@ -6939,7 +7217,14 @@ class ConnectionExecutor:
                                 break
                         
                         if not exists:
-                            src_node_obj.connections.append(copy.deepcopy(connection))
+                            conn_copy = copy.deepcopy(connection)
+                            src_node_obj.connections.append(conn_copy)
+                            # Sync mit parameters['connections'] -- beide sind
+                            # Save-Quellen (Main.py 2092 + 2098). Drift hier
+                            # erzeugt inkonsistente JSON-Saves.
+                            if 'connections' not in src_node_obj.parameters:
+                                src_node_obj.parameters['connections'] = []
+                            src_node_obj.parameters['connections'].append(conn_copy)
                             
                         src_node_obj.add_neighbor(tgt_node_obj)
                     
@@ -7009,6 +7294,14 @@ class ConnectionExecutor:
     def cleanup_custom_models(self):
 
         self._created_models.clear()
+        # Drop cached vt references — they're dead gids after ResetKernel.
+        # Uses the shared cache from neuron_toolbox, so this also resets
+        # the Node._build_single_connection path's view of vt's.
+        try:
+            clear_dopa_vt_cache()
+        except NameError:
+            # neuron_toolbox not imported with * at module level (defensive)
+            pass
 
 
 class ConnectionQueueWidget(QWidget):
@@ -7166,6 +7459,34 @@ def prune_dangling_connections(
     return removed
 
 
+def _find_reward_trigger_fallback(graphs: Dict[int, Any]) -> Optional[Dict]:
+    """Backward-compat: locate a single REWARD_TRIGGER node across all graphs.
+    
+    Used when loading a project from before format v221 — those saves don't
+    have da_source on stdp_dopamine_synapse connections. If exactly one node
+    named REWARD_TRIGGER (case-sensitive — that's the canonical name in
+    Basal Ganglia) exists with a non-empty population[0], we use it as the
+    default da_source. Zero or multiple matches → returns None and the
+    caller raises a clear error so the user can fix it in the editor.
+    """
+    candidates = []
+    for graph in graphs.values():
+        for node in getattr(graph, 'node_list', []):
+            if getattr(node, 'name', '') != 'REWARD_TRIGGER':
+                continue
+            pops = getattr(node, 'population', None) or []
+            if not pops or pops[0] is None or len(pops[0]) == 0:
+                continue
+            candidates.append({
+                'graph_id': int(graph.graph_id),
+                'node_id':  int(node.id),
+                'pop_id':   0,
+            })
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def create_nest_connections_from_stored(
     graphs: Dict[int, Any],
     verbose: bool = True
@@ -7248,6 +7569,66 @@ def create_nest_connections_from_stored(
             if conn_spec['rule'] == 'one_to_one' and len(source_pop) != len(target_pop):
                 raise ValueError(f"one_to_one: size mismatch ({len(source_pop)} vs {len(target_pop)})")
             
+            # ── Dopamine-modulated synapses need a volume_transmitter ──
+            # bound at CopyModel time, otherwise nest.Connect() throws
+            # BadProperty: 'required parameter "volume_transmitter" not set'.
+            # The Connection-Tool's executor handles this in execute_connection
+            # (line ~7099); the same logic must live here too, otherwise
+            # *every* Dopa connection fails on project load. v223 has 33 of
+            # them — that's exactly the symptom the user reported.
+            base_model = syn_spec.get('synapse_model', 'static_synapse')
+            if 'stdp_dopamine' in base_model:
+                da_source = conn.get('da_source')
+                
+                # Backward-compat: pre-v221 saves don't have da_source. If
+                # the project has exactly one node named REWARD_TRIGGER we
+                # use that as the default. Anything more ambiguous (zero or
+                # multiple candidates) requires manual fix in the editor.
+                if da_source is None:
+                    fallback = _find_reward_trigger_fallback(graphs)
+                    if fallback is not None:
+                        da_source = fallback
+                        # Persist the fallback back onto the connection so the
+                        # next save no longer needs the heuristic. User-visible
+                        # warning so they know we made a decision.
+                        conn['da_source'] = dict(fallback)
+                        if verbose:
+                            print(f"  ⚠ {conn_name}: da_source missing — "
+                                  f"falling back to single REWARD_TRIGGER "
+                                  f"({fallback}). Will be persisted on next save.")
+                    else:
+                        raise ValueError(
+                            f"{base_model} requires 'da_source' field. "
+                            f"Pre-v221 saves are missing this. "
+                            f"Open the connection in the Connection Editor, "
+                            f"pick a DA-source pop, save, and reload."
+                        )
+                
+                vt, vt_err = get_or_create_dopa_vt(da_source, graph_registry=graphs)
+                if vt_err:
+                    raise ValueError(f"vt setup failed: {vt_err}")
+                
+                # Build a CopyModel'd variant with vt + dopa params bound at
+                # the model level (NEST refuses these via syn_spec). All other
+                # params stay on syn_spec.
+                vt_prop_name, vt_prop_value = dopa_vt_to_param_value(vt)
+                model_overrides = {vt_prop_name: vt_prop_value}
+                dopa_keys = ('tau_plus', 'tau_c', 'tau_n',
+                             'A_plus', 'A_minus', 'b', 'n', 'c',
+                             'Wmax', 'Wmin')
+                for k in dopa_keys:
+                    if k in params and params[k] is not None:
+                        model_overrides[k] = params[k]
+                
+                ts = int(time.time() * 1e6)
+                cloned_name = (params.get('custom_name')
+                               or f"{base_model}_load_{conn.get('id', '?')}_{ts}")
+                try:
+                    nest.CopyModel(base_model, cloned_name, model_overrides)
+                    syn_spec['synapse_model'] = cloned_name
+                except Exception as e:
+                    raise ValueError(f"CopyModel for {base_model} failed: {e}")
+            
             nest.Connect(source_pop, target_pop, conn_spec, syn_spec)
             
             total_created += 1
@@ -7325,6 +7706,13 @@ def safe_nest_reset_and_repopulate(
     os.makedirs(output_dir, exist_ok=True)
     
     nest.ResetKernel()
+    
+    # CRITICAL: clear the dopa-VT cache BEFORE rebuilding. The cache holds
+    # NodeCollection refs from the previous kernel — those GIDs are dead
+    # after ResetKernel and any new dopa connection would fail with
+    # 'UnknownNode' or worse, silently bind to the wrong neuron.
+    clear_dopa_vt_cache()
+    
     nest.SetKernelStatus({
         "data_path": output_dir,      
         "overwrite_files": True,      
@@ -7443,7 +7831,14 @@ def import_connections_from_dict(
         if graph_id in graphs:
             node = graphs[graph_id].get_node(node_id)
             if node is not None:
-                node.connections.append(copy.deepcopy(conn))
+                conn_copy = copy.deepcopy(conn)
+                node.connections.append(conn_copy)
+                # Sync mit parameters['connections'] -- beide sind Save-Quellen
+                # (Main.py 2092 + 2098). Drift hier erzeugt inkonsistente
+                # JSON-Saves nach Import-Workflow.
+                if 'connections' not in node.parameters:
+                    node.parameters['connections'] = []
+                node.parameters['connections'].append(conn_copy)
                 
                 # Backref pflegen: ohne add_neighbor sind nach Import alle
                 # prev-Listen leer und Node.remove() saeubert nichts.
@@ -7918,6 +8313,11 @@ def _serialize_connections(connections: list) -> list:
             'target': conn.get('target'),
             'params': _clean_params(conn.get('params', {}))
         }
+        # Optional: dopamine source pop for stdp_dopamine_synapse-type
+        # connections. Only persist if present so non-dopa connections
+        # stay clean.
+        if conn.get('da_source') is not None:
+            conn_data['da_source'] = conn.get('da_source')
         result.append(conn_data)
     return result
 
@@ -8072,6 +8472,19 @@ def load_graph(filepath: str, Graph_class):
 
 
 class ConnectionParamWidget(QWidget):
+    """
+    Editor for an existing connection. Mirrors the ConnectionTool feature
+    set: synapse model with model-specific parameters (STDP, Tsodyks2,
+    etc.), connection rule, plus the full spatial section (mask shape,
+    distance-dep p / weight / delay, anchor offset, anisotropic /
+    orientation-tuned weights).
+    
+    Reads SYNAPSE_MODELS the same way the ConnectionTool does — directly
+    from the FLAT key-set (every key except weight/delay is a model param),
+    not via a nested 'params' sub-dict that doesn't exist in the runtime
+    SYNAPSE_MODELS definition.
+    """
+    connectionUpdated = pyqtSignal(dict)
     
     def __init__(self):
         super().__init__()
@@ -8115,6 +8528,12 @@ class ConnectionParamWidget(QWidget):
         self.syn_model_combo.currentTextChanged.connect(self._on_model_changed)
         self.form_layout.addRow("Model:", self.syn_model_combo)
         
+        # Description for the chosen synapse (no_delay warning, etc.)
+        self.syn_desc_label = QLabel("")
+        self.syn_desc_label.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
+        self.syn_desc_label.setWordWrap(True)
+        self.form_layout.addRow(self.syn_desc_label)
+        
         self.rule_combo = QComboBox()
         self.rule_combo.addItems(["all_to_all", "fixed_indegree", "fixed_outdegree", "fixed_total_number", "pairwise_bernoulli", "one_to_one"])
         self.rule_combo.currentTextChanged.connect(self._on_rule_changed)
@@ -8128,16 +8547,20 @@ class ConnectionParamWidget(QWidget):
         self.spin_indegree = QSpinBox(); self.spin_indegree.setRange(0, int(1e9))
         self.spin_outdegree = QSpinBox(); self.spin_outdegree.setRange(0, int(1e9))
         self.spin_N = QSpinBox(); self.spin_N.setRange(0, int(1e9))
-        self.spin_p = QDoubleSpinBox(); self.spin_p.setRange(0.0, 1.0); self.spin_p.setDecimals(4)
+        self.spin_p = QDoubleSpinBox(); self.spin_p.setRange(0.0, 1.0); self.spin_p.setDecimals(4); self.spin_p.setSingleStep(0.001)
         
-        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setStyleSheet("color: #555;")
-        self.form_layout.addRow(line)
-        self.form_layout.addRow(QLabel("<b>Dynamic Parameters:</b>"))
+        # ── Synapse Model Parameters (collapsible) ──
+        # Default expanded so people see immediately that there are knobs
+        # available when they pick a non-trivial synapse model.
+        self.dyn_groupbox = QGroupBox("Synapse Model Parameters")
+        self.dyn_groupbox.setCheckable(True); self.dyn_groupbox.setChecked(True)
+        self.dyn_groupbox.toggled.connect(self._toggle_dyn_visibility)
+        self.dyn_layout = QVBoxLayout(self.dyn_groupbox)
+        self.dyn_layout.setContentsMargins(8, 8, 8, 8)
+        self.form_layout.addRow(self.dyn_groupbox)
         
-        self.dyn_container = QWidget()
-        self.dyn_layout = QVBoxLayout(self.dyn_container)
-        self.dyn_layout.setContentsMargins(0,0,0,0)
-        self.form_layout.addRow(self.dyn_container)
+        # ── Spatial section ──
+        self._build_spatial_section()
         
         scroll.setWidget(content_widget)
         layout.addWidget(scroll)
@@ -8151,6 +8574,208 @@ class ConnectionParamWidget(QWidget):
         
         layout.addLayout(btn_layout)
         
+        # Trigger initial population for default model so the dyn box isn't empty
+        self._on_model_changed(self.syn_model_combo.currentText())
+    
+    def _build_spatial_section(self):
+        """All spatial features — mask, distance-dep p / weight / delay,
+        anchor, anisotropy. Parity with ConnectionTool._init_spatial_tab.
+        Wrapped in a single checkable group-box so users can ignore it
+        completely for non-spatial connections."""
+        spatial = QGroupBox("Spatial (use NEST mask + position-aware specs)")
+        spatial.setCheckable(True); spatial.setChecked(False)
+        sp_v = QVBoxLayout(spatial)
+        sp_v.setSpacing(6)
+        
+        # Mask shape + radii
+        mask_form = QFormLayout()
+        self.mask_type_combo = QComboBox()
+        self.mask_type_combo.addItems([
+            "sphere", "box", "box_asym", "doughnut", "elliptical", "ellipsoidal"
+        ])
+        self.mask_type_combo.currentTextChanged.connect(self._on_mask_type_changed)
+        mask_form.addRow("Mask Shape:", self.mask_type_combo)
+        self.mask_radius_spin = QDoubleSpinBox(); self.mask_radius_spin.setRange(0.001, 1000.0); self.mask_radius_spin.setValue(0.5); self.mask_radius_spin.setDecimals(4)
+        mask_form.addRow("Outer Radius/Size:", self.mask_radius_spin)
+        self.mask_inner_spin = QDoubleSpinBox(); self.mask_inner_spin.setRange(0.0, 1000.0); self.mask_inner_spin.setValue(0.0); self.mask_inner_spin.setDecimals(4)
+        mask_form.addRow("Inner Radius:", self.mask_inner_spin)
+        sp_v.addLayout(mask_form)
+        
+        # Asymmetric box corners
+        self.box_asym_box = QGroupBox("Asymmetric Box (lower_left / upper_right)")
+        ab_v = QVBoxLayout(self.box_asym_box)
+        ab_top = QHBoxLayout()
+        self.ll_x = QDoubleSpinBox(); self.ll_x.setRange(-1000, 1000); self.ll_x.setValue(-0.5); self.ll_x.setPrefix("ll_x="); self.ll_x.setDecimals(3)
+        self.ll_y = QDoubleSpinBox(); self.ll_y.setRange(-1000, 1000); self.ll_y.setValue(-0.5); self.ll_y.setPrefix("ll_y="); self.ll_y.setDecimals(3)
+        self.ll_z = QDoubleSpinBox(); self.ll_z.setRange(-1000, 1000); self.ll_z.setValue(-0.5); self.ll_z.setPrefix("ll_z="); self.ll_z.setDecimals(3)
+        for w in (self.ll_x, self.ll_y, self.ll_z): ab_top.addWidget(w)
+        ab_v.addLayout(ab_top)
+        ab_bot = QHBoxLayout()
+        self.ur_x = QDoubleSpinBox(); self.ur_x.setRange(-1000, 1000); self.ur_x.setValue(0.5); self.ur_x.setPrefix("ur_x="); self.ur_x.setDecimals(3)
+        self.ur_y = QDoubleSpinBox(); self.ur_y.setRange(-1000, 1000); self.ur_y.setValue(0.5); self.ur_y.setPrefix("ur_y="); self.ur_y.setDecimals(3)
+        self.ur_z = QDoubleSpinBox(); self.ur_z.setRange(-1000, 1000); self.ur_z.setValue(0.5); self.ur_z.setPrefix("ur_z="); self.ur_z.setDecimals(3)
+        for w in (self.ur_x, self.ur_y, self.ur_z): ab_bot.addWidget(w)
+        ab_v.addLayout(ab_bot)
+        self.box_asym_box.setVisible(False)
+        sp_v.addWidget(self.box_asym_box)
+        
+        # Ellipsoid axes
+        self.ellipsoid_box = QGroupBox("Ellipsoid Axes")
+        ell_h = QHBoxLayout(self.ellipsoid_box)
+        self.major_axis_spin = QDoubleSpinBox(); self.major_axis_spin.setRange(0.001, 1000); self.major_axis_spin.setValue(2.0); self.major_axis_spin.setPrefix("major="); self.major_axis_spin.setDecimals(3)
+        self.minor_axis_spin = QDoubleSpinBox(); self.minor_axis_spin.setRange(0.001, 1000); self.minor_axis_spin.setValue(1.0); self.minor_axis_spin.setPrefix("minor="); self.minor_axis_spin.setDecimals(3)
+        self.polar_axis_spin = QDoubleSpinBox(); self.polar_axis_spin.setRange(0.001, 1000); self.polar_axis_spin.setValue(1.0); self.polar_axis_spin.setPrefix("polar="); self.polar_axis_spin.setDecimals(3)
+        for w in (self.major_axis_spin, self.minor_axis_spin, self.polar_axis_spin):
+            ell_h.addWidget(w)
+        self.ellipsoid_box.setVisible(False)
+        sp_v.addWidget(self.ellipsoid_box)
+        
+        # Anchor offset
+        self.anchor_box = QGroupBox("Mask Anchor Offset (asymmetric RF)")
+        self.anchor_box.setCheckable(True); self.anchor_box.setChecked(False)
+        anchor_h = QHBoxLayout(self.anchor_box)
+        self.anchor_x = QDoubleSpinBox(); self.anchor_x.setRange(-1000, 1000); self.anchor_x.setPrefix("dx="); self.anchor_x.setDecimals(3)
+        self.anchor_y = QDoubleSpinBox(); self.anchor_y.setRange(-1000, 1000); self.anchor_y.setPrefix("dy="); self.anchor_y.setDecimals(3)
+        self.anchor_z = QDoubleSpinBox(); self.anchor_z.setRange(-1000, 1000); self.anchor_z.setPrefix("dz="); self.anchor_z.setDecimals(3)
+        for w in (self.anchor_x, self.anchor_y, self.anchor_z): anchor_h.addWidget(w)
+        sp_v.addWidget(self.anchor_box)
+        
+        # Distance-dependent probability
+        prob_box = QGroupBox("Connection Probability")
+        prob_v = QVBoxLayout(prob_box)
+        prob_top = QHBoxLayout()
+        prob_top.addWidget(QLabel("p_max:"))
+        self.spatial_prob_spin = QDoubleSpinBox()
+        self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
+        self.spatial_prob_spin.setSingleStep(0.001); self.spatial_prob_spin.setDecimals(4)
+        prob_top.addWidget(self.spatial_prob_spin)
+        prob_top.addWidget(QLabel("Profile:"))
+        self.prob_profile_combo = QComboBox()
+        self.prob_profile_combo.addItems(["constant", "gaussian", "exponential", "linear"])
+        prob_top.addWidget(self.prob_profile_combo)
+        prob_v.addLayout(prob_top)
+        sigma_row = QHBoxLayout()
+        sigma_row.addWidget(QLabel("σ (decay scale):"))
+        self.prob_sigma_spin = QDoubleSpinBox(); self.prob_sigma_spin.setRange(0.001, 1000.0); self.prob_sigma_spin.setValue(1.0); self.prob_sigma_spin.setDecimals(3)
+        self.prob_sigma_spin.setEnabled(False)
+        sigma_row.addWidget(self.prob_sigma_spin); sigma_row.addStretch()
+        prob_v.addLayout(sigma_row)
+        self.prob_profile_combo.currentTextChanged.connect(
+            lambda t: self.prob_sigma_spin.setEnabled(t != "constant")
+        )
+        sp_v.addWidget(prob_box)
+        
+        # Distance-dependent weight
+        self.weight_box = QGroupBox("Distance-Dependent Weight")
+        self.weight_box.setCheckable(True); self.weight_box.setChecked(False)
+        wb_v = QVBoxLayout(self.weight_box)
+        wm_top = QHBoxLayout()
+        wm_top.addWidget(QLabel("Mode:"))
+        self.weight_mode_combo = QComboBox()
+        self.weight_mode_combo.addItems(["linear", "exponential", "gaussian"])
+        wm_top.addWidget(self.weight_mode_combo); wm_top.addStretch()
+        wb_v.addLayout(wm_top)
+        wm_p = QHBoxLayout()
+        wm_p.addWidget(QLabel("factor:"))
+        self.dist_factor_spin = QDoubleSpinBox(); self.dist_factor_spin.setRange(-1000, 1000); self.dist_factor_spin.setValue(1.0); self.dist_factor_spin.setDecimals(4)
+        wm_p.addWidget(self.dist_factor_spin)
+        wm_p.addWidget(QLabel("offset:"))
+        self.dist_offset_spin = QDoubleSpinBox(); self.dist_offset_spin.setRange(-1000, 1000); self.dist_offset_spin.setValue(0.0); self.dist_offset_spin.setDecimals(4)
+        wm_p.addWidget(self.dist_offset_spin)
+        wb_v.addLayout(wm_p)
+        sp_v.addWidget(self.weight_box)
+        
+        # Distance-dependent delay
+        self.delay_box = QGroupBox("Distance-Dependent Delay (axonal)")
+        self.delay_box.setCheckable(True); self.delay_box.setChecked(False)
+        db_h = QHBoxLayout(self.delay_box)
+        db_h.addWidget(QLabel("delay_factor (ms/unit):"))
+        self.delay_factor_spin = QDoubleSpinBox(); self.delay_factor_spin.setRange(0, 1000); self.delay_factor_spin.setValue(1.0); self.delay_factor_spin.setDecimals(4)
+        db_h.addWidget(self.delay_factor_spin); db_h.addStretch()
+        sp_v.addWidget(self.delay_box)
+        
+        # Anisotropic weight (orientation tuning)
+        self.aniso_box = QGroupBox("Anisotropic Weight (orientation tuning)")
+        self.aniso_box.setCheckable(True); self.aniso_box.setChecked(False)
+        ab_v2 = QVBoxLayout(self.aniso_box)
+        am_top = QHBoxLayout()
+        am_top.addWidget(QLabel("Mode:"))
+        self.ani_mode_combo = QComboBox(); self.ani_mode_combo.addItems(["cosine", "gabor"])
+        am_top.addWidget(self.ani_mode_combo); am_top.addStretch()
+        ab_v2.addLayout(am_top)
+        am_p = QHBoxLayout()
+        am_p.addWidget(QLabel("θ (deg):"))
+        self.ani_theta_spin = QDoubleSpinBox(); self.ani_theta_spin.setRange(-360, 360); self.ani_theta_spin.setValue(0.0); self.ani_theta_spin.setDecimals(2); self.ani_theta_spin.setSingleStep(15)
+        am_p.addWidget(self.ani_theta_spin)
+        am_p.addWidget(QLabel("freq:"))
+        self.ani_freq_spin = QDoubleSpinBox(); self.ani_freq_spin.setRange(0.001, 1000); self.ani_freq_spin.setValue(0.5); self.ani_freq_spin.setDecimals(4)
+        am_p.addWidget(self.ani_freq_spin)
+        am_p.addWidget(QLabel("σ:"))
+        self.ani_sigma_spin = QDoubleSpinBox(); self.ani_sigma_spin.setRange(0.001, 1000); self.ani_sigma_spin.setValue(1.0); self.ani_sigma_spin.setDecimals(3)
+        am_p.addWidget(self.ani_sigma_spin)
+        ab_v2.addLayout(am_p)
+        sp_v.addWidget(self.aniso_box)
+        
+        self.spatial_box = spatial
+        self.form_layout.addRow(spatial)
+    
+    def _toggle_dyn_visibility(self, checked):
+        """Hide/show all model-param widgets when the group-box is collapsed."""
+        for i in range(self.dyn_layout.count()):
+            w = self.dyn_layout.itemAt(i).widget()
+            if w: w.setVisible(checked)
+    
+    def _on_mask_type_changed(self, mask_type):
+        self.box_asym_box.setVisible(mask_type == "box_asym")
+        self.ellipsoid_box.setVisible(mask_type in ("elliptical", "ellipsoidal"))
+        self.polar_axis_spin.setEnabled(mask_type == "ellipsoidal")
+    
+    def _on_model_changed(self, model_name):
+        # Wipe old dynamic widgets
+        while self.dyn_layout.count():
+            item = self.dyn_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None); w.deleteLater()
+        self.syn_param_widgets.clear()
+        
+        if model_name not in SYNAPSE_MODELS:
+            self.syn_desc_label.setText(f"Unknown model: {model_name}")
+            return
+        
+        info = SYNAPSE_MODELS[model_name]
+        no_delay = info.get('no_delay', False)
+        
+        # Iterate the FLAT structure — every key except weight/delay is a
+        # model parameter. Same logic as ConnectionTool.on_synapse_model_changed.
+        added = 0
+        for pname, pinfo in info.items():
+            if pname in ('weight', 'delay'):
+                continue
+            if not isinstance(pinfo, dict):
+                continue
+            try:
+                widget = SynapseParamWidget(pname, pinfo)
+            except Exception:
+                continue
+            self.dyn_layout.addWidget(widget)
+            self.syn_param_widgets[pname] = widget
+            added += 1
+        
+        if added == 0:
+            empty = QLabel("Only weight/delay (no extra params for this model).")
+            empty.setStyleSheet("color: #888; font-style: italic;")
+            self.dyn_layout.addWidget(empty)
+            self.syn_desc_label.setText("Static-style synapse — no plasticity params.")
+        else:
+            note = f"{added} model-specific parameter(s)"
+            if no_delay:
+                note += " — note: this model has no delay."
+            self.syn_desc_label.setText(note)
+        
+        # Sync visibility with collapse state
+        self._toggle_dyn_visibility(self.dyn_groupbox.isChecked())
+    
     def load_data(self, conn_data):
         self.current_conn_data = conn_data
         params = conn_data.get('params', {})
@@ -8159,6 +8784,7 @@ class ConnectionParamWidget(QWidget):
         self.weight_spin.setValue(float(params.get('weight', 1.0)))
         self.delay_spin.setValue(float(params.get('delay', 1.0)))
         
+        # Set model — triggers _on_model_changed which rebuilds dyn widgets
         model = params.get('synapse_model', 'static_synapse')
         idx = self.syn_model_combo.findText(model)
         if idx >= 0:
@@ -8166,23 +8792,74 @@ class ConnectionParamWidget(QWidget):
         else:
             self.syn_model_combo.addItem(model)
             self.syn_model_combo.setCurrentText(model)
-            
+        # Force refresh in case the index was already correct (no signal)
+        self._on_model_changed(model)
+        
         rule = params.get('rule', 'all_to_all')
         idx_r = self.rule_combo.findText(rule)
         if idx_r >= 0: self.rule_combo.setCurrentIndex(idx_r)
+        self._on_rule_changed(rule)
         
         if 'indegree' in params: self.spin_indegree.setValue(int(params['indegree']))
         if 'outdegree' in params: self.spin_outdegree.setValue(int(params['outdegree']))
         if 'N' in params: self.spin_N.setValue(int(params['N']))
         if 'p' in params: self.spin_p.setValue(float(params['p']))
         
+        # Synapse model parameters
         for param_name, widget in self.syn_param_widgets.items():
             if param_name in params:
-                val = params[param_name]
                 try:
-                    if isinstance(widget, DoubleInputField): widget.spinbox.setValue(float(val))
-                    elif isinstance(widget, IntegerInputField): widget.spinbox.setValue(int(val))
-                except (ValueError, TypeError): pass
+                    widget.set_value(params[param_name])
+                except Exception:
+                    pass
+        
+        # ── Spatial ──
+        self.spatial_box.setChecked(bool(params.get('use_spatial', False)))
+        mt = params.get('mask_type', 'sphere')
+        idx_m = self.mask_type_combo.findText(mt)
+        if idx_m >= 0:
+            self.mask_type_combo.setCurrentIndex(idx_m)
+        self._on_mask_type_changed(mt)
+        if 'mask_radius' in params: self.mask_radius_spin.setValue(float(params['mask_radius']))
+        if 'mask_inner_radius' in params: self.mask_inner_spin.setValue(float(params['mask_inner_radius']))
+        # box_asym corners
+        ll = params.get('lower_left'); ur = params.get('upper_right')
+        if isinstance(ll, (list, tuple)) and len(ll) == 3:
+            self.ll_x.setValue(float(ll[0])); self.ll_y.setValue(float(ll[1])); self.ll_z.setValue(float(ll[2]))
+        if isinstance(ur, (list, tuple)) and len(ur) == 3:
+            self.ur_x.setValue(float(ur[0])); self.ur_y.setValue(float(ur[1])); self.ur_z.setValue(float(ur[2]))
+        if 'major_axis' in params: self.major_axis_spin.setValue(float(params['major_axis']))
+        if 'minor_axis' in params: self.minor_axis_spin.setValue(float(params['minor_axis']))
+        if 'polar_axis' in params: self.polar_axis_spin.setValue(float(params['polar_axis']))
+        # Anchor
+        self.anchor_box.setChecked(bool(params.get('use_anchor', False)))
+        anchor = params.get('anchor')
+        if isinstance(anchor, (list, tuple)) and len(anchor) == 3:
+            self.anchor_x.setValue(float(anchor[0])); self.anchor_y.setValue(float(anchor[1])); self.anchor_z.setValue(float(anchor[2]))
+        # Probability profile
+        if 'p' in params: self.spatial_prob_spin.setValue(float(params['p']))
+        if 'p_profile' in params:
+            i_pp = self.prob_profile_combo.findText(params['p_profile'])
+            if i_pp >= 0: self.prob_profile_combo.setCurrentIndex(i_pp)
+        if 'p_sigma' in params: self.prob_sigma_spin.setValue(float(params['p_sigma']))
+        # Distance weight
+        self.weight_box.setChecked(bool(params.get('distance_dependent_weight', False)))
+        if 'weight_mode' in params:
+            i_wm = self.weight_mode_combo.findText(params['weight_mode'])
+            if i_wm >= 0: self.weight_mode_combo.setCurrentIndex(i_wm)
+        if 'dist_factor' in params: self.dist_factor_spin.setValue(float(params['dist_factor']))
+        if 'dist_offset' in params: self.dist_offset_spin.setValue(float(params['dist_offset']))
+        # Distance delay
+        self.delay_box.setChecked(bool(params.get('distance_dependent_delay', False)))
+        if 'delay_factor' in params: self.delay_factor_spin.setValue(float(params['delay_factor']))
+        # Anisotropy
+        self.aniso_box.setChecked(bool(params.get('anisotropic_weight', False)))
+        if 'aniso_mode' in params:
+            i_am = self.ani_mode_combo.findText(params['aniso_mode'])
+            if i_am >= 0: self.ani_mode_combo.setCurrentIndex(i_am)
+        if 'aniso_theta_deg' in params: self.ani_theta_spin.setValue(float(params['aniso_theta_deg']))
+        if 'aniso_freq' in params: self.ani_freq_spin.setValue(float(params['aniso_freq']))
+        if 'aniso_sigma' in params: self.ani_sigma_spin.setValue(float(params['aniso_sigma']))
 
     def _on_rule_changed(self, rule_name):
         while self.rule_param_layout.count():
@@ -8198,34 +8875,6 @@ class ConnectionParamWidget(QWidget):
         elif 'bernoulli' in rule_name:
             self.rule_param_layout.addRow("Prob (p):", self.spin_p)
 
-    def _on_model_changed(self, model_name):
-        while self.dyn_layout.count():
-            item = self.dyn_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.syn_param_widgets.clear()
-        
-        if model_name not in SYNAPSE_MODELS:
-            return
-
-        model_def = SYNAPSE_MODELS[model_name]
-        params_def = model_def.get('params', {})
-        
-        for param_key, info in params_def.items():
-            if param_key in ['weight', 'delay']: continue
-            
-            p_type = info.get('type', 'float')
-            default = info.get('default', 0)
-            
-            widget = None
-            if p_type == 'float':
-                widget = DoubleInputField(param_key, default_value=float(default))
-            elif p_type == 'int':
-                widget = IntegerInputField(param_key, default_value=int(default))
-                
-            if widget:
-                self.dyn_layout.addWidget(widget)
-                self.syn_param_widgets[param_key] = widget
-
     def apply_changes(self):
         if self.current_conn_data is None: return
         
@@ -8239,16 +8888,215 @@ class ConnectionParamWidget(QWidget):
         rule = self.rule_combo.currentText()
         params['rule'] = rule
         
+        # Clear stale rule-specific keys before writing the new one
+        for k in ('indegree', 'outdegree', 'N'):
+            params.pop(k, None)
         if rule == 'fixed_indegree': params['indegree'] = self.spin_indegree.value()
         elif rule == 'fixed_outdegree': params['outdegree'] = self.spin_outdegree.value()
         elif rule == 'fixed_total_number': params['N'] = self.spin_N.value()
         elif 'bernoulli' in rule: params['p'] = self.spin_p.value()
         
+        # Synapse model params — drop stale keys from the previous model
+        # before writing new ones (otherwise a leftover tau_plus from STDP
+        # would tag along when the user switches to static_synapse).
+        all_known_syn_keys = set()
+        for m_name, m_info in SYNAPSE_MODELS.items():
+            for k in m_info.keys():
+                if k not in ('weight', 'delay'):
+                    all_known_syn_keys.add(k)
+        for k in list(params.keys()):
+            if k in all_known_syn_keys and k not in self.syn_param_widgets:
+                params.pop(k, None)
+        # Write current model's params
         for param_name, widget in self.syn_param_widgets.items():
-            params[param_name] = widget.get_value()
-            
-        print(f"Connection '{self.current_conn_data['name']}' updated locally. (Model: {params['synapse_model']})")
+            try:
+                params[param_name] = widget.get_value()
+            except Exception:
+                pass
         
+        # ── Spatial ──
+        params['use_spatial'] = bool(self.spatial_box.isChecked())
+        if params['use_spatial']:
+            params['mask_type'] = self.mask_type_combo.currentText()
+            params['mask_radius'] = self.mask_radius_spin.value()
+            params['mask_inner_radius'] = self.mask_inner_spin.value()
+            params['lower_left'] = [self.ll_x.value(), self.ll_y.value(), self.ll_z.value()]
+            params['upper_right'] = [self.ur_x.value(), self.ur_y.value(), self.ur_z.value()]
+            params['major_axis'] = self.major_axis_spin.value()
+            params['minor_axis'] = self.minor_axis_spin.value()
+            params['polar_axis'] = self.polar_axis_spin.value()
+            params['use_anchor'] = bool(self.anchor_box.isChecked())
+            params['anchor'] = [self.anchor_x.value(), self.anchor_y.value(), self.anchor_z.value()]
+            params['p_profile'] = self.prob_profile_combo.currentText()
+            params['p_sigma'] = self.prob_sigma_spin.value()
+            # Bernoulli p uses spatial_prob_spin for distance-dep profile;
+            # plain spin_p covers the simple-rule case.
+            if 'bernoulli' in rule:
+                params['p'] = self.spatial_prob_spin.value()
+            params['distance_dependent_weight'] = bool(self.weight_box.isChecked())
+            params['weight_mode'] = self.weight_mode_combo.currentText()
+            params['dist_factor'] = self.dist_factor_spin.value()
+            params['dist_offset'] = self.dist_offset_spin.value()
+            params['distance_dependent_delay'] = bool(self.delay_box.isChecked())
+            params['delay_factor'] = self.delay_factor_spin.value()
+            params['anisotropic_weight'] = bool(self.aniso_box.isChecked())
+            params['aniso_mode'] = self.ani_mode_combo.currentText()
+            params['aniso_theta_deg'] = self.ani_theta_spin.value()
+            params['aniso_freq'] = self.ani_freq_spin.value()
+            params['aniso_sigma'] = self.ani_sigma_spin.value()
+        
+        print(f"Connection '{self.current_conn_data['name']}' updated locally. "
+              f"(Model: {params['synapse_model']}, Rule: {rule}, "
+              f"spatial: {params.get('use_spatial', False)})")
+        # Tell anyone interested (the ConnectionEditorWidget wrapper) that
+        # the underlying dict was mutated. Listeners typically rebuild NEST
+        # synapses from scratch since changing weight / synapse_model on
+        # an existing connection is not safely doable in NEST without
+        # recreating it.
+        self.connectionUpdated.emit(self.current_conn_data)
+        
+
+class ConnectionEditorWidget(QWidget):
+    """
+    Standalone editor page for existing connections. Routed to from the
+    Graph Overview when the user clicks an arrow. Wraps the
+    ConnectionParamWidget plus a header that shows which connection is
+    being edited and a helper to look up the original connection dict
+    from a graph_list by source/id.
+    
+    Why a separate widget? Connection editing used to live inside the
+    Graph Inspector, which got crowded fast. Splitting Connection
+    Creation (ConnectionTool) and Connection Editing (this widget) into
+    two separate nav pages keeps each focused on one job.
+    """
+    connectionUpdated = pyqtSignal(dict)  # forwarded from inner editor
+    
+    def __init__(self, graph_list, parent=None):
+        super().__init__(parent)
+        self.graph_list = graph_list
+        self.current_conn_ref = None  # the actual dict in node.connections
+        self._init_ui()
+    
+    def _init_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        
+        # Header bar with the source/target summary. Updated whenever a
+        # connection is loaded so the user always knows which one they're
+        # editing.
+        header = QFrame()
+        header.setStyleSheet("background-color: #2b1b3b; border-bottom: 2px solid #673AB7;")
+        hl = QVBoxLayout(header)
+        hl.setContentsMargins(12, 10, 12, 10)
+        hl.setSpacing(2)
+        title = QLabel("CONNECTION EDITOR")
+        title.setStyleSheet("font-weight: bold; font-size: 13px; color: #BB86FC;")
+        hl.addWidget(title)
+        self._summary_label = QLabel("No connection selected.")
+        self._summary_label.setStyleSheet("color: #ccc; font-size: 11px;")
+        self._summary_label.setWordWrap(True)
+        hl.addWidget(self._summary_label)
+        outer.addWidget(header)
+        
+        # Empty-state vs editor stack. When no connection is selected we
+        # show a friendly placeholder; clicking an arrow swaps to the editor.
+        self._stack = QStackedWidget()
+        
+        empty = QLabel(
+            "Click a connection arrow in the graph view to edit it here.\n\n"
+            "You can change the synapse model (e.g. static → STDP / "
+            "tsodyks2), the connection rule, and all spatial features."
+        )
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        empty.setStyleSheet("color: #888; font-style: italic; padding: 30px;")
+        self._stack.addWidget(empty)
+        
+        self.editor = ConnectionParamWidget()
+        self.editor.connectionUpdated.connect(self._on_inner_update)
+        self._stack.addWidget(self.editor)
+        
+        outer.addWidget(self._stack, 1)
+    
+    def load_connection(self, connection_data):
+        """
+        Look up the LIVE connection dict from graph_list (so edits actually
+        persist on the node), fall back to the passed-in dict if the live
+        one isn't found. Mirrors the original logic from
+        EditGraphWidget.load_connection_editor.
+        """
+        if not connection_data:
+            return
+        live_ref = self._find_live_connection(connection_data)
+        ref = live_ref if live_ref is not None else connection_data
+        self.current_conn_ref = ref
+        
+        # Header summary
+        src = ref.get('source', {}) or {}
+        tgt = ref.get('target', {}) or {}
+        params = ref.get('params', {}) or {}
+        name = ref.get('name', f"Connection #{ref.get('id', '?')}")
+        sm = params.get('synapse_model', '?')
+        w = params.get('weight', '?')
+        d = params.get('delay', '?')
+        rule = params.get('rule', '?')
+        self._summary_label.setText(
+            f"<b>{name}</b>  —  "
+            f"G{src.get('graph_id','?')}.N{src.get('node_id','?')}.P{src.get('pop_id','?')} → "
+            f"G{tgt.get('graph_id','?')}.N{tgt.get('node_id','?')}.P{tgt.get('pop_id','?')}"
+            f"<br><span style='color:#aaa;'>{sm} | {rule} | w={w}, d={d}</span>"
+        )
+        self._summary_label.setTextFormat(Qt.TextFormat.RichText)
+        
+        self.editor.load_data(ref)
+        self._stack.setCurrentIndex(1)
+    
+    def _find_live_connection(self, connection_data):
+        """Find the actual dict instance in node.connections — editing the
+        passed copy would silently lose the changes on save. Match by
+        source IDs + connection id."""
+        try:
+            src = connection_data.get('source', {}) or {}
+            target_gid = src.get('graph_id')
+            target_nid = src.get('node_id')
+            target_cid = connection_data.get('id')
+            if target_gid is None or target_nid is None:
+                return None
+            for g in self.graph_list:
+                if g.graph_id != target_gid: continue
+                for n in g.node_list:
+                    if n.id != target_nid: continue
+                    for c in (getattr(n, 'connections', []) or []):
+                        if c.get('id') == target_cid:
+                            return c
+        except Exception:
+            pass
+        return None
+    
+    def clear(self):
+        """Reset to the empty placeholder state."""
+        self.current_conn_ref = None
+        self._summary_label.setText("No connection selected.")
+        self._stack.setCurrentIndex(0)
+    
+    def _on_inner_update(self, conn_dict):
+        # Forward upward; refresh header in case fields changed.
+        params = conn_dict.get('params', {}) or {}
+        name = conn_dict.get('name', '?')
+        sm = params.get('synapse_model', '?')
+        rule = params.get('rule', '?')
+        w = params.get('weight', '?')
+        d = params.get('delay', '?')
+        # Keep src/tgt static (those don't change); just update the param tail
+        existing = self._summary_label.text()
+        # Cheap approach: re-render from scratch if we still have the ref
+        if self.current_conn_ref is not None:
+            self.load_connection(self.current_conn_ref)
+        self.connectionUpdated.emit(conn_dict)
+
+
+
 
 class DeviceTargetSelector(QGroupBox):
 
@@ -11109,6 +11957,18 @@ class ScriptExporter:
                         if p:
                             print(f"    Pop {idx}: V_th={p.get('V_th', 'N/A')}, C_m={p.get('C_m', 'N/A')}, t_ref={p.get('t_ref', 'N/A')}")
                 
+                # Per-pop shape_params_per_pop is the single most important
+                # array for tool-type nodes (CCW / Cone / Blob). It already
+                # rides along inside safe_params, but we mirror it on the
+                # top-level so the headless run.py can pick it up via either
+                # path (matches load_and_build's fallback logic).
+                shape_params_per_pop = (
+                    node.parameters.get('shape_params_per_pop')
+                    if hasattr(node, 'parameters') else None
+                ) or []
+                # Clean any numpy values
+                cleaned_shape_pp = [_clean_params(sp) if sp else {} for sp in shape_params_per_pop]
+                
                 node_data = {
                     'id': node.id,
                     'name': getattr(node, 'name', f"Node_{node.id}"),
@@ -11118,6 +11978,7 @@ class ScriptExporter:
                     'devices': devices,
                     'connections': _serialize_connections(node.connections) if hasattr(node, 'connections') else [],
                     'population_nest_params': cleaned_pop_params,
+                    'shape_params_per_pop': cleaned_shape_pp,
                     'tool_type': safe_params.get('tool_type', 'custom'),
                     'parameters': safe_params
                 }
@@ -11140,12 +12001,35 @@ class ScriptExporter:
             })
         return data
     def _get_template(self, json_filename, duration, threads):
-        return f"""
+        return f'''"""
+Headless run script for a Neuroticks project export.
+
+Layout:
+  ./graphs.json            project data (nodes, connections, devices)
+  ./neuron_toolbox.py      core builders (Graph, Node, populate_node)
+  ./functional_models.json model presets (optional, for graph creator UI)
+  ./run.py                 this file
+  ./Simulation_History/    output JSON files (created on first run)
+
+What this script does:
+  1. Resets NEST and loads graphs.json
+  2. Rebuilds every graph + node (per-pop shape_params, neuron models,
+     NEST params, devices) — uses the same populate_node() path as the GUI
+  3. Cross-graph backref pass so prune_dangling_connections() can clean
+     up stale references safely
+  4. Builds connections via Graph.build_connections() with the full set
+     of spatial features (mask, distance-dep p / weight / delay,
+     anchor offsets, anisotropic / orientation-tuned weights)
+  5. Runs nest.Simulate() in DUMP_INTERVAL chunks, flushing recorders
+     after each chunk
+  6. Writes a history JSON loadable in the Neuroticks History browser
+"""
 import nest
 import numpy as np
 import json
 import os
 import sys
+import copy
 from pathlib import Path
 from datetime import datetime
 from neuron_toolbox import Graph, Node, PolynomGenerator
@@ -11155,268 +12039,333 @@ JSON_FILENAME = "{json_filename}"
 SIM_DURATION = {duration}
 DUMP_INTERVAL = 2000.0
 OUTPUT_DIR = Path("Simulation_History")
+NUM_THREADS = {threads}
+
+# Build-time prints can be silenced by toggling this BEFORE load_and_build().
+# Maps to neuron_toolbox.VERBOSE_BUILD if available.
+VERBOSE_BUILD = False
+
 
 class NumpyNestEncoder(json.JSONEncoder):
     def default(self, obj):
-        if hasattr(obj, 'tolist'): return obj.tolist()
+        if hasattr(obj, "tolist"): return obj.tolist()
         if isinstance(obj, (np.int64, np.int32, np.integer)): return int(obj)
         if isinstance(obj, (np.float64, np.float32, np.floating)): return float(obj)
         if isinstance(obj, np.ndarray): return obj.tolist()
         return super().default(obj)
 
+
+def _get_nest_time():
+    """NEST 3.x exposes simulated time as biological_time. The legacy
+    \\"time\\" key returns 0 in 3.8 and was the source of a long-running
+    timer bug in the GUI. Same fix here for consistency in logs."""
+    try:
+        st = nest.GetKernelStatus()
+        return float(st.get("biological_time", st.get("time", 0.0)) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def load_and_build():
     print("Initializing NEST...")
     nest.ResetKernel()
     nest.SetKernelStatus({{
-        'resolution': 0.1, 
-        'print_time': False, 
-        'local_num_threads': {threads}  
+        "resolution": 0.1,
+        "print_time": False,
+        "local_num_threads": NUM_THREADS,
     }})
-    nest.EnableStructuralPlasticity()
+    try:
+        nest.EnableStructuralPlasticity()
+    except Exception:
+        # Not all NEST builds enable this by default — non-fatal.
+        pass
+
+    # Toggle build-time verbosity in neuron_toolbox if the flag exists
+    try:
+        import neuron_toolbox
+        if hasattr(neuron_toolbox, "VERBOSE_BUILD"):
+            neuron_toolbox.VERBOSE_BUILD = bool(VERBOSE_BUILD)
+    except Exception:
+        pass
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     json_path = os.path.join(script_dir, JSON_FILENAME)
-    
     if not os.path.exists(json_path):
         print(f"CRITICAL ERROR: JSON file not found: {{json_path}}")
         sys.exit(1)
 
-    with open(json_path, 'r') as f:
+    with open(json_path, "r") as f:
         data = json.load(f)
 
     graphs = {{}}
     print(f"Loading {{len(data.get('graphs', []))}} graphs...")
-    
-    for g_data in data.get('graphs', []):
-        g_id = g_data['graph_id']
+
+    for g_data in data.get("graphs", []):
+        g_id = g_data["graph_id"]
         graph = Graph(
-            graph_name=g_data.get('graph_name', f'Graph_{{g_id}}'),
+            graph_name=g_data.get("graph_name", f"Graph_{{g_id}}"),
             graph_id=g_id,
-            max_nodes=g_data.get('max_nodes', 100),
-            position=g_data.get('init_position', [0, 0, 0]),
-            polynom_max_power=g_data.get('polynom_max_power', 5),
-            polynom_decay=g_data.get('polynom_decay', 0.8)
+            max_nodes=g_data.get("max_nodes", 100),
+            position=g_data.get("init_position", [0, 0, 0]),
+            polynom_max_power=g_data.get("polynom_max_power", 5),
+            polynom_decay=g_data.get("polynom_decay", 0.8),
         )
 
-        sorted_nodes = sorted(g_data.get('nodes', []), key=lambda x: x.get('id', 0))
+        sorted_nodes = sorted(g_data.get("nodes", []), key=lambda x: x.get("id", 0))
         for nd in sorted_nodes:
-            params = nd.get('parameters', {{}}).copy()
-            devs = nd.get('devices', [])
-            
-            pop_nest_params = nd.get('population_nest_params', [])
-            
-            params.update({{
-                'id': nd['id'],
-                'name': nd['name'],
-                'graph_id': g_id,
-                'connections': nd.get('connections', []),
-                'devices': devs, 
-                'neuron_models': nd.get('neuron_models', ['iaf_psc_alpha']),
-                'types': nd.get('types', [0]),
-                'population_nest_params': pop_nest_params
-            }})
-            
-            if 'positions' in nd and nd['positions']:
-                params['positions'] = [np.array(p) for p in nd['positions']]
+            params = (nd.get("parameters", {{}}) or {{}}).copy()
+            devs = nd.get("devices", []) or []
+            pop_nest_params = nd.get("population_nest_params", []) or []
 
-            node = graph.create_node(parameters=params, is_root=(nd['id']==0), auto_build=False)
-            
-            if 'center_of_mass' in nd: node.center_of_mass = np.array(nd['center_of_mass'])
-            if 'positions' in params: node.positions = params['positions']
-            
-            node.connections = nd.get('connections', [])
+            # Per-pop shape params (CCW / Cone / Blob geometry, syn config,
+            # connection rule, etc.). Only present in newer saves; older
+            # files just have node-global tool params, which the build
+            # functions already fall back to.
+            shape_params_per_pop = (
+                params.get("shape_params_per_pop")
+                or nd.get("shape_params_per_pop")
+                or []
+            )
+
+            params.update({{
+                "id": nd["id"],
+                "name": nd["name"],
+                "graph_id": g_id,
+                "connections": nd.get("connections", []),
+                "devices": devs,
+                "neuron_models": nd.get("neuron_models", ["iaf_psc_alpha"]),
+                "types": nd.get("types", [0]),
+                "population_nest_params": pop_nest_params,
+                "shape_params_per_pop": shape_params_per_pop,
+            }})
+
+            if "positions" in nd and nd["positions"]:
+                params["positions"] = [np.array(p) for p in nd["positions"]]
+
+            node = graph.create_node(
+                parameters=params,
+                is_root=(nd["id"] == 0),
+                auto_build=False,
+            )
+
+            if "center_of_mass" in nd:
+                node.center_of_mass = np.array(nd["center_of_mass"])
+            if "positions" in params:
+                node.positions = params["positions"]
+
+            node.connections = nd.get("connections", [])
             node.devices = devs
             node.population_nest_params = pop_nest_params
-            
+
+            # Some node types need build() before populate (e.g. WFC custom
+            # without serialized positions). Tool nodes generate their own
+            # positions inside populate_node().
+            if not getattr(node, "positions", None):
+                try:
+                    node.build()
+                except Exception:
+                    pass
+            elif all(len(p) == 0 for p in node.positions if p is not None):
+                try:
+                    node.build()
+                except Exception:
+                    pass
+
             node.populate_node()
-        
+
         graphs[g_id] = graph
 
-    all_graphs_map = {{g.graph_id: g for g in graphs.values()}}
-    
+    # --- Cross-graph topology backrefs ---
+    # Without this, prev/next lists only contain same-graph predecessors.
+    # If anything later wants to walk inverse edges (e.g. lifecycle cleanup),
+    # it would miss every cross-graph link. Mirrors the GUI project-load fix.
+    print("Reconstructing cross-graph topology...")
+    global_lookup = {{(g.graph_id, n.id): n for g in graphs.values() for n in g.node_list}}
+    for graph in graphs.values():
+        for node in graph.node_list:
+            for conn in (node.connections or []):
+                tgt = conn.get("target", {{}}) or {{}}
+                tn = global_lookup.get((tgt.get("graph_id"), tgt.get("node_id")))
+                if tn is not None and hasattr(node, "add_neighbor"):
+                    try:
+                        node.add_neighbor(tn)
+                    except Exception:
+                        pass
+
     print("Building Connections...")
     for graph in graphs.values():
-        graph.build_connections(external_graphs=all_graphs_map)
+        graph.build_connections(external_graphs=graphs)
 
     return graphs
 
+
 def cache_active_recorders(graphs):
     active_recorders = []
-    
     for graph in graphs.values():
         for node in graph.node_list:
-            if not hasattr(node, 'devices'): continue
-            
+            if not hasattr(node, "devices"):
+                continue
             for dev in node.devices:
-                gid_col = dev.get('runtime_gid')
-                if gid_col is None: continue
-                
+                gid_col = dev.get("runtime_gid")
+                if gid_col is None:
+                    continue
                 try:
-                    if hasattr(gid_col, 'tolist'): gid_int = int(gid_col.tolist()[0])
-                    elif isinstance(gid_col, list): gid_int = int(gid_col[0])
-                    else: gid_int = int(gid_col)
+                    if hasattr(gid_col, "tolist"):
+                        gid_int = int(gid_col.tolist()[0])
+                    elif isinstance(gid_col, list):
+                        gid_int = int(gid_col[0])
+                    else:
+                        gid_int = int(gid_col)
                 except (ValueError, TypeError, IndexError):
                     continue
 
-                model = dev.get('model', '')
-                if 'recorder' in model or 'meter' in model:
+                model = dev.get("model", "")
+                if "recorder" in model or "meter" in model:
                     try:
                         node_handle = nest.NodeCollection([gid_int])
-                        
                         active_recorders.append({{
-                            'handle': node_handle,
-                            'graph_id': graph.graph_id,
-                            'node_id': node.id,
-                            'device_id': str(dev['id']),
-                            'model': model
+                            "handle": node_handle,
+                            "graph_id": graph.graph_id,
+                            "node_id": node.id,
+                            "device_id": str(dev["id"]),
+                            "model": model,
                         }})
                     except Exception as e:
                         print(f"Error caching device {{gid_int}}: {{e}}")
-    
+
     print(f"Cached {{len(active_recorders)}} active recording devices.")
-    
     if len(active_recorders) == 0:
-        print("WARNING: No spike_recorders or multimeters found!")
-        print("  Simulation will run but NO DATA will be collected.")
-    
+        print("WARNING: No spike_recorders or multimeters found.")
+        print("  Simulation will run but no data will be collected.")
     return active_recorders
 
+
 def collect_and_flush(active_recorders):
+    """Pull buffered events out of every recorder and reset the counter,
+    so memory doesn't grow unbounded over long runs."""
     collected = {{}}
     total_events = 0
-    
+
     for rec in active_recorders:
         try:
-            status = nest.GetStatus(rec['handle'])[0]
-            n_events = status.get('n_events', 0)
-            
+            status = nest.GetStatus(rec["handle"])[0]
+            n_events = status.get("n_events", 0)
             if n_events > 0:
-                events = status.get('events', {{}})
-                
-                clean_data = {{k: v.tolist() if isinstance(v, np.ndarray) else list(v) 
-                             for k, v in events.items()}}
-                
-                key = (rec['graph_id'], rec['node_id'], rec['device_id'])
-                collected[key] = {{
-                    'model': rec['model'],
-                    'data': clean_data
+                events = status.get("events", {{}})
+                clean_data = {{
+                    k: v.tolist() if isinstance(v, np.ndarray) else list(v)
+                    for k, v in events.items()
                 }}
-                
+                key = (rec["graph_id"], rec["node_id"], rec["device_id"])
+                collected[key] = {{"model": rec["model"], "data": clean_data}}
                 total_events += n_events
-                nest.SetStatus(rec['handle'], {{'n_events': 0}})
-                
+                nest.SetStatus(rec["handle"], {{"n_events": 0}})
         except Exception as e:
             print(f"Read error on device {{rec['device_id']}}: {{e}}")
 
     return collected, total_events
 
+
 def build_history_file(graphs, accumulated_runs):
     history = {{
-        'meta': {{
-            'version': '3.0',
-            'type': 'neuroticks_history',
-            'timestamp': str(datetime.now()),
-            'source': 'headless_export'
+        "meta": {{
+            "version": "3.0",
+            "type": "neuroticks_history",
+            "timestamp": str(datetime.now()),
+            "source": "headless_export",
         }},
-        'graphs': []
+        "graphs": [],
     }}
-    
+
     for graph in graphs.values():
         g_entry = {{
-            'graph_id': graph.graph_id,
-            'graph_name': getattr(graph, 'graph_name', f'Graph_{{graph.graph_id}}'),
-            'nodes': []
+            "graph_id": graph.graph_id,
+            "graph_name": getattr(graph, "graph_name", f"Graph_{{graph.graph_id}}"),
+            "nodes": [],
         }}
-        
+
         for node in graph.node_list:
-            # Device-Configs ohne runtime_gid
             clean_devices = []
-            for dev in getattr(node, 'devices', []):
+            for dev in getattr(node, "devices", []):
                 d_copy = dev.copy()
-                d_copy.pop('runtime_gid', None)
+                d_copy.pop("runtime_gid", None)
                 clean_devices.append(d_copy)
-            
+
             n_entry = {{
-                'id': node.id,
-                'name': getattr(node, 'name', f'Node_{{node.id}}'),
-                'neuron_models': getattr(node, 'neuron_models', []),
-                'types': getattr(node, 'types', []),
-                'devices': clean_devices,
-                'results': {{
-                    'history': []
-                }}
+                "id": node.id,
+                "name": getattr(node, "name", f"Node_{{node.id}}"),
+                "neuron_models": getattr(node, "neuron_models", []),
+                "types": getattr(node, "types", []),
+                "devices": clean_devices,
+                "results": {{"history": []}},
             }}
-            
+
             for run_data in accumulated_runs:
-                run_entry = {{'devices': {{}}}}
-                
+                run_entry = {{"devices": {{}}}}
                 for (gid, nid, did), dev_result in run_data.items():
                     if gid == graph.graph_id and nid == node.id:
-                        run_entry['devices'][did] = dev_result
-                
-                if run_entry['devices']:
-                    n_entry['results']['history'].append(run_entry)
-            
-            g_entry['nodes'].append(n_entry)
-        
-        history['graphs'].append(g_entry)
-    
+                        run_entry["devices"][did] = dev_result
+                if run_entry["devices"]:
+                    n_entry["results"]["history"].append(run_entry)
+
+            g_entry["nodes"].append(n_entry)
+
+        history["graphs"].append(g_entry)
     return history
+
 
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = OUTPUT_DIR / f"history_live_{{timestamp}}.json"
-    
+    output_file = OUTPUT_DIR / f"history_headless_{{timestamp}}.json"
+
     print(f"Simulation START. Output: {{output_file}}")
-    
     graphs = load_and_build()
-    
     recorders = cache_active_recorders(graphs)
-    
+
     current_time = 0.0
     step_count = 0
     accumulated_runs = []
-    
+
     print(f"Simulating {{SIM_DURATION}} ms (dump every {{DUMP_INTERVAL}} ms)...")
-    
     while current_time < SIM_DURATION:
         step = min(DUMP_INTERVAL, SIM_DURATION - current_time)
         nest.Simulate(step)
-        current_time += step
+        # Use NEST's biological_time as the authoritative clock; fall back
+        # to local accumulation if anything goes sideways.
+        nest_t = _get_nest_time()
+        current_time = max(current_time + step, nest_t)
         step_count += 1
-        
+
         run_data, n_events = collect_and_flush(recorders)
         accumulated_runs.append(run_data)
-        
+
         pct = current_time / SIM_DURATION * 100
         print(f"  [{{pct:5.1f}}%] {{current_time:.0f}}/{{SIM_DURATION:.0f}} ms  |  {{n_events}} events collected")
-    
+
     print("\\nBuilding history file...")
     history = build_history_file(graphs, accumulated_runs)
-    
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(history, f, cls=NumpyNestEncoder)
-    
-    # Stats
+
     total_recordings = 0
-    for g in history['graphs']:
-        for n in g['nodes']:
-            for run in n['results']['history']:
-                total_recordings += len(run.get('devices', {{}}))
-    
+    for g in history["graphs"]:
+        for n in g["nodes"]:
+            for run in n["results"]["history"]:
+                total_recordings += len(run.get("devices", {{}}))
+
     size_mb = output_file.stat().st_size / (1024 * 1024)
     print(f"\\nSimulation FINISHED.")
     print(f"  File:       {{output_file}}")
     print(f"  Size:       {{size_mb:.1f}} MB")
     print(f"  Steps:      {{step_count}}")
     print(f"  Recordings: {{total_recordings}} device entries")
-    print(f"\\nThis file is directly loadable in the NeuroTicks History Browser.")
+    print(f"\\nLoadable in the Neuroticks History Browser.")
+
 
 if __name__ == "__main__":
     main()
-"""
+'''
 
 
 

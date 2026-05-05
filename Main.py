@@ -554,6 +554,8 @@ class MainWindow(QMainWindow):
             print("Resetting NEST Kernel...")
             self.live_recorders = []
             nest.ResetKernel()
+            # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+            clear_dopa_vt_cache()
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
             
@@ -660,6 +662,10 @@ class MainWindow(QMainWindow):
         _invalidate_nest_refs(list(self.active_graphs.values()))
         
         nest.ResetKernel()
+        
+        # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+        
+        clear_dopa_vt_cache()
         for g in self.active_graphs.values():
             for n in g.node_list:
                 n.populate_node()
@@ -739,6 +745,10 @@ class MainWindow(QMainWindow):
             _invalidate_nest_refs(graph_list)
             
             nest.ResetKernel()
+            
+            # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+            
+            clear_dopa_vt_cache()
             self.status_bar.set_progress(30)
             QApplication.processEvents()
             
@@ -818,8 +828,6 @@ class MainWindow(QMainWindow):
     
     
     def update_visualizations(self):
-        print("VERIFYING NEST POPULATIONS")
-        
         success, report = self.verify_nest_populations()
         
         if not success:
@@ -1761,6 +1769,10 @@ class MainWindow(QMainWindow):
         _invalidate_nest_refs(graph_list)
         
         nest.ResetKernel()
+        
+        # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+        
+        clear_dopa_vt_cache()
         if self.structural_plasticity_enabled:
             nest.EnableStructuralPlasticity()
             
@@ -1846,6 +1858,8 @@ class MainWindow(QMainWindow):
             # Full rebuild path — same one used after device updates.
             _invalidate_nest_refs(graph_list)
             nest.ResetKernel()
+            # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+            clear_dopa_vt_cache()
             if getattr(self, 'structural_plasticity_enabled', False):
                 try: nest.EnableStructuralPlasticity()
                 except Exception: pass
@@ -3292,7 +3306,10 @@ class MainWindow(QMainWindow):
             _invalidate_nest_refs(graph_list)
 
             nest.ResetKernel()
-            
+
+            # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+
+            clear_dopa_vt_cache()
             if self.structural_plasticity_enabled:
                 nest.EnableStructuralPlasticity()
             self.current_nest_time = 0.0
@@ -3523,7 +3540,10 @@ class MainWindow(QMainWindow):
                 _invalidate_nest_refs(graphs_to_process)
 
                 nest.ResetKernel()
-                
+
+                # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+
+                clear_dopa_vt_cache()
                 if enable_structural_plasticity:
                     try:
                         nest.EnableStructuralPlasticity()
@@ -3588,7 +3608,6 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'status_bar'):
                 self.status_bar.show_success(f"Rebuild complete! ({stats['populations_created']} pops created)")
             
-            self.update_visualizations()
             self.update_visualizations()
         
             if hasattr(self, 'simulation_view'):
@@ -3734,6 +3753,9 @@ class MainWindow(QMainWindow):
             
             nest.ResetKernel()
             
+            # Drop dopa-VT cache: GIDs from the previous kernel are dead.
+            
+            clear_dopa_vt_cache()
             graph_list.clear()
             
             WidgetLib.next_graph_id = 0
@@ -3927,10 +3949,6 @@ class MainWindow(QMainWindow):
             self.status_bar.set_progress(95)
             QApplication.processEvents()
 
-            self.update_visualizations()
-            self.graph_overview.update_tree()
-            self.connection_tool.refresh()
-            self.graph_editor.refresh_graph_list()
             self.update_visualizations()
             self.graph_overview.update_tree()
             self.connection_tool.refresh()

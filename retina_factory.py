@@ -203,9 +203,14 @@ def connect_retina_to_lgn(retina, graphs_by_name, verbose=True):
         # Peripheral Parvo: mehr Konvergenz, größere RFs
         ('midget_ON_ganglion_peripheral',  'LGN_PARVO_ON_PERIPHERAL',  60, 0.8, 1.5),
         ('midget_OFF_ganglion_peripheral', 'LGN_PARVO_OFF_PERIPHERAL', 60, 0.8, 1.5),
-        # Magno: Parasol konvergiert ~30-80 pro Magno-Relay
-        ('parasol_ON_ganglion',  'LGN_MAGNO_ON',  50, 1.5, 1.5),
-        ('parasol_OFF_ganglion', 'LGN_MAGNO_OFF', 50, 1.5, 1.5),
+        # Magno: Parasol konvergiert ~30-80 pro Magno-Relay; bei kleinen
+        # Skalen (n_parasol=25) cappt indegree=50 auf 24 -> 96% connectivity
+        # ohne multapses. NEST's FixedInDegreeBuilder geht dabei in einen
+        # Rejection-Sampler-Pfad und braucht Minuten pro Verkabelung.
+        # 15 Eingänge pro Magno-Relay sind biologisch noch breit (60% bei
+        # 25 Sources, skaliert sauber nach oben bei größeren Skalen).
+        ('parasol_ON_ganglion',  'LGN_MAGNO_ON',  15, 1.5, 1.5),
+        ('parasol_OFF_ganglion', 'LGN_MAGNO_OFF', 15, 1.5, 1.5),
         # Konio: kleinere Konvergenz weil S-Cones rar
         ('konio_ganglion_peripheral', 'LGN_KONIOCELLULAR', 40, 1.0, 1.5),
     ]

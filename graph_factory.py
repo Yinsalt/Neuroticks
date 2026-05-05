@@ -93,6 +93,46 @@ def _shift_positions_in_blueprint(blueprint_data: Dict,
     return data
 
 
+def _remap_da_source_in_blueprint(blueprint_data: Dict,
+                                   id_offset: int,
+                                   file_graph_ids: set) -> int:
+    """In-place Remap der da_source.graph_id Felder mit id_offset.
+
+    Graph.load_all_from_json remappt source.graph_id und target.graph_id
+    automatisch, aber stdp_dopamine_synapse Connections haben zusätzlich
+    eine top-level `da_source.graph_id` die der Loader nicht kennt.
+    Wir remappen sie hier vor dem Load.
+
+    Nur graph_ids die wirklich im File sind werden remappt — wenn da_source
+    auf einen externen Graph zeigt, lassen wir die ID stehen.
+
+    Returns: Anzahl remappter da_source-Felder.
+    """
+    if id_offset == 0:
+        return 0
+
+    n = 0
+    for g in blueprint_data.get('graphs', []):
+        for nd in g.get('nodes', []):
+            for storage in (nd.get('connections', []),
+                             nd.get('parameters', {}).get('connections', [])):
+                for conn in storage:
+                    da_src = conn.get('da_source')
+                    if da_src is None:
+                        continue
+                    g_id = da_src.get('graph_id')
+                    if g_id is None:
+                        continue
+                    try:
+                        g_id_int = int(g_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if g_id_int in file_graph_ids:
+                        da_src['graph_id'] = g_id_int + id_offset
+                        n += 1
+    return n
+
+
 def build_graph_array(
     retina_positions: Sequence[Sequence[float]],
     perpendicular_distance: float,
@@ -160,6 +200,18 @@ def build_graph_array(
         # Cross-Graph-Connections werden automatisch von load_all_from_json
         # remappt (innerhalb des Files; Aggregator->Liquid bleibt korrekt).
         id_off = (agent_idx + 1) * ID_OFFSET_PER_AGENT
+
+        # da_source.graph_id ebenfalls mit id_offset versehen.
+        # load_all_from_json remappt source.graph_id und target.graph_id
+        # automatisch, aber NICHT da_source — das machen wir hier.
+        # Wichtig: das geht nur wenn die da_source.graph_id im File-Block
+        # liegt (nicht auf einem externen, schon geladenen Graph zeigt).
+        all_file_gids = {g.get('graph_id') for g in shifted_data.get('graphs', [])}
+        n_remapped = _remap_da_source_in_blueprint(shifted_data, id_off,
+                                                    all_file_gids)
+        if verbose and n_remapped:
+            print(f"  remapped {n_remapped} da_source.graph_id "
+                  f"(+{id_off})")
 
         graphs_loaded = Graph.load_all_from_json(
             shifted_data,

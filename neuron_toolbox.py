@@ -38,6 +38,163 @@ def _vprint(*args, **kwargs):
     if VERBOSE_BUILD:
         print(*args, **kwargs)
 
+# ----------------------------------------------------------------------
+# Module-level volume_transmitter cache for stdp_dopamine_synapse.
+#
+# stdp_dopamine_synapse REQUIRES a vt to be set on the synapse model
+# before nest.Connect, otherwise NEST throws BadProperty. We cache vt's
+# by their dopamine source pop identity (graph_id, node_id, pop_id) so
+# that multiple dopa connections sharing the same DA source share one
+# vt — which matches the biology (one VTA/SNc pop = one dopamine
+# projection bus). Different DA sources get independent vt's, enabling
+# multi-reward setups (e.g. food vs threat).
+#
+# After nest.ResetKernel() this cache is stale. Callers must invoke
+# clear_dopa_vt_cache() in their reset path. Both Graph.build_connections
+# (this file) and the ConnectionExecutor (WidgetLib) use this same cache
+# to stay consistent.
+# ----------------------------------------------------------------------
+_DOPA_VT_CACHE: Dict[Tuple[int, int, int], Any] = {}
+
+# Cache for the NEST-version-specific vt property name and value kind.
+# Older NEST: property is 'vt', value is an integer global_id.
+# Newer NEST (~3.6+): property is 'volume_transmitter', value is a NodeCollection.
+# Detected lazily on first call to avoid touching nest at import time.
+_DOPA_VT_PROP: Optional[Tuple[str, str]] = None  # (prop_name, kind: 'nc' | 'gid')
+
+
+def _detect_vt_property():
+    """
+    Inspect stdp_dopamine_synapse defaults and figure out which property name
+    this NEST version uses to bind a volume_transmitter, and what type that
+    property expects. Returns (prop_name, kind) where kind is 'nc' for
+    NodeCollection or 'gid' for integer global_id.
+    """
+    global _DOPA_VT_PROP
+    if _DOPA_VT_PROP is not None:
+        return _DOPA_VT_PROP
+    
+    try:
+        defaults = nest.GetDefaults('stdp_dopamine_synapse')
+    except Exception:
+        # Fall through to the newer-style default below
+        defaults = {}
+    
+    if 'volume_transmitter' in defaults:
+        _DOPA_VT_PROP = ('volume_transmitter', 'nc')
+    elif 'vt' in defaults:
+        _DOPA_VT_PROP = ('vt', 'gid')
+    else:
+        # Unknown layout — guess the modern name. CopyModel will throw
+        # a clean DictError if this is wrong, which is loud enough.
+        _DOPA_VT_PROP = ('volume_transmitter', 'nc')
+    
+    print(f"  [neuron_toolbox] detected dopa vt property: "
+          f"'{_DOPA_VT_PROP[0]}' (kind={_DOPA_VT_PROP[1]})")
+    return _DOPA_VT_PROP
+
+
+def dopa_vt_to_param_value(vt):
+    """Convert a vt NodeCollection into the value type this NEST version wants.
+    
+    Returns (prop_name, prop_value) ready to drop into a CopyModel/SetDefaults
+    dict. Public because both this module and WidgetLib's ConnectionExecutor
+    need it.
+    """
+    prop_name, kind = _detect_vt_property()
+    if kind == 'nc':
+        return prop_name, vt
+    else:
+        try:
+            return prop_name, vt.global_id
+        except Exception:
+            # Last-ditch fallback for very old NEST where global_id might
+            # be exposed differently
+            return prop_name, int(vt[0].get('global_id'))
+
+
+def clear_dopa_vt_cache():
+    """Drop all cached volume_transmitters. Call after nest.ResetKernel()."""
+    _DOPA_VT_CACHE.clear()
+    # Property name detection survives ResetKernel — same NEST install, same API
+
+
+def get_or_create_dopa_vt(da_source: Dict[str, int],
+                          graph_registry: Optional[Dict[int, Any]] = None,
+                          self_graph_id: Optional[int] = None,
+                          self_node=None):
+    """
+    Resolve DA-source pop and return a cached/freshly-created volume_transmitter
+    that receives spikes from it.
+    
+    Parameters
+    ----------
+    da_source : dict
+        {'graph_id': int, 'node_id': int, 'pop_id': int}
+    graph_registry : dict, optional
+        {graph_id: Graph} — needed if da_source lives in another graph.
+    self_graph_id, self_node : optional
+        Allows shortcut when da_source points to the calling node's own pops
+        and no graph_registry is available.
+    
+    Returns
+    -------
+    (vt_NodeCollection, None) on success, or (None, error_message) on failure.
+    """
+    try:
+        key = (
+            int(da_source['graph_id']),
+            int(da_source['node_id']),
+            int(da_source['pop_id']),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        return None, f"da_source malformed: {e}"
+    
+    if key in _DOPA_VT_CACHE:
+        return _DOPA_VT_CACHE[key], None
+    
+    g_id, n_id, p_id = key
+    src_pop = None
+    
+    # Try the calling node's own populations first
+    if (self_node is not None and self_graph_id == g_id and
+            getattr(self_node, 'id', None) == n_id):
+        pops = getattr(self_node, 'population', None) or []
+        if p_id < len(pops) and pops[p_id] is not None and len(pops[p_id]) > 0:
+            src_pop = pops[p_id]
+    
+    # Fall back to the graph registry
+    if src_pop is None and graph_registry is not None:
+        g = graph_registry.get(g_id)
+        if g is not None:
+            n = g.get_node(n_id) if hasattr(g, 'get_node') else None
+            if n is not None:
+                pops = getattr(n, 'population', None) or []
+                if p_id < len(pops) and pops[p_id] is not None and len(pops[p_id]) > 0:
+                    src_pop = pops[p_id]
+    
+    if src_pop is None:
+        return None, f"DA source pop {key} not found / empty"
+    
+    try:
+        vt = nest.Create("volume_transmitter")
+    except Exception as e:
+        return None, f"volume_transmitter create failed: {e}"
+    
+    try:
+        nest.Connect(src_pop, vt, "all_to_all")
+    except Exception as e:
+        return None, f"DA source -> vt connect failed: {e}"
+    
+    _DOPA_VT_CACHE[key] = vt
+    try:
+        gid_str = str(vt.global_id)
+    except Exception:
+        gid_str = "?"
+    print(f"  Created vt (gid={gid_str}) driven by DA source pop {key}")
+    return vt, None
+
+
 # Multi-Compartment Neuron Models - require special handling
 MC_MODELS = {'iaf_cond_alpha_mc', 'cm_default', 'cm_main', 'iaf_cond_beta_mc'}
 
@@ -3773,31 +3930,94 @@ class Node:
         if src_pop is None or tgt_pop is None:
             return
         
-        self._nest_connect(src_pop, tgt_pop, params)
+        # Resolve volume_transmitter for dopamine-modulated synapses.
+        # Without this, nest.Connect will throw BadProperty.
+        vt = None
+        syn_model = params.get('synapse_model', 'static_synapse')
+        if 'stdp_dopamine' in syn_model:
+            da_source = conn.get('da_source')
+            if da_source is None:
+                print(f"    ⚠ Connection {conn.get('id', '?')}: "
+                      f"{syn_model} requires 'da_source' field — skipping")
+                return
+            vt, vt_err = get_or_create_dopa_vt(
+                da_source,
+                graph_registry=graph_registry,
+                self_graph_id=self.graph_id,
+                self_node=self,
+            )
+            if vt_err:
+                print(f"    ⚠ Connection {conn.get('id', '?')}: "
+                      f"vt setup failed: {vt_err} — skipping")
+                return
+        
+        self._nest_connect(src_pop, tgt_pop, params, vt=vt)
 
-    def _nest_connect(self, src_pop, tgt_pop, params: dict):
+    def _nest_connect(self, src_pop, tgt_pop, params: dict, vt=None):
         rule = params.get('rule', 'all_to_all')
         syn_model = params.get('synapse_model', 'static_synapse')
         weight = params.get('weight', 1.0)
         delay = max(params.get('delay', 1.0), 0.1)
         use_spatial = params.get('use_spatial', False)
         
-        syn_spec = {
-            'synapse_model': syn_model,
-            'weight': weight,
-            'delay': delay
-        }
-        
-        if syn_model == 'stdp_synapse':
-            if 'tau_plus' in params: syn_spec['tau_plus'] = params['tau_plus']
-            if 'lambda' in params: syn_spec['lambda'] = params['lambda']  
-            if 'alpha' in params: syn_spec['alpha'] = params['alpha']
-            if 'mu_plus' in params: syn_spec['mu_plus'] = params['mu_plus']
-            if 'mu_minus' in params: syn_spec['mu_minus'] = params['mu_minus']
-            if 'Wmax' in params: syn_spec['Wmax'] = params['Wmax']
-        
-        if syn_model == 'bernoulli_synapse' and 'p_transmit' in params and not use_spatial:
-            syn_spec['p_transmit'] = params['p_transmit']
+        # Dopamine-modulated synapse: must use CopyModel to bind the vt
+        # before connect, otherwise NEST throws BadProperty. We also push
+        # all dopa learning params into the cloned model defaults so they
+        # actually take effect (they cannot be passed via syn_spec — NEST
+        # treats them as model-level only).
+        if 'stdp_dopamine' in syn_model:
+            if vt is None:
+                print(f"    ⚠ {syn_model}: no vt provided, skipping connect")
+                return
+            
+            # Use whichever property name + value type this NEST version expects
+            vt_prop_name, vt_prop_value = dopa_vt_to_param_value(vt)
+            
+            dopa_param_keys = ('tau_plus', 'tau_c', 'tau_n',
+                               'A_plus', 'A_minus', 'b', 'n', 'c',
+                               'Wmax', 'Wmin')
+            model_overrides = {vt_prop_name: vt_prop_value}
+            for k in dopa_param_keys:
+                if k in params and params[k] is not None:
+                    model_overrides[k] = params[k]
+            
+            # Build a unique cloned model name. time.time_ns avoids collisions
+            # if many connections are built within the same millisecond.
+            try:
+                cloned_name = f"{syn_model}_g{self.graph_id}_n{self.id}_{time.time_ns()}"
+            except AttributeError:
+                # Older Python without time_ns — fall back to time*1e9
+                cloned_name = f"{syn_model}_g{self.graph_id}_n{self.id}_{int(time.time() * 1e9)}"
+            
+            try:
+                nest.CopyModel(syn_model, cloned_name, model_overrides)
+                final_syn_model = cloned_name
+            except Exception as e:
+                print(f"    ⚠ CopyModel for dopa synapse failed: {e} — using base model")
+                final_syn_model = syn_model
+            
+            syn_spec = {
+                'synapse_model': final_syn_model,
+                'weight': weight,
+                'delay': delay,
+            }
+        else:
+            syn_spec = {
+                'synapse_model': syn_model,
+                'weight': weight,
+                'delay': delay
+            }
+            
+            if syn_model == 'stdp_synapse':
+                if 'tau_plus' in params: syn_spec['tau_plus'] = params['tau_plus']
+                if 'lambda' in params: syn_spec['lambda'] = params['lambda']  
+                if 'alpha' in params: syn_spec['alpha'] = params['alpha']
+                if 'mu_plus' in params: syn_spec['mu_plus'] = params['mu_plus']
+                if 'mu_minus' in params: syn_spec['mu_minus'] = params['mu_minus']
+                if 'Wmax' in params: syn_spec['Wmax'] = params['Wmax']
+            
+            if syn_model == 'bernoulli_synapse' and 'p_transmit' in params and not use_spatial:
+                syn_spec['p_transmit'] = params['p_transmit']
         
         if use_spatial:
             conn_spec = self._build_spatial_conn_spec(params)
@@ -4790,13 +5010,21 @@ class Graph:
         connections_out = []
         if include_connections:
             for conn in (node.connections or []):
-                connections_out.append({
+                conn_out = {
                     'id': conn.get('id'),
                     'name': conn.get('name'),
                     'source': conn.get('source'),
                     'target': conn.get('target'),
                     'params': _thin_clean_value(conn.get('params', {})),
-                })
+                }
+                # Dopamin-modulierte Synapsen tragen ihre DA-Quelle als
+                # top-level Feld 'da_source' (zeigt auf die Pop, die
+                # Dopamin-Spikes liefert). Ohne das verliert der Thin-Save
+                # die Bindung zum volume_transmitter — Connection-Wiring
+                # bricht beim Reload mit "requires da_source field".
+                if conn.get('da_source') is not None:
+                    conn_out['da_source'] = _thin_clean_value(conn.get('da_source'))
+                connections_out.append(conn_out)
         
         return {
             'id': int(node.id),
@@ -4813,8 +5041,12 @@ class Graph:
             'neuron_models': list(getattr(node, 'neuron_models', [])),
             'distribution': list(getattr(node, 'distribution', []) or []),
             'parent_id': (node.parent.id if getattr(node, 'parent', None) else None),
-            'next_ids': [n.id for n in getattr(node, 'next', [])],
-            'prev_ids': [n.id for n in getattr(node, 'prev', [])],
+            # dict.fromkeys statt set() — dedupliziert UND erhält die
+            # ursprüngliche Reihenfolge. Ohne Dedup wachsen next_ids/
+            # prev_ids bei jedem Save-Reload-Cycle, weil die Topology-
+            # Reconstruction Targets aus connections doppelt einfügt.
+            'next_ids': list(dict.fromkeys(n.id for n in getattr(node, 'next', []))),
+            'prev_ids': list(dict.fromkeys(n.id for n in getattr(node, 'prev', []))),
         }
 
     def __repr__(self):

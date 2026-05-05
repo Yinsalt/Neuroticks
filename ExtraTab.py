@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QFileDialog, QSplitter, QSizePolicy, QMessageBox,
     QComboBox, QCheckBox, QTabWidget, QScrollArea, QFormLayout, 
     QDoubleSpinBox, QSpinBox, QListWidget, QListWidgetItem, QGridLayout, QLineEdit,
-    QGroupBox
+    QGroupBox, QMenu
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush
@@ -16,7 +16,8 @@ from PyQt6.QtGui import QColor, QFont, QBrush
 from WidgetLib import (
     GraphOverviewWidget, 
     GraphInfoWidget, 
-    ConnectionTool, 
+    ConnectionTool,
+    ConnectionEditorWidget,
     ToolsWidget,
     DeviceConfigPage,
     DeviceTargetSelector, 
@@ -29,6 +30,34 @@ from WidgetLib import (
     IntegerInputField  
 )
 from neuron_toolbox import Graph, Node
+
+# Helper für da_source.graph_id-Remapping beim Load — sitzt im
+# graph_factory, weil server.py das beim Multi-Agent-Load auch braucht.
+# Wir nutzen die selbe Funktion, damit beide Code-Pfade konsistent bleiben.
+try:
+    from graph_factory import _remap_da_source_in_blueprint
+except ImportError:
+    # Fallback wenn graph_factory nicht verfügbar (sollte nie passieren
+    # in einem laufenden Neuroticks-Setup).
+    def _remap_da_source_in_blueprint(blueprint_data, id_offset, file_graph_ids):
+        if id_offset == 0:
+            return 0
+        n = 0
+        for g in blueprint_data.get('graphs', []):
+            for nd in g.get('nodes', []):
+                for storage in (nd.get('connections', []) or [],
+                                 nd.get('parameters', {}).get('connections', []) or []):
+                    for conn in storage:
+                        da = conn.get('da_source')
+                        if not isinstance(da, dict): continue
+                        gid = da.get('graph_id')
+                        if gid is None: continue
+                        try: gid_i = int(gid)
+                        except (TypeError, ValueError): continue
+                        if gid_i in file_graph_ids:
+                            da['graph_id'] = gid_i + id_offset
+                            n += 1
+        return n
 
 pg.setConfigOption('background', '#151515')
 pg.setConfigOption('foreground', '#d0d0d0')
@@ -123,449 +152,131 @@ class SewingInspector(QWidget):
 
 
 
-class SewingConnectionTool(QWidget):
-    connectionChanged = pyqtSignal()
-    
-    def __init__(self, graph_list):
-        super().__init__()
-        self.graph_list = graph_list
-        self.current_source_node = None
-        self.current_source_graph_id = None
-        self.editing_connection_idx = None
-        
-        self.syn_param_widgets = {} 
-        
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QHBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0)
-        
-        left_frame = QFrame(); left_frame.setFixedWidth(280)
-        left_frame.setStyleSheet("background-color: #232323; border-right: 1px solid #444;")
-        left_layout = QVBoxLayout(left_frame)
-        
-        left_layout.addWidget(QLabel("SOURCE SELECTION", styleSheet="color: #00E5FF; font-weight: bold; font-size: 12px;"))
-        self.lbl_source_info = QLabel("No Node Selected")
-        self.lbl_source_info.setStyleSheet("color: #eee; font-weight: bold; border: 1px solid #555; padding: 5px; background: #333;")
-        left_layout.addWidget(self.lbl_source_info)
-        
-        form_src = QFormLayout()
-        self.combo_src_pop = QComboBox()
-        form_src.addRow("Source Pop:", self.combo_src_pop)
-        left_layout.addLayout(form_src)
-        
-        left_layout.addSpacing(10)
-        left_layout.addWidget(QLabel("EXISTING CONNECTIONS", styleSheet="color: #bbb; font-weight: bold; font-size: 11px;"))
-        
-        self.conn_list = QListWidget()
-        self.conn_list.setStyleSheet("background-color: #1e1e1e; border: 1px solid #444;")
-        self.conn_list.itemClicked.connect(self.load_connection_to_edit)
-        left_layout.addWidget(self.conn_list)
-        
-        btn_new = QPushButton("+ NEW CONNECTION")
-        btn_new.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 5px;")
-        btn_new.clicked.connect(self.reset_form)
-        left_layout.addWidget(btn_new)
-        
-        btn_del = QPushButton("Delete Selected")
-        btn_del.setStyleSheet("background-color: #D32F2F; color: white; padding: 5px;")
-        btn_del.clicked.connect(self.delete_selected_connection)
-        left_layout.addWidget(btn_del)
-        
-        layout.addWidget(left_frame)
-
-        right_frame = QWidget()
-        right_layout = QVBoxLayout(right_frame)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background-color: transparent;")
-        
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(10, 10, 10, 10)
-        scroll_layout.setSpacing(10)
-        
-        target_group = QGroupBox("Target Selection")
-        target_group.setStyleSheet("QGroupBox { border: 1px solid #FF9800; font-weight: bold; margin-top: 10px; } QGroupBox::title { color: #FF9800; }")
-        t_form = QFormLayout(target_group)
-        
-        self.combo_tgt_graph = QComboBox(); self.combo_tgt_graph.currentIndexChanged.connect(self.on_tgt_graph_changed)
-        self.combo_tgt_node = QComboBox(); self.combo_tgt_node.currentIndexChanged.connect(self.on_tgt_node_changed)
-        self.combo_tgt_pop = QComboBox()
-        
-        t_form.addRow("Graph:", self.combo_tgt_graph)
-        t_form.addRow("Node:", self.combo_tgt_node)
-        t_form.addRow("Pop:", self.combo_tgt_pop)
-        scroll_layout.addWidget(target_group)
-        
-        name_layout = QHBoxLayout()
-        self.edit_name = QLineEdit(); self.edit_name.setPlaceholderText("Connection Name")
-        name_layout.addWidget(QLabel("Name:"))
-        name_layout.addWidget(self.edit_name)
-        scroll_layout.addLayout(name_layout)
-        
-        self.tabs = QTabWidget()
-        self.tab_spatial = QWidget()
-        self._init_spatial_tab()
-        self.tabs.addTab(self.tab_spatial, "🌍 Spatial")
-        
-        self.tab_topo = QWidget()
-        self._init_topological_tab()
-        self.tabs.addTab(self.tab_topo, "🕸️ Topological")
-        
-        scroll_layout.addWidget(self.tabs)
-        
-        syn_group = QGroupBox("Synapse Properties")
-        syn_layout = QFormLayout(syn_group)
-        
-        self.combo_synapse = QComboBox()
-        self.combo_synapse.addItems(sorted(SYNAPSE_MODELS.keys()))
-        self.combo_synapse.currentTextChanged.connect(self.on_synapse_model_changed)
-        syn_layout.addRow("Model:", self.combo_synapse)
-        
-        wd_layout = QHBoxLayout()
-        self.spin_weight = QDoubleSpinBox(); self.spin_weight.setRange(-1e6, 1e6); self.spin_weight.setValue(1.0); self.spin_weight.setPrefix("W: ")
-        self.spin_delay = QDoubleSpinBox(); self.spin_delay.setRange(0.1, 1000.0); self.spin_delay.setValue(1.0); self.spin_delay.setPrefix("D: ")
-        self.spin_delay.setSuffix(" ms")
-        wd_layout.addWidget(self.spin_weight)
-        wd_layout.addWidget(self.spin_delay)
-        syn_layout.addRow("Base Params:", wd_layout)
-        
-        self.dynamic_syn_params_container = QWidget()
-        self.dynamic_syn_params_layout = QVBoxLayout(self.dynamic_syn_params_container)
-        self.dynamic_syn_params_layout.setContentsMargins(0,0,0,0)
-        syn_layout.addRow(self.dynamic_syn_params_container)
-        
-        opts_layout = QHBoxLayout()
-        self.allow_autapses_check = QCheckBox("Autapses")
-        self.allow_multapses_check = QCheckBox("Multapses"); self.allow_multapses_check.setChecked(True)
-        self.receptor_spin = QSpinBox(); self.receptor_spin.setRange(0, 255); self.receptor_spin.setPrefix("Receptor: ")
-        
-        opts_layout.addWidget(self.allow_autapses_check)
-        opts_layout.addWidget(self.allow_multapses_check)
-        opts_layout.addWidget(self.receptor_spin)
-        syn_layout.addRow(opts_layout)
-        
-        scroll_layout.addWidget(syn_group)
-        scroll_layout.addStretch()
-        
-        scroll.setWidget(scroll_content)
-        right_layout.addWidget(scroll)
-        
-        btn_container = QWidget()
-        btn_l = QVBoxLayout(btn_container)
-        btn_l.setContentsMargins(10, 5, 10, 10)
-        
-        self.btn_save = QPushButton("SAVE CONNECTION")
-        self.btn_save.setMinimumHeight(50)
-        self.btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px;")
-        self.btn_save.clicked.connect(self.save_connection)
-        
-        btn_l.addWidget(self.btn_save)
-        right_layout.addWidget(btn_container)
-        
-        layout.addWidget(right_frame)
-        
-        self.on_synapse_model_changed("static_synapse")
-
-    def _init_spatial_tab(self):
-        layout = QVBoxLayout(self.tab_spatial)
-        layout.addWidget(QLabel("Connects neurons based on spatial positions.", styleSheet="color: #AAA; font-style: italic;"))
-        
-        form = QFormLayout()
-        self.mask_type_combo = QComboBox()
-        self.mask_type_combo.addItems(["sphere", "box", "doughnut"])
-        form.addRow("Mask Shape:", self.mask_type_combo)
-        
-        self.radius_spin = QDoubleSpinBox()
-        self.radius_spin.setRange(0.01, 1000.0); self.radius_spin.setValue(0.5)
-        form.addRow("Outer Radius/Size:", self.radius_spin)
-        
-        self.inner_radius_spin = QDoubleSpinBox()
-        self.inner_radius_spin.setRange(0.0, 1000.0); self.inner_radius_spin.setValue(0.0)
-        form.addRow("Inner Radius:", self.inner_radius_spin)
-        layout.addLayout(form)
-        
-        dist_layout = QHBoxLayout()
-        self.dist_dep_check = QCheckBox("Scale Weight by Distance")
-        self.dist_dep_check.toggled.connect(lambda c: [self.dist_factor_spin.setEnabled(c), self.dist_offset_spin.setEnabled(c)])
-        
-        self.dist_factor_spin = QDoubleSpinBox(); self.dist_factor_spin.setEnabled(False); self.dist_factor_spin.setValue(1.0)
-        self.dist_offset_spin = QDoubleSpinBox(); self.dist_offset_spin.setEnabled(False); self.dist_offset_spin.setValue(0.0)
-        
-        dist_layout.addWidget(self.dist_dep_check); dist_layout.addWidget(QLabel("Factor:")); dist_layout.addWidget(self.dist_factor_spin)
-        dist_layout.addWidget(QLabel("Offset:")); dist_layout.addWidget(self.dist_offset_spin)
-        layout.addLayout(dist_layout)
-        
-        prob_layout = QHBoxLayout()
-        self.spatial_prob_spin = QDoubleSpinBox(); self.spatial_prob_spin.setRange(0.0, 1.0); self.spatial_prob_spin.setValue(1.0)
-        prob_layout.addWidget(QLabel("Probability (p):")); prob_layout.addWidget(self.spatial_prob_spin)
-        layout.addLayout(prob_layout)
-        layout.addStretch()
-
-    def _init_topological_tab(self):
-        layout = QVBoxLayout(self.tab_topo)
-        self.rule_combo = QComboBox()
-        self.rule_combo.addItems(["all_to_all", "fixed_indegree", "fixed_outdegree", "fixed_total_number", "pairwise_bernoulli", "one_to_one"])
-        self.rule_combo.currentTextChanged.connect(self.on_rule_changed)
-        
-        layout.addWidget(QLabel("Connection Rule:"))
-        layout.addWidget(self.rule_combo)
-        
-        self.topo_params_widget = QWidget(); self.topo_params_layout = QFormLayout(self.topo_params_widget)
-        layout.addWidget(self.topo_params_widget)
-        
-        self.indegree_spin = QSpinBox(); self.indegree_spin.setRange(1, 100000); self.indegree_spin.setValue(10)
-        self.outdegree_spin = QSpinBox(); self.outdegree_spin.setRange(1, 100000); self.outdegree_spin.setValue(10)
-        self.total_num_spin = QSpinBox(); self.total_num_spin.setRange(1, 1000000); self.total_num_spin.setValue(100)
-        self.topo_prob_spin = QDoubleSpinBox(); self.topo_prob_spin.setRange(0, 1); self.topo_prob_spin.setValue(0.1)
-        
-        self.on_rule_changed("all_to_all")
-        layout.addStretch()
-
-    def on_rule_changed(self, rule):
-        while self.topo_params_layout.count():
-            item = self.topo_params_layout.takeAt(0)
-            if item.widget(): item.widget().setParent(None)
-        
-        if rule == "fixed_indegree": self.topo_params_layout.addRow("Indegree:", self.indegree_spin)
-        elif rule == "fixed_outdegree": self.topo_params_layout.addRow("Outdegree:", self.outdegree_spin)
-        elif rule == "fixed_total_number": self.topo_params_layout.addRow("Total Connections:", self.total_num_spin)
-        elif "bernoulli" in rule: self.topo_params_layout.addRow("Probability:", self.topo_prob_spin)
-
-    def on_synapse_model_changed(self, model_name):
-        while self.dynamic_syn_params_layout.count():
-            item = self.dynamic_syn_params_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        
-        self.syn_param_widgets.clear()
-        if model_name not in SYNAPSE_MODELS: return
-        
-        params = SYNAPSE_MODELS[model_name]
-        for param_name, info in params.items():
-            if param_name in ['weight', 'delay']: continue
-            
-            p_type = info.get('type', 'float'); p_default = info.get('default', 0.0)
-            widget = None
-            if p_type == 'float': widget = DoubleInputField(param_name, default_value=float(p_default))
-            elif p_type == 'integer': widget = IntegerInputField(param_name, default_value=int(p_default))
-            
-            if widget:
-                self.dynamic_syn_params_layout.addWidget(widget)
-                self.syn_param_widgets[param_name] = widget
-
-    def _get_current_params(self):
-        is_spatial = (self.tabs.currentIndex() == 0)
-        params = {
-            'synapse_model': self.combo_synapse.currentText(),
-            'weight': self.spin_weight.value(),
-            'delay': self.spin_delay.value(),
-            'allow_autapses': self.allow_autapses_check.isChecked(),
-            'allow_multapses': self.allow_multapses_check.isChecked(),
-            'receptor_type': self.receptor_spin.value(),
-            'use_spatial': is_spatial
-        }
-        
-        if is_spatial:
-            params.update({
-                'rule': 'pairwise_bernoulli', 
-                'p': self.spatial_prob_spin.value(), 
-                'mask_type': self.mask_type_combo.currentText(), 
-                'mask_radius': self.radius_spin.value(), 
-                'mask_inner_radius': self.inner_radius_spin.value(), 
-                'distance_dependent_weight': self.dist_dep_check.isChecked(), 
-                'dist_factor': self.dist_factor_spin.value(), 
-                'dist_offset': self.dist_offset_spin.value()
-            })
-        else:
-            rule = self.rule_combo.currentText()
-            params['rule'] = rule
-            if rule == 'fixed_indegree': params['indegree'] = self.indegree_spin.value()
-            elif rule == 'fixed_outdegree': params['outdegree'] = self.outdegree_spin.value()
-            elif rule == 'fixed_total_number': params['N'] = self.total_num_spin.value()
-            elif 'bernoulli' in rule: params['p'] = self.topo_prob_spin.value()
-            
-        for name, widget in self.syn_param_widgets.items(): 
-            params[name] = widget.get_value()
-            
-        return params
-
-    def refresh_combos(self):
-        self.combo_tgt_graph.blockSignals(True); self.combo_tgt_graph.clear()
-        for g in self.graph_list:
-            name = getattr(g, 'graph_name', f"Graph {g.graph_id}")
-            self.combo_tgt_graph.addItem(f"{name} (ID: {g.graph_id})", g.graph_id)
-        self.combo_tgt_graph.blockSignals(False); self.on_tgt_graph_changed()
-
-    def on_tgt_graph_changed(self):
-        self.combo_tgt_node.blockSignals(True); self.combo_tgt_node.clear()
-        gid = self.combo_tgt_graph.currentData()
-        graph = next((g for g in self.graph_list if g.graph_id == gid), None)
-        if graph:
-            for node in graph.node_list: self.combo_tgt_node.addItem(f"{node.name} (ID: {node.id})", node.id)
-        self.combo_tgt_node.blockSignals(False); self.on_tgt_node_changed()
-
-    def on_tgt_node_changed(self):
-        self.combo_tgt_pop.clear()
-        gid = self.combo_tgt_graph.currentData(); nid = self.combo_tgt_node.currentData()
-        graph = next((g for g in self.graph_list if g.graph_id == gid), None)
-        if graph:
-            node = graph.get_node(nid)
-            if node:
-                models = getattr(node, 'neuron_models', [])
-                if not models and hasattr(node, 'types'): models = ["unknown"] * len(node.types)
-                for i, m in enumerate(models): self.combo_tgt_pop.addItem(f"Pop {i}: {m}", i)
 
 
-    def set_source(self, graph_id, node_id):
-        self.refresh_combos()
+class OfflineConnectionTargetRow(ConnectionTargetRow):
+    """ConnectionTargetRow für offline geladene Graphen.
+
+    Der echte ConnectionTargetRow iteriert für die Pop-Combo über
+    node.population — was bei populate=False eine leere Liste ist.
+    Hier nehmen wir stattdessen node.types / node.neuron_models als
+    Quelle, weil die im thin-JSON immer mitgespeichert sind.
+    """
+
+    def on_node_changed(self):
+        self.combo_pop.clear()
+        graph_id = self.combo_graph.currentData()
+        node_id = self.combo_node.currentData()
+
         graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
-        if not graph: return
-        node = graph.get_node(node_id)
-        if not node: return
-        
-        self.current_source_node = node
-        self.current_source_graph_id = graph_id
-        self.lbl_source_info.setText(f"Source: {node.name} (G{graph_id})")
-        
-        self.combo_src_pop.clear()
-        models = getattr(node, 'neuron_models', [])
-        if not models and hasattr(node, 'types'): models = ["unknown"] * len(node.types)
-        for i, m in enumerate(models): self.combo_src_pop.addItem(f"Pop {i}: {m}", i)
-            
-        self.refresh_connection_list()
-        self.reset_form()
+        if graph is None:
+            return
+        node = next((n for n in graph.node_list if n.id == node_id), None)
+        if node is None:
+            return
 
-    def refresh_connection_list(self):
-        self.conn_list.clear()
-        if not self.current_source_node: return
-        
-        conns = getattr(self.current_source_node, 'connections', [])
-        if not conns and hasattr(self.current_source_node, 'parameters'):
-             conns = self.current_source_node.parameters.get('connections', [])
-             self.current_source_node.connections = conns 
+        types = list(getattr(node, 'types', []) or [])
+        models = list(getattr(node, 'neuron_models', []) or [])
+        live_pops = list(getattr(node, 'population', []) or [])
+        n_pops = max(len(types), len(models), len(live_pops))
+        for i in range(n_pops):
+            m = models[i] if i < len(models) else 'unknown'
+            self.combo_pop.addItem(f"Pop {i}: {m}", i)
 
-        for i, c in enumerate(conns):
-            tgt = c.get('target', {}); name = c.get('name', f'Conn_{i}')
-            icon = "🌍" if c.get('params', {}).get('use_spatial', False) else "🕸️"
-            item = QListWidgetItem(f"{icon} {name} -> G{tgt.get('graph_id')}N{tgt.get('node_id')}P{tgt.get('pop_id')}")
-            item.setData(Qt.ItemDataRole.UserRole, i)
-            self.conn_list.addItem(item)
 
-    def load_connection_to_edit(self, item):
-        idx = item.data(Qt.ItemDataRole.UserRole)
-        self.editing_connection_idx = idx
-        
-        conns = getattr(self.current_source_node, 'connections', [])
-        if idx < len(conns):
-            c = conns[idx]
-            self.btn_save.setText("UPDATE CONNECTION")
-            self.btn_save.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
-            
-            src = c.get('source', {}); tgt = c.get('target', {}); params = c.get('params', {})
-            
-            idx_s = self.combo_src_pop.findData(src.get('pop_id'))
-            if idx_s >= 0: self.combo_src_pop.setCurrentIndex(idx_s)
-            
-            idx_tg = self.combo_tgt_graph.findData(tgt.get('graph_id'))
-            if idx_tg >= 0: self.combo_tgt_graph.setCurrentIndex(idx_tg); self.on_tgt_graph_changed()
-            
-            idx_tn = self.combo_tgt_node.findData(tgt.get('node_id'))
-            if idx_tn >= 0: self.combo_tgt_node.setCurrentIndex(idx_tn); self.on_tgt_node_changed()
-            
-            idx_tp = self.combo_tgt_pop.findData(tgt.get('pop_id'))
-            if idx_tp >= 0: self.combo_tgt_pop.setCurrentIndex(idx_tp)
-            
-            self.edit_name.setText(c.get('name', ''))
-            self.spin_weight.setValue(params.get('weight', 1.0))
-            self.spin_delay.setValue(params.get('delay', 1.0))
-            self.allow_autapses_check.setChecked(params.get('allow_autapses', False))
-            self.allow_multapses_check.setChecked(params.get('allow_multapses', True))
-            self.receptor_spin.setValue(params.get('receptor_type', 0))
-            
-            model = params.get('synapse_model', 'static_synapse')
-            self.combo_synapse.setCurrentText(model)
-            
-            if params.get('use_spatial', False):
-                self.tabs.setCurrentIndex(0)
-                self.mask_type_combo.setCurrentText(params.get('mask_type', 'sphere'))
-                self.radius_spin.setValue(params.get('mask_radius', 0.5))
-                self.inner_radius_spin.setValue(params.get('mask_inner_radius', 0.0))
-                self.dist_dep_check.setChecked(params.get('distance_dependent_weight', False))
-                self.dist_factor_spin.setValue(params.get('dist_factor', 1.0))
-                self.dist_offset_spin.setValue(params.get('dist_offset', 0.0))
-                self.spatial_prob_spin.setValue(params.get('p', 1.0))
-            else:
-                self.tabs.setCurrentIndex(1)
-                rule = params.get('rule', 'all_to_all')
-                self.rule_combo.setCurrentText(rule)
-                if 'indegree' in params: self.indegree_spin.setValue(params['indegree'])
-                if 'outdegree' in params: self.outdegree_spin.setValue(params['outdegree'])
-                if 'N' in params: self.total_num_spin.setValue(params['N'])
-                if 'p' in params: self.topo_prob_spin.setValue(params['p'])
-            
-            for name, widget in self.syn_param_widgets.items():
-                if name in params:
-                    widget.set_value(params[name])
+class OfflineConnectionTool(ConnectionTool):
+    """ConnectionTool für offline-Graphen (Sewing/Fusion).
 
-    def reset_form(self):
-        self.editing_connection_idx = None
-        self.btn_save.setText("SAVE NEW CONNECTION")
-        self.btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        self.edit_name.clear()
-        self.spin_weight.setValue(10.0)
-        self.conn_list.clearSelection()
+    Im Sewing-Tool sind die Graphen reine Datenobjekte ohne NEST-Build —
+    populate=False, build_connections=False beim Load. Der Apply-Button
+    vom echten ConnectionTool versucht über ConnectionExecutor in NEST
+    zu verkabeln, was hier zwangsläufig fehlschlägt (keine NEST-Pops
+    vorhanden). Diese Subklasse persistiert die queue'ten Connections
+    nur ans Datenmodell (node.connections + node.parameters['connections']),
+    ohne NEST anzufassen.
 
-    def save_connection(self):
-        if not self.current_source_node: return
-        
-        params = self._get_current_params()
-        
-        conn_data = {
-            'id': np.random.randint(100000, 999999), 
-            'name': self.edit_name.text() or "Sewed_Connection",
-            'source': {
-                'graph_id': self.current_source_graph_id, 
-                'node_id': self.current_source_node.id, 
-                'pop_id': self.combo_src_pop.currentData()
-            },
-            'target': {
-                'graph_id': self.combo_tgt_graph.currentData(), 
-                'node_id': self.combo_tgt_node.currentData(), 
-                'pop_id': self.combo_tgt_pop.currentData()
-            },
-            'params': params
-        }
-        
-        if not hasattr(self.current_source_node, 'connections'):
-            self.current_source_node.connections = []
-        
-        if self.editing_connection_idx is not None:
-            old_id = self.current_source_node.connections[self.editing_connection_idx].get('id')
-            conn_data['id'] = old_id
-            self.current_source_node.connections[self.editing_connection_idx] = conn_data
+    Außerdem werden die Pop-Combos (Source + Targets) aus types/
+    neuron_models gefüllt statt aus node.population — letzteres ist bei
+    populate=False leer.
+
+    Alle anderen Features — Spatial-Modes, Topological-Rules, DA-Source
+    Editor, STDP-Synapsenparameter — kommen 1:1 aus der Parent-Klasse.
+    """
+
+    # ─── Pop-Combos: Source ───────────────────────────────────────────
+    def on_source_node_changed(self, index):
+        self.source_pop_combo.clear()
+        if index < 0:
+            return
+        graph_id = self.source_graph_combo.currentData()
+        node_id = self.source_node_combo.currentData()
+        graph = next((g for g in self.graph_list if g.graph_id == graph_id), None)
+        if graph is None:
+            return
+        node = next((n for n in graph.node_list if n.id == node_id), None)
+        if node is None:
+            return
+        types = list(getattr(node, 'types', []) or [])
+        models = list(getattr(node, 'neuron_models', []) or [])
+        live_pops = list(getattr(node, 'population', []) or [])
+        n_pops = max(len(types), len(models), len(live_pops))
+        for i in range(n_pops):
+            m = models[i] if i < len(models) else 'unknown'
+            self.source_pop_combo.addItem(f"Pop {i}: {m}", i)
+
+    # ─── Target-Rows nutzen die Offline-Subklasse ─────────────────────
+    def add_target_row(self):
+        idx = len(self.target_rows)
+        row = OfflineConnectionTargetRow(self.graph_list, idx, self)
+        row.removeClicked.connect(self.remove_target_row)
+        self.target_rows.append(row)
+        self.targets_layout.insertWidget(idx, row)
+        QTimer.singleShot(100, lambda: self.scroll_targets.verticalScrollBar().setValue(
+            self.scroll_targets.verticalScrollBar().maximum()
+        ))
+
+    # ─── Apply: persistiert offline statt NEST-Verkabelung ────────────
+    def create_all_connections(self):
+        if not self.connections:
+            return
+        graphs_dict = {g.graph_id: g for g in self.graph_list}
+        success = 0
+        failed = 0
+        for conn in list(self.connections):
+            s = conn.get('source', {}) or {}
+            graph = graphs_dict.get(s.get('graph_id'))
+            if graph is None:
+                failed += 1
+                continue
+            node = graph.get_node(s.get('node_id'))
+            if node is None:
+                failed += 1
+                continue
+            if not hasattr(node, 'connections') or node.connections is None:
+                node.connections = []
+            # deepcopy damit die Queue im Tool unabhängig vom persistierten
+            # State bleibt — sonst würde späteres Editing der Queue rückwirkend
+            # das gespeicherte Connection-Dict mutieren.
+            conn_copy = copy.deepcopy(conn)
+            node.connections.append(conn_copy)
+            # Beide Storages syncen (parameters['connections'] wird vom
+            # Loader und vom Save-Pfad parallel benutzt).
+            if hasattr(node, 'parameters') and node.parameters is not None:
+                node.parameters['connections'] = node.connections
+            success += 1
+
+        # Erfolgreich persistierte Connections aus der Queue entfernen.
+        self.connections = []
+        self.update_connection_list()
+        if failed > 0:
+            self.status_label.setText(
+                f"Persisted {success} connections.  {failed} failed (graph/node not found)."
+            )
         else:
-            self.current_source_node.connections.append(conn_data)
-        
-        self.current_source_node.parameters['connections'] = self.current_source_node.connections
-        
-        self.refresh_connection_list()
-        self.reset_form()
-        self.connectionChanged.emit()
+            self.status_label.setText(f"Persisted {success} connections to graph data.")
 
-    def delete_selected_connection(self):
-        row = self.conn_list.currentRow()
-        if row >= 0:
-            item = self.conn_list.item(row)
-            idx = item.data(Qt.ItemDataRole.UserRole)
-            self.current_source_node.connections.pop(idx)
-            self.current_source_node.parameters['connections'] = self.current_source_node.connections
-            self.refresh_connection_list()
-            self.reset_form()
-            self.connectionChanged.emit()
+        if success > 0:
+            self.connectionsCreated.emit()
 
 
 class SewingDeviceTool(ToolsWidget):
@@ -736,6 +447,17 @@ class SewingDeviceTargetSelector(QWidget):
 
 
 class SewingToolsPanel(QTabWidget):
+    """Tools-Panel im Sewing-Workspace.
+
+    Nutzt jetzt die echten WidgetLib-Klassen:
+      - OfflineConnectionTool (= echter ConnectionTool, persistiert offline)
+      - ConnectionEditorWidget (existing-connection editor, identisch zum
+        Main-Tool)
+    Damit kriegt das Sewing-Tool automatisch alle Verbindungsregeln,
+    DA-Source-Bindings, Spatial-Modes und STDP-Parameter, die der echte
+    Connection-Workflow auch hat — kein Drift mehr zwischen den beiden UIs.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet("""
@@ -743,59 +465,127 @@ class SewingToolsPanel(QTabWidget):
             QTabBar::tab { background: #333; color: #aaa; padding: 8px 15px; }
             QTabBar::tab:selected { background: #444; color: white; border-top: 2px solid #00E5FF; }
         """)
-        
+
         self.combined_list = []
-        
+
         self.inspector = SewingInspector()
         self.addTab(self.inspector, "Inspector")
-        
-        self.connector = SewingConnectionTool(graph_list=[]) 
-        self.addTab(self.connector, "Sewing (Connect)")
-        
-        self.devices = SewingDeviceTool() 
+
+        # Echter ConnectionTool (mit Spatial-Modes, DA-source, STDP-Editor).
+        # Offline-Variante persistiert nur in node.connections, kein NEST.
+        self.connector = OfflineConnectionTool(graph_list=self.combined_list)
+        self.addTab(self.connector, "Connect")
+
+        # Bearbeitungs-Tab — derselbe Editor wie im Hauptprogramm.
+        self.editor = ConnectionEditorWidget(graph_list=self.combined_list)
+        self.addTab(self.editor, "Edit")
+
+        self.devices = SewingDeviceTool()
         self.addTab(self.devices, "Instruments")
 
     def update_all_graphs(self, left_list, right_list):
         self.combined_list = left_list + right_list
+        # In-place graph_list assignment auf den Tools — sie haben die
+        # Liste als Reference, also reicht Re-Bind + Refresh.
         self.connector.graph_list = self.combined_list
-        self.connector.refresh_combos()
+        self.connector.refresh_graph_list()
+        self.editor.graph_list = self.combined_list
+        # Wenn der Editor gerade eine Connection geöffnet hat, Re-Resolve
+        # auf den neuen graph_list damit der live_ref nicht stale wird.
+        if getattr(self.editor, 'current_conn_ref', None) is not None:
+            try:
+                self.editor.load_connection(self.editor.current_conn_ref)
+            except Exception:
+                self.editor.clear()
         self.devices.update_graphs(self.combined_list)
 
     def handle_selection(self, data):
+        """Tree-Click — NUR Inspector-Update.
+
+        Das Connect-Panel bleibt bewusst unangetastet, damit der User
+        unabhängig von der Tree-Selektion an Verbindungen arbeiten kann.
+        Source/Target werden nur auf Right-Click → Context-Menu gesetzt
+        (siehe ExtraTabWidget._on_tree_context_menu).
+        """
         dtype = data.get('type')
         gid = data.get('graph_id')
         nid = data.get('node_id')
-        
+
         graph = next((g for g in self.combined_list if g.graph_id == gid), None)
-        
+
         if dtype == 'graph' and graph:
             self.setCurrentIndex(0)
             self.inspector.inspect_graph(graph)
-            
+
         elif dtype == 'node' and graph:
             node = graph.get_node(nid)
             if node:
                 self.setCurrentIndex(0)
                 self.inspector.inspect_node(node)
-                
-                self.connector.set_source(gid, nid)
-                
+                # Devices-Tab kriegt weiterhin die Selection — sonst weiß
+                # er nicht wo das nächste Device hin soll.
                 self.devices.set_selection(gid, nid)
-        
+
+        elif dtype == 'population' and graph:
+            # Pop-Click → Inspector-Update auf Node-Ebene
+            node = graph.get_node(nid)
+            if node:
+                self.setCurrentIndex(0)
+                self.inspector.inspect_node(node)
+                self.devices.set_selection(gid, nid)
+
         elif dtype == 'connection' and graph:
             conn_data = data.get('connection')
-            node = graph.get_node(nid)
-            if node and conn_data:
-                self.setCurrentIndex(1) 
-                self.connector.set_source(gid, nid) 
-                self.connector.load_connection_to_edit(self.connector.conn_list.currentItem()) 
-                self.connector.select_connection_by_data_idx(conn_data) 
+            if conn_data:
+                # Existierende Connection → in den Edit-Tab laden.
+                self.setCurrentIndex(2)
+                self.editor.load_connection(conn_data)
 
         elif dtype == 'device':
             device_data = data.get('device')
             if device_data:
-                self.setCurrentIndex(2)
+                self.setCurrentIndex(3)
                 self.devices.open_device_editor(device_data)
+
+    # ─── Programmatic API für Right-Click → Source/Target ─────────────
+    def use_as_source(self, gid, nid, pid):
+        """Vom Tree-Context-Menu: setzt Source des Connect-Tools."""
+        self.setCurrentIndex(1)
+        try:
+            self.connector.set_source(gid, nid, pid)
+        except Exception as e:
+            print(f"[Sewing] use_as_source({gid},{nid},{pid}): {e}")
+
+    def add_as_target(self, gid, nid, pid):
+        """Vom Tree-Context-Menu: hängt Target an die nächste freie Row.
+        Wenn alle bestehenden Rows belegt sind, wird eine neue erstellt."""
+        self.setCurrentIndex(1)
+        rows = self.connector.target_rows
+        target_row = None
+        for r in rows:
+            try:
+                g, n, p = r.get_selection()
+            except Exception:
+                continue
+            if None in (g, n, p):
+                target_row = r
+                break
+        if target_row is None:
+            # Alle Rows belegt → neue erzeugen
+            self.connector.add_target_row()
+            target_row = self.connector.target_rows[-1]
+
+        # Combos in der Reihenfolge G → N → P setzen (Cascade über
+        # currentIndexChanged füllt das jeweils nächste Combo).
+        idx_g = target_row.combo_graph.findData(gid)
+        if idx_g >= 0:
+            target_row.combo_graph.setCurrentIndex(idx_g)
+        idx_n = target_row.combo_node.findData(nid)
+        if idx_n >= 0:
+            target_row.combo_node.setCurrentIndex(idx_n)
+        idx_p = target_row.combo_pop.findData(pid)
+        if idx_p >= 0:
+            target_row.combo_pop.setCurrentIndex(idx_p)
 
 
 class SewingGraphView(QWidget):
@@ -956,7 +746,8 @@ class ExtraTabWidget(QWidget):
         self.tools_panel = SewingToolsPanel(self)
         
 
-        self.tools_panel.connector.connectionChanged.connect(self.refresh_all_views)
+        self.tools_panel.connector.connectionsCreated.connect(self.refresh_all_views)
+        self.tools_panel.editor.connectionUpdated.connect(self.refresh_all_views)
         self.tools_panel.devices.deviceAdded.connect(self.refresh_all_views)
         
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -999,7 +790,16 @@ class ExtraTabWidget(QWidget):
 
         self.left_overview.tree.itemClicked.connect(self._on_tree_clicked)
         self.right_overview.tree.itemClicked.connect(self._on_tree_clicked)
-        
+
+        # Right-Click Context-Menu für Use-as-Source / Add-as-Target.
+        # Tree-Click selbst füllt das Connect-Panel NICHT mehr (entkoppelt) —
+        # der Connect-Tool ist immer unabhängig vom Tree bedienbar.
+        for tree in (self.left_overview.tree, self.right_overview.tree):
+            tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tree.customContextMenuRequested.connect(
+                lambda pos, t=tree: self._on_tree_context_menu(t, pos)
+            )
+
         self.left_overview.requestDeviceDeletion.connect(self.delete_device_from_overview)
         self.right_overview.requestDeviceDeletion.connect(self.delete_device_from_overview)
         self.left_overview.requestConnectionDeletion.connect(self.delete_connection_from_overview)
@@ -1055,6 +855,58 @@ class ExtraTabWidget(QWidget):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data: self.tools_panel.handle_selection(data)
 
+    def _on_tree_context_menu(self, tree, pos):
+        """Right-Click auf einem Tree-Item → Kontextmenü mit Aktionen
+        die in den Connect-Tab durchschlagen. Entkoppelt vom normalen
+        Click damit der Connect-Tool unabhängig vom Tree bedient werden
+        kann.
+        """
+        item = tree.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        dtype = data.get('type')
+        gid = data.get('graph_id')
+        nid = data.get('node_id')
+
+        # Kontextmenü hat nur Sinn für Node und Population. Connection und
+        # Device haben eigene Edit-Wege, Graph-Item hat nichts zum Verbinden.
+        if dtype not in ('node', 'population') or gid is None or nid is None:
+            return
+
+        # Pop-Item: pop_id steht im data-dict.
+        # Node-Item: pop_id default 0 (User kann's danach im Combo ändern).
+        pid = data.get('pop_id', 0) if dtype == 'population' else 0
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            pid = 0
+
+        # Label: bei population zeigen wir Pop-Index, bei Node nicht.
+        label_target = (f"G{gid}.N{nid}.P{pid}" if dtype == 'population'
+                        else f"G{gid}.N{nid} (Pop 0)")
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #2b2b2b; color: #ddd; border: 1px solid #555; }"
+            "QMenu::item:selected { background-color: #1976D2; color: white; }"
+        )
+        act_src = menu.addAction(f"Use as Source  →  {label_target}")
+        act_tgt = menu.addAction(f"Add as Target  →  {label_target}")
+        menu.addSeparator()
+        act_inspect = menu.addAction("Inspect")
+
+        chosen = menu.exec(tree.viewport().mapToGlobal(pos))
+        if chosen is act_src:
+            self.tools_panel.use_as_source(gid, nid, pid)
+        elif chosen is act_tgt:
+            self.tools_panel.add_as_target(gid, nid, pid)
+        elif chosen is act_inspect:
+            self.tools_panel.handle_selection(data)
+
     def _create_header(self, text):
         lbl = QLabel(text); lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); lbl.setStyleSheet("color: #bbb; font-weight: bold; font-size: 11px; letter-spacing: 1px; padding: 5px;")
         return lbl
@@ -1063,158 +915,232 @@ class ExtraTabWidget(QWidget):
         return f"QPushButton {{ background-color: {color}; color: white; font-weight: bold; border: none; border-radius: 4px; padding: 8px; }} QPushButton:hover {{ background-color: white; color: {color}; }}"
 
     def load_graph_file(self, target_list, overview_widget, source_name):
-        filepath, _ = QFileDialog.getOpenFileName(self, f"Load into {source_name}", "", "JSON Files (*.json);;All Files (*)")
-        if not filepath: return
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, f"Load into {source_name}", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not filepath:
+            return
         try:
-            with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
-            loaded = []
-            if "graphs" in data:
-                for g_data in data["graphs"]: loaded.append(self._reconstruct_graph(g_data, g_data.get('nodes', [])))
-            elif "graph" in data: loaded.append(self._reconstruct_graph(data["graph"], data.get("nodes", [])))
-            else: QMessageBox.warning(self, "Error", "Unknown JSON format."); return
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
 
-            if loaded:
-                off = 1000000 if source_name == "A" else 2000000
-                off += len(target_list) * 1000; id_map = {}
-                for i, g in enumerate(loaded): old = g.graph_id; g.graph_id = off + i; id_map[old] = g.graph_id
-                for g in loaded:
-                    for n in g.node_list:
-                        n.graph_id = g.graph_id
-                        if not hasattr(n, 'connections'): n.connections = n.parameters.get('connections', [])
-                        for c in n.connections:
-                            s=c['source']; t=c['target']
-                            if s['graph_id'] in id_map: s['graph_id'] = id_map[s['graph_id']]
-                            if t['graph_id'] in id_map: t['graph_id'] = id_map[t['graph_id']]
-                
-                target_list.extend(loaded)
-                overview_widget.update_tree()
-                self.canvas.update_data(self.left_graphs, self.right_graphs)
-                self.tools_panel.update_all_graphs(self.left_graphs, self.right_graphs)
-                print(f"[Sewing] Loaded {len(loaded)} graphs into {source_name}.")
-        except Exception as e: print(f"Load Error: {e}"); import traceback; traceback.print_exc()
+            # Single-graph Files in das 'graphs'-Format wrappen, damit der
+            # universelle Loader sie verarbeiten kann.
+            if 'graphs' in data:
+                blueprint = data
+            elif 'graph' in data:
+                blueprint = {
+                    'graphs': [{
+                        **data['graph'],
+                        'nodes': data.get('nodes', []),
+                    }]
+                }
+            else:
+                QMessageBox.warning(self, "Error", "Unknown JSON format.")
+                return
 
-    def _reconstruct_graph(self, graph_meta, nodes_data):
-        decay = graph_meta.get('polynom_decay', 0.8)
-        if isinstance(decay, list): decay = decay[0] if decay else 0.8
-        decay = float(decay)
-        power = graph_meta.get('polynom_max_power', 5)
-        if isinstance(power, list): power = power[0] if power else 5
-        power = int(power)
-        init_pos = graph_meta.get('init_position', [0, 0, 0])
-        if not isinstance(init_pos, list):
-             try: init_pos = init_pos.tolist()
-             except: init_pos = [0,0,0]
-             
-        graph = Graph(graph_name=graph_meta.get('graph_name', 'Loaded'), graph_id=graph_meta.get('graph_id', 0), parameter_list=[], polynom_max_power=power, polynom_decay=decay, position=init_pos, max_nodes=len(nodes_data))
-        nodes_data = sorted(nodes_data, key=lambda x: x['id'])
-        for nd in nodes_data:
-            params = nd.get('parameters', {}).copy()
-            params.update({'id': nd['id'], 'name': nd['name'], 'graph_id': nd.get('graph_id', graph.graph_id)})
-            if 'center_of_mass' in nd: params['center_of_mass'] = np.array(nd['center_of_mass'])
-            if 'm' in nd: params['m'] = np.array(nd['m'])
-            
-            params['connections'] = nd.get('connections') if nd.get('connections') is not None else params.get('connections', [])
-            params['devices'] = nd.get('devices') if nd.get('devices') is not None else params.get('devices', [])
+            # ID-Offset wählen: max(existing_graph_ids) + 1.
+            #
+            # Damit kollidieren neu geladene Graphen weder mit den schon-
+            # geladenen aus der anderen Source noch mit Re-Loads in dieselbe
+            # Source. Das Format passt zur angepassten Graph-Klasse —
+            # Graph.load_all_from_json(id_offset=N) addiert N auf jede
+            # graph_id im File und remappt source/target.graph_id in den
+            # Connections automatisch mit. Wir ergänzen das durch
+            # _remap_da_source_in_blueprint für die top-level da_source-
+            # Felder der Dopa-Synapsen, die der Loader nicht kennt.
+            existing_gids = [
+                g.graph_id for g in (self.left_graphs + self.right_graphs)
+            ]
+            off = (max(existing_gids) + 1) if existing_gids else 0
 
-            new_node = graph.create_node(parameters=params, is_root=(nd['id'] == 0), auto_build=False)
-            if nd.get('positions'): new_node.positions = [np.array(pos) for pos in nd['positions']]
-            if 'center_of_mass' in nd: new_node.center_of_mass = np.array(nd['center_of_mass'])
-            
-            if 'types' in nd: new_node.population = [None] * len(nd['types'])
-            if 'neuron_models' in nd: new_node.neuron_models = nd['neuron_models']
-            
-            new_node.connections = params['connections']
-            new_node.devices = params['devices']
-        return graph
+            # Vor dem Load: da_source.graph_id mit demselben Offset remappen.
+            # Graph.load_all_from_json kümmert sich um source/target.graph_id,
+            # nicht aber um da_source — das muss extern gemacht werden, sonst
+            # zeigen Dopa-Synapsen nach dem Sewing auf falsche/inexistente
+            # Pops.
+            file_graph_ids = {
+                int(g.get('graph_id', 0)) for g in blueprint.get('graphs', [])
+            }
+            n_da = _remap_da_source_in_blueprint(blueprint, off, file_graph_ids)
+
+            # Kanonischer Loader — populate=False weil wir nur die
+            # Datenstruktur brauchen (kein NEST-Build), build_connections=False
+            # weil wir nicht in NEST verkabeln. Funktioniert mit thin
+            # (positions=[]) und fat (positions vorhanden) Format gleich.
+            loaded = Graph.load_all_from_json(
+                blueprint,
+                populate=False,
+                build_connections=False,
+                id_offset=off,
+                verbose=False,
+            )
+
+            if not loaded:
+                QMessageBox.warning(self, "Error", "Loader returned no graphs.")
+                return
+
+            target_list.extend(loaded)
+            overview_widget.update_tree()
+            self.canvas.update_data(self.left_graphs, self.right_graphs)
+            self.tools_panel.update_all_graphs(self.left_graphs, self.right_graphs)
+
+            n_conns = sum(
+                len(getattr(n, 'connections', []) or [])
+                for g in loaded for n in g.node_list
+            )
+            print(f"[Sewing] Loaded {len(loaded)} graphs into {source_name}  "
+                  f"(id_offset={off}, {n_conns} connections, {n_da} da_source remapped).")
+
+        except Exception as e:
+            print(f"Load Error: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Load Error", str(e))
 
     def merge_and_save_project(self):
+        """Speichert beide Source-Listen in EIN merged thin-1.0 Projekt.
+
+        Wichtige Eigenschaften:
+          - graph_ids werden auf 0..N-1 kompaktiert (sonst sähen sie nach
+            den Sewing-Offsets aus: 1_000_000+).
+          - source/target/da_source.graph_id werden konsistent mit-remappt
+            damit Cross-Graph-Connections und VT-Bindings nach dem Reload
+            stimmen.
+          - next_ids/prev_ids werden via Graph._serialize_node deduplictiert
+            (gleicher Code wie der Main-Save-Pfad → keine Drift).
+          - B-Graphen kriegen Displacement-Offset auf init_position +
+            center_of_mass + parameters['m']. Positions werden nicht
+            gespeichert (Thin/NO) — der Loader baut sie via populate_node()
+            beim nächsten Open neu.
+        """
         all_graphs = self.left_graphs + self.right_graphs
-        if not all_graphs: QMessageBox.warning(self, "Error", "No graphs to save."); return
+        if not all_graphs:
+            QMessageBox.warning(self, "Error", "No graphs to save.")
+            return
 
-        filepath, _ = QFileDialog.getSaveFileName(self, "Save Merged Project", "", "JSON Files (*.json)")
-        if not filepath: return
-        if not filepath.endswith('.json'): filepath += '.json'
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Merged Project", "", "JSON Files (*.json)"
+        )
+        if not filepath:
+            return
+        if not filepath.endswith('.json'):
+            filepath += '.json'
 
+        # Compact final IDs: 0..N-1 (Sewing-Offsets verschwinden im File).
         id_map = {g.graph_id: i for i, g in enumerate(all_graphs)}
-        disp_vec = np.array([self.spin_disp_x.value(), self.spin_disp_y.value(), self.spin_disp_z.value()])
-        
-        project_data = {'meta': {'type': 'sewed_project'}, 'graphs': []}
-        
+
+        disp_vec = np.array([
+            self.spin_disp_x.value(),
+            self.spin_disp_y.value(),
+            self.spin_disp_z.value(),
+        ], dtype=float)
+        has_disp = bool(np.any(disp_vec != 0.0))
+
+        project_data = {
+            'meta': {
+                'version': 'thin-1.0',
+                'type': 'neuroticks_thin_project',
+                'include_positions': False,
+                'source': 'sewing_tool',
+            },
+            'graphs': [],
+        }
+
+        n_dopa_total = 0
+
         for g in all_graphs:
             new_gid = id_map[g.graph_id]
             is_from_b = (g in self.right_graphs)
-            
+
+            # Graph-Header analog zu Graph.to_json()
+            init_pos = (
+                g.init_position.tolist() if isinstance(g.init_position, np.ndarray)
+                else list(g.init_position) if hasattr(g, 'init_position') else [0.0, 0.0, 0.0]
+            )
+            if is_from_b and has_disp:
+                init_pos = (np.array(init_pos, dtype=float) + disp_vec).tolist()
+
             g_data = {
-                'graph_id': new_gid, 'graph_name': g.graph_name, 'max_nodes': g.max_nodes,
-                'init_position': list(g.init_position) if hasattr(g, 'init_position') else [0,0,0], 
-                'polynom_max_power': g.polynom_max_power,
-                'polynom_decay': getattr(g, 'polynom_decay', 0.8),
-                'nodes': []
+                'graph_id': new_gid,
+                'graph_name': g.graph_name,
+                'max_nodes': int(g.max_nodes) if g.max_nodes else len(g.node_list),
+                'init_position': init_pos,
+                'polynom_max_power': int(g.polynom_max_power),
+                'polynom_decay': float(getattr(g, 'polynom_decay', 0.8)),
+                'nodes': [],
             }
-            
+
             for node in g.node_list:
-                final_conns = []
-                source_conns = getattr(node, 'connections', [])
-                if not source_conns and 'connections' in node.parameters: source_conns = node.parameters['connections']
+                # ★ Kanonische Serialisierung — selbe Funktion wie Main-Save.
+                # Schreibt da_source mit, deduplictiert next_ids/prev_ids,
+                # macht numpy→python Konvertierung sauber.
+                nd = g._serialize_node(
+                    node,
+                    include_positions=False,   # Thin/NO
+                    include_devices=True,
+                    include_connections=True,
+                )
 
-                for conn in source_conns:
-                    c = copy.deepcopy(conn)
-                    s_gid = c['source']['graph_id']; t_gid = c['target']['graph_id']
-                    if s_gid in id_map: c['source']['graph_id'] = id_map[s_gid]
-                    if t_gid in id_map: c['target']['graph_id'] = id_map[t_gid]
-                    final_conns.append(c)
-                
-                
-                final_devs = []
-                source_devs = getattr(node, 'devices', [])
-                if not source_devs and 'devices' in node.parameters: source_devs = node.parameters['devices']
+                # graph_id im Node + parameters auf neue ID
+                nd['graph_id'] = new_gid
+                params = nd.get('parameters', {})
+                if isinstance(params, dict):
+                    params['graph_id'] = new_gid
 
-                for d in source_devs:
-                    dc = copy.deepcopy(d)
-                    if 'runtime_gid' in dc: del dc['runtime_gid']
-                    if 'params' in dc: dc['params'] = _clean_params(dc['params'])
-                    final_devs.append(dc)
+                # source/target/da_source.graph_id in Connections remappen
+                for c in nd.get('connections', []) or []:
+                    if not isinstance(c, dict):
+                        continue
+                    src = c.get('source')
+                    tgt = c.get('target')
+                    if isinstance(src, dict) and src.get('graph_id') in id_map:
+                        src['graph_id'] = id_map[src['graph_id']]
+                    if isinstance(tgt, dict) and tgt.get('graph_id') in id_map:
+                        tgt['graph_id'] = id_map[tgt['graph_id']]
+                    da = c.get('da_source')
+                    if isinstance(da, dict):
+                        if da.get('graph_id') in id_map:
+                            da['graph_id'] = id_map[da['graph_id']]
+                        n_dopa_total += 1
 
-                safe_p = _clean_params(node.parameters.copy())
-                safe_p['connections'] = final_conns
-                safe_p['devices'] = final_devs
-                if 'graph_id' in safe_p: safe_p['graph_id'] = new_gid
-                
-                final_com = node.center_of_mass
-                final_positions = node.positions
-                final_m = node.parameters.get('m', [0,0,0])
-                
-                if is_from_b:
-                    if isinstance(final_com, np.ndarray): final_com += disp_vec
-                    else: final_com = np.array(final_com) + disp_vec
-                    
-                    if final_positions:
-                        final_positions = [p + disp_vec if isinstance(p, np.ndarray) else p for p in final_positions]
-                    
-                    if isinstance(final_m, list): final_m = np.array(final_m)
-                    final_m += disp_vec
+                # B-side Displacement
+                if is_from_b and has_disp:
+                    com = nd.get('center_of_mass')
+                    if com is not None:
+                        nd['center_of_mass'] = (np.array(com, dtype=float) + disp_vec).tolist()
+                    if isinstance(params, dict):
+                        m_val = params.get('m')
+                        if m_val is not None:
+                            params['m'] = (np.array(m_val, dtype=float) + disp_vec).tolist()
 
-                if isinstance(final_com, np.ndarray): safe_p['center_of_mass'] = final_com.tolist()
-                else: safe_p['center_of_mass'] = final_com
-                    
-                if isinstance(final_m, np.ndarray): safe_p['m'] = final_m.tolist()
-                else: safe_p['m'] = final_m
+                g_data['nodes'].append(nd)
 
-                n_data = {
-                    'id': node.id, 'name': node.name, 'graph_id': new_gid,
-                    'parameters': safe_p, 'connections': final_conns, 'devices': final_devs,
-                    'center_of_mass': safe_p['center_of_mass'],
-                    'positions': [p.tolist() if isinstance(p, np.ndarray) else list(p) for p in final_positions] if final_positions else [],
-                    'neuron_models': node.neuron_models if hasattr(node, 'neuron_models') else [],
-                    'types': node.types if hasattr(node, 'types') else [],
-                    'parent_id': node.parent.id if hasattr(node, 'parent') and node.parent else None
-                }
-                g_data['nodes'].append(n_data)
             project_data['graphs'].append(g_data)
 
         try:
-            with open(filepath, 'w') as f: json.dump(project_data, f, cls=NumpyEncoder, indent=2)
-            QMessageBox.information(self, "Success", f"Merged project saved with {len(all_graphs)} graphs.")
-        except Exception as e: QMessageBox.critical(self, "Error", str(e))
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(project_data, f, cls=NumpyEncoder, indent=2)
+            n_nodes = sum(len(g['nodes']) for g in project_data['graphs'])
+            n_conns = sum(
+                len(nd.get('connections', []) or [])
+                for g in project_data['graphs']
+                for nd in g['nodes']
+            )
+            QMessageBox.information(
+                self, "Success",
+                f"Merged project saved.\n\n"
+                f"Graphs:  {len(all_graphs)}\n"
+                f"Nodes:   {n_nodes}\n"
+                f"Connections:  {n_conns}\n"
+                f"Dopamine connections (da_source preserved):  {n_dopa_total}"
+            )
+            print(f"[Sewing] Saved {filepath}: {len(all_graphs)} graphs, "
+                  f"{n_nodes} nodes, {n_conns} conns, {n_dopa_total} dopa.")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", str(e))
 
     def on_tab_active(self): pass
