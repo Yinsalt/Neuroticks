@@ -10275,8 +10275,11 @@ class SimulationViewWidget(QWidget):
         self.btn_clear.setStyleSheet("background-color: #444; color: white; border-radius: 4px;")
         
         self.slider_speed = QSlider(Qt.Orientation.Horizontal)
-        self.slider_speed.setToolTip("Animation Delay")
-        self.slider_speed.setRange(0, 200); self.slider_speed.setValue(0)
+        self.slider_speed.setToolTip("Animation Delay (ms zwischen Sim-Ticks). "
+                                     "0 = max speed (Bio-Time rast). "
+                                     "16 ≈ 60Hz, default — macht 0.1ms-Steps "
+                                     "visuell nachvollziehbar.")
+        self.slider_speed.setRange(0, 200); self.slider_speed.setValue(16)
         self.slider_speed.valueChanged.connect(self.sigSpeedChanged.emit)
         
         row1.addWidget(self.btn_load)

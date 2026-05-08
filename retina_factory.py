@@ -49,6 +49,7 @@ def build_retina_array(
     foveal_cone_multiplier: Optional[float] = 4.0,
     verbose: bool = True,
     min_spacing_check: bool = True,
+    connect_recorders: bool = True,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Erstellt eine Retina pro Position.
@@ -63,12 +64,20 @@ def build_retina_array(
                                   n_cones_foveal (Default 4.0).
         verbose:       Debug-Output
         min_spacing_check: Warnt wenn Positionen zu dicht beieinander sind.
+        connect_recorders: Wenn True (default für BC) wird pro Retina-Output-
+                           Pop ein spike_recorder erzeugt und verbunden.
+                           False = die Retina läuft rein mit step_current_
+                           generators, ohne jegliche Detektoren — schneller
+                           und ohne Memory-Leak in NEST. Server-seitig
+                           explizit auf False zu setzen ist die empfohlene
+                           Production-Konfiguration.
 
     Returns:
         Dict mit Integer-Keys (0, 1, 2, ...) und pro Retina:
             'retina':      Retina-Objekt
             'feeder':      RetinaInputFeeder
-            'recorders':   Dict[str, nest.NodeCollection]
+            'recorders':   Dict[str, nest.NodeCollection]   (leer wenn
+                                                              connect_recorders=False)
             'position':    np.ndarray [x, y, z]
             'output_pops': Dict[str, nest.NodeCollection]
             'feeder_cfg':  Dict mit der Feeder-Konfiguration (input_resolution!)
@@ -126,12 +135,20 @@ def build_retina_array(
 
         feeder = retina.create_input_feeder(deepcopy(effective_feeder_cfg))
 
+        # Recorder pro Output-Pop NUR wenn explizit angefordert. Default
+        # True für Backwards-Compat zu bestehenden Aufrufern; server.py
+        # setzt das auf False, weil die Recorder im Production-Loop ein
+        # echter Memory-Leak sind (NEST default record_to='memory'
+        # speichert jeden Spike bis Sim-Ende, niemand liest sie aus).
         recorders = {}
+        if connect_recorders:
+            output_pops = retina.get_output_populations()
+            for name, pop in output_pops.items():
+                sr = nest.Create('spike_recorder')
+                nest.Connect(pop, sr)
+                recorders[name] = sr
+
         output_pops = retina.get_output_populations()
-        for name, pop in output_pops.items():
-            sr = nest.Create('spike_recorder')
-            nest.Connect(pop, sr)
-            recorders[name] = sr
 
         retinas[i] = {
             'retina': retina,

@@ -1324,6 +1324,18 @@ class RetinaTestTabWidget(QWidget):
         )
 
     def _on_play_clicked(self):
+        """Arm playback: bereitet das Video vor, lädt das erste Frame in
+        die Retina, setzt den Accumulator zurück. Treibt aber NICHT
+        selber NEST — das macht ausschließlich der globale Res-Timer im
+        Main. Pro globalem Tick wird `on_global_tick(step_ms)` aufgerufen,
+        was den Frame-Wechsel managed.
+
+        Vorher hatte dieser Tab einen eigenen QTimer der parallel zu
+        `Main.sim_timer` lief und selber `nest.Simulate(chunk)`
+        aufrief. Das hat den globalen Res-Slider effektiv tot gemacht
+        weil NEST keine zwei `Simulate()` gleichzeitig erlaubt — und
+        der globale Timer war dadurch das schwächere Glied.
+        """
         if self.retina is None:
             QMessageBox.warning(self, "No Retina", "Press 'Build Retina' first.")
             return
@@ -1332,18 +1344,6 @@ class RetinaTestTabWidget(QWidget):
                                 "Load a video first — Eye-Tab only fires "
                                 "while a video is being played back.")
             return
-
-        # Refuse if the global sim_timer is running. NEST cannot have two
-        # Simulate() in flight at once → 'Prepare called twice'.
-        if self.main_window is not None:
-            global_st = getattr(self.main_window, 'sim_timer', None)
-            if global_st is not None and global_st.isActive():
-                QMessageBox.warning(
-                    self, "Global Sim is running",
-                    "The top-bar continuous simulation is currently running.\n\n"
-                    "Pause or stop the global sim first, then press Play here."
-                )
-                return
 
         fps = self._get_effective_fps()
         if fps is None or fps <= 0:
@@ -1355,9 +1355,6 @@ class RetinaTestTabWidget(QWidget):
         # Trigger the INTERACTIVE-tab LOAD button equivalent so the new
         # retina population gets registered in the 3D scatter view —
         # load_scene() rebuilds gid_to_idx from the current graph_list.
-        # We deliberately do NOT touch the top-bar step spinner: that is
-        # the user's "neural microscope" master clock and it dictates
-        # every nest.Simulate() chunk in this Eye-Tab. Read-only here.
         if self.main_window is not None:
             try:
                 sv = getattr(self.main_window, 'simulation_view', None)
@@ -1372,8 +1369,7 @@ class RetinaTestTabWidget(QWidget):
         # the accumulator compares fractionally.
         self._frame_bio_ms = 1000.0 / fps
 
-        # Sanity: log the master step so user can see what they signed
-        # up for. Read fresh; never cached, never overwritten.
+        # Sanity-Log: was der globale Driver pro Tick liefert.
         try:
             res = float(nest.GetKernelStatus('resolution'))
         except Exception:
@@ -1384,27 +1380,38 @@ class RetinaTestTabWidget(QWidget):
         else:
             master_step = res
 
-        # Reset accumulator state for a fresh Play session.
+        # ── Erstes Frame sofort feeden ────────────────────────────────
+        # Wenn der globale Timer als nächstes nest.Simulate ruft, soll
+        # die Retina ab Tick 1 schon Input haben. Sonst erste Tick(s)
+        # mit leerem Eingang.
         self._frame_bio_accum = 0.0
         self._current_frame_fed = False
         self._last_preview_idx = -1
         self._last_bgr = None
 
-        # Tick frequency: 100Hz real-time, decoupled from video FPS.
-        # Frame advances are driven by the accumulator, not by wall clock.
-        tick_interval_ms = 10
+        # Accumulator-Reset: erstes Frame wird im ersten on_global_tick
+        # geladen (genau wie bisher die Logik war), aber wir rufen den
+        # Tick einmal selber auf um's gleich auf Tick 0 zu erledigen.
+        # step_ms=0 reicht — der Hook lädt Frame und feedet, ohne den
+        # Akkumulator zu bewegen.
+        try:
+            self._feed_next_frame_if_needed()
+        except Exception as e:
+            self._log(f"initial feed() error: {e}", color="#EF5350")
+            import traceback; traceback.print_exc()
+            return
 
         self._playing = True
-        self.play_timer.start(tick_interval_ms)
         self.btn_play.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self._log(
-            f"▶ Play @ {fps:.2f} fps  (frame={self._frame_bio_ms:.2f}ms bio, "
-            f"top-bar step={master_step:.2f}ms, res={res}ms)",
+            f"▶ Armed @ {fps:.2f} fps  (frame={self._frame_bio_ms:.2f}ms bio, "
+            f"global step={master_step:.2f}ms, res={res}ms)  — "
+            f"globaler Res-Timer treibt jetzt jeden Schritt.",
             color="#81C784",
         )
 
-        # Spike recorders + render timer for the live 3D view.
+        # Spike recorders + 3D render timer wie zuvor.
         if self.main_window is not None:
             try:
                 if hasattr(self.main_window, '_ensure_spike_recorders'):
@@ -1423,109 +1430,71 @@ class RetinaTestTabWidget(QWidget):
             except Exception as e:
                 self._log(f"Auto-switch warning: {e}", color="#FFA726")
 
-    def _on_pause_clicked(self):
-        self._playing = False
-        self.play_timer.stop()
-        self.btn_play.setEnabled(True)
-        self.btn_pause.setEnabled(False)
+    def _feed_next_frame_if_needed(self):
+        """Lädt das nächste Frame und feedet die Retina, wenn das
+        aktuelle Frame schon "verbraucht" ist (_current_frame_fed=False
+        nach Akkumulator-Überlauf, oder initial)."""
+        if self._current_frame_fed:
+            return
+        triple = self.video_reader.read_next()
+        if triple is None:
+            if self.chk_loop.isChecked():
+                self.video_reader.seek(0)
+                triple = self.video_reader.read_next()
+            if triple is None:
+                # Video zu Ende, kein Loop → disarmen
+                self._on_pause_clicked()
+                return
+        lms, intensity, bgr = triple
+        self.feeder.feed(lms, intensity)
+        self._current_frame_fed = True
+        self._frame_bio_accum = 0.0
+        self._last_bgr = bgr
 
-    def _on_rewind_clicked(self):
-        if self.video_reader is not None:
-            self.video_reader.seek(0)
-            self._show_preview_frame()
-            self.progress.setValue(0)
-            self.lbl_frame.setText("Frame: 0")
+    def on_global_tick(self, step_ms: float):
+        """Public hook. Wird vom Main vor jedem `nest.Simulate(step_ms)`
+        aufgerufen.
 
-    def _on_play_tick(self):
-        """One tick:
-          - if accumulator says "frame done" → load + feed next frame
-          - simulate exactly one resolution-step (chunk), accumulate
-          - pump visualization
-          - update UI
-        Frame advance is purely accumulator-driven: as soon as
-        accumulator >= frame_bio_ms, advance regardless of how much
-        was overshot.
+        Verantwortlichkeiten:
+          - Wenn nicht armed: nichts tun.
+          - Falls Akkumulator durch ein Frame-Bio-Intervall hindurch ist:
+            das nächste Frame holen + feeden BEVOR der globale Timer
+            simuliert.
+          - Akkumulator um den step_ms erhöhen (nach dem Simulate würde
+            es semantisch sauberer sein, aber wir machen's vorher mit
+            dem Trick dass beim Threshold-Überschreiten das Frame-Flag
+            für den NÄCHSTEN Tick gesetzt wird — dadurch kommt das
+            nächste Frame genau im richtigen globalen Tick rein).
+
+        UI-Updates (Frame-Counter, Progress, Preview) macht
+        `on_after_global_tick`, weil NEST-Bio-Time erst dann gestiegen ist.
         """
         if not self._playing or self.retina is None or self.video_reader is None:
             return
-
-        # Bail if global sim_timer became active mid-play.
-        if self.main_window is not None:
-            st = getattr(self.main_window, 'sim_timer', None)
-            if st is not None and st.isActive():
-                self._log(
-                    "✗ Global sim_timer started — Eye-Tab Play auto-paused.",
-                    color="#EF5350",
-                )
-                self._on_pause_clicked()
-                return
-
-        # ── Frame advance ─────────────────────────────────────────────
-        if not self._current_frame_fed:
-            triple = self.video_reader.read_next()
-            if triple is None:
-                if self.chk_loop.isChecked():
-                    self.video_reader.seek(0)
-                    triple = self.video_reader.read_next()
-                if triple is None:
-                    self._on_pause_clicked()
-                    return
-            lms, intensity, bgr = triple
-            try:
-                self.feeder.feed(lms, intensity)
-            except Exception as e:
-                self._log(f"feed() error: {e}", color="#EF5350")
-                import traceback; traceback.print_exc()
-                self._on_pause_clicked()
-                return
-            self._current_frame_fed = True
-            self._frame_bio_accum = 0.0
-            self._last_bgr = bgr
-
-        # ── Simulate one chunk = step from top-bar (snapped to res) ───
-        # Read live each tick so the user can adjust mid-playback. NEST
-        # requires the sim time to be a multiple of resolution.
+        # Falls der vorherige Tick den Akkumulator über das Frame-Limit
+        # geschoben hat, lädt der jetzige Tick das nächste Frame.
         try:
-            res = float(nest.GetKernelStatus('resolution'))
-        except Exception:
-            res = 0.1
-        if (self.main_window is not None
-                and hasattr(self.main_window, 'global_step_spin')):
-            requested = float(self.main_window.global_step_spin.value())
-        else:
-            requested = res
-        n_steps = max(1, int(round(requested / res)))
-        chunk = n_steps * res
-
-        try:
-            nest.Simulate(chunk)
+            self._feed_next_frame_if_needed()
         except Exception as e:
-            self._log(f"Simulate() error: {e}", color="#EF5350")
+            self._log(f"feed() error: {e}", color="#EF5350")
             self._on_pause_clicked()
             return
-        self._frame_bio_accum += chunk
 
-        # ── Pump visualization ────────────────────────────────────────
-        if self.main_window is not None:
-            try:
-                if hasattr(self.main_window, '_distribute_simulation_data'):
-                    self.main_window._distribute_simulation_data()
-                if hasattr(self.main_window, 'current_nest_time'):
-                    self.main_window.current_nest_time = (
-                        nest.GetKernelStatus('biological_time')
-                    )
-                    if hasattr(self.main_window, 'update_global_time_display'):
-                        self.main_window.update_global_time_display(
-                            self.main_window.current_nest_time
-                        )
-            except Exception:
-                pass
+        # Akkumulator um den globalen Step inkrementieren. Wenn dadurch
+        # das Frame-Bio-Intervall überschritten wird, markieren wir das
+        # Frame als "verbraucht" — nächster Tick lädt das nächste.
+        self._frame_bio_accum += float(step_ms)
+        if (self._frame_bio_ms is not None
+                and self._frame_bio_accum >= self._frame_bio_ms):
+            self._current_frame_fed = False
 
-        # ── Frame done check (pure accumulator) ───────────────────────
-        if self._frame_bio_accum >= self._frame_bio_ms:
-            self._current_frame_fed = False  # Next tick will feed next frame
-
-        # ── UI updates ────────────────────────────────────────────────
+    def on_after_global_tick(self):
+        """Nach dem globalen `nest.Simulate`. Updated nur Retina-Tab-
+        eigene UI-Elemente (Frame-Index, Progress, Preview-Pixmap).
+        Liveplots/3D-View werden vom Main eh schon via
+        `_distribute_simulation_data()` versorgt."""
+        if not self._playing or self.video_reader is None:
+            return
         try:
             self.lbl_nest_t.setText(
                 f"NEST t: {nest.GetKernelStatus('biological_time'):.1f} ms"
@@ -1539,8 +1508,7 @@ class RetinaTestTabWidget(QWidget):
                       / max(1, self.video_reader.n_frames))
             self.progress.setValue(pct)
 
-        # Preview pixmap: only when we've moved to a new frame (not per
-        # chunk; the BGR doesn't change within a frame anyway).
+        # Preview-Pixmap nur wenn neuer Frame.
         if (self._last_preview_idx != self.video_reader.current_idx
                 and self._last_bgr is not None):
             self._last_preview_idx = self.video_reader.current_idx
@@ -1558,6 +1526,33 @@ class RetinaTestTabWidget(QWidget):
                 pass
 
         self.requestVizRefresh.emit()
+
+    def _on_pause_clicked(self):
+        """Disarm: stoppt den Frame-Feed. Der globale Res-Timer kann
+        weiter laufen, kriegt aber im Hook nichts mehr zu tun."""
+        self._playing = False
+        self.btn_play.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+
+    def _on_rewind_clicked(self):
+        if self.video_reader is not None:
+            self.video_reader.seek(0)
+            self._show_preview_frame()
+            self.progress.setValue(0)
+            self.lbl_frame.setText("Frame: 0")
+
+    def _on_play_tick(self):
+        """DEPRECATED.
+
+        Vorher der eigene Treiber dieses Tabs: timer-driven, rief selber
+        `nest.Simulate(chunk)` auf, blockierte den globalen Res-Timer im
+        Main. Jetzt ersetzt durch `on_global_tick(step_ms)` /
+        `on_after_global_tick()`, die der globale Timer aufruft.
+
+        Bleibt als no-op stehen damit ein eventueller `play_timer` aus
+        Altcode nicht crasht. Sollte nirgends mehr aufgerufen werden.
+        """
+        return
 
     def _on_diag_clicked(self):
         """User-triggered status snapshot. Shows cumulative spike counts

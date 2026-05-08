@@ -3062,7 +3062,21 @@ class MainWindow(QMainWindow):
         self.sim_timer = QTimer()
         self.sim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.sim_timer.timeout.connect(self.on_sim_timer_timeout)
-        
+
+        # ─── Default-Tick-Frequenz: ~60 Hz ────────────────────────────
+        # Vorher: start(0) → Qt feuert so schnell wie möglich (mehrere
+        # tausend Hz). Bei kleinem Res-Wert (z.B. 0.1ms) rast der
+        # Bio-Time-Counter dadurch in Sekunden auf hunderte ms — das
+        # was eigentlich "in 0.1-Schritten sichtbar" sein sollte ist
+        # optisch ein Sprung. 16ms = 60Hz ist UI-flüssig und macht
+        # einzelne Steps lesbar:
+        #   step=0.1ms × 60Hz =   6 ms biotime / Sekunde  (Slow-Mo)
+        #   step=1.0ms × 60Hz =  60 ms biotime / Sekunde
+        #   step=25ms  × 60Hz = 1500 ms biotime / Sekunde (1.5× realtime)
+        # Der Speed-Slider in simulation_view kann das übersteuern
+        # (Range 0..200 ms) — Slider auf 0 = wieder max speed.
+        self.sim_timer.setInterval(16)
+
         self.sim_mode = 'continuous'
         self.sim_target_time = 0.0
         self.current_nest_time = 0.0
@@ -3140,13 +3154,42 @@ class MainWindow(QMainWindow):
         akkumulierten Sim-Zeit aktualisiert. Jeder Pfad in Neuroticks der
         NEST live laufen lässt (continuous-loop, live-run, headless) sollte
         diesen Helper benutzen — sonst bleibt das global_time_label hängen.
+
+        Subsystem-Hooks: vor dem Simulate ruft die Routine
+        `on_global_tick(step)` an allen "armed" Subsystemen (z.B. dem
+        Retina-Tab), damit sie genau zum richtigen Zeitpunkt Inputs in
+        die Simulation feeden können — etwa das nächste Video-Frame in
+        die Retina. Nach dem Simulate gibt's `on_after_global_tick()` für
+        UI-Updates die NEST-Bio-Time brauchen (Frame-Counter, Preview
+        usw.). Subsysteme die nicht armed sind sind no-op.
+
         Reset auf 0 passiert ohnehin in reset_and_restart()."""
-        nest.Simulate(float(step))
+        step = float(step)
+
+        # Pre-Simulate-Hooks: Frame-Feed o.ä.
+        rt = getattr(self, 'retina_test_tab', None)
+        if rt is not None:
+            try:
+                rt.on_global_tick(step)
+            except Exception as e:
+                # Hook-Fehler dürfen den globalen Timer nicht töten.
+                print(f"[retina pre-tick warn] {e}")
+
+        nest.Simulate(step)
+
         # NEST-Zeit auslesen + lokale Akkumulation als Backup
-        local_t = float(getattr(self, 'current_nest_time', 0.0)) + float(step)
+        local_t = float(getattr(self, 'current_nest_time', 0.0)) + step
         nest_t = self._get_nest_time()
         self.current_nest_time = max(local_t, nest_t)
         self.update_global_time_display(self.current_nest_time)
+
+        # Post-Simulate-Hooks: UI-Updates die Bio-Time brauchen.
+        if rt is not None:
+            try:
+                rt.on_after_global_tick()
+            except Exception as e:
+                print(f"[retina post-tick warn] {e}")
+
         return self.current_nest_time
     def update_simulation_speed(self, slider_value):
         if hasattr(self, 'sim_timer'):
@@ -3156,7 +3199,23 @@ class MainWindow(QMainWindow):
     def start_continuous_simulation(self, step_size, max_duration=None):
 
         step_val = self.global_step_spin.value()
-        
+
+        # NEST kann nur Vielfache der kernel resolution simulieren. Wenn
+        # der User z.B. 0.05ms eingibt während res=0.1, würde
+        # nest.Simulate(0.05) sofort crashen. Wir lesen die aktuelle
+        # Resolution und clampen step_val auf >= res. Falls step_val
+        # kein sauberes Vielfaches von res ist, nimmt NEST das nächste
+        # darunterliegende Vielfache — das ist OK, der globale Timer
+        # ruft den Tick eh wiederholt auf.
+        try:
+            res = float(nest.GetKernelStatus('resolution'))
+        except Exception:
+            res = 0.1
+        if step_val < res:
+            print(f"[res] global step {step_val}ms < kernel resolution "
+                  f"{res}ms; clamping to {res}ms.")
+            step_val = res
+
         self.sim_mode = 'continuous'
         self.sim_step_size = step_val
         
@@ -3179,8 +3238,11 @@ class MainWindow(QMainWindow):
         
         if hasattr(self, 'simulation_view'):
             self.simulation_view.start_rendering()
-            
-        self.sim_timer.start(0)
+
+        # start() ohne Argument benutzt das in init_simulation_timer
+        # gesetzte Interval (16ms = 60Hz). Vorher start(0) hat das
+        # überschrieben und auf max speed gefeuert.
+        self.sim_timer.start()
 
 
     def step_simulation(self, step_size):
@@ -3190,6 +3252,7 @@ class MainWindow(QMainWindow):
         
         self.sim_timer.setSingleShot(True)
         self._ensure_spike_recorders()
+        # 0ms ist hier OK weil singleShot — feuert sofort einmal.
         self.sim_timer.start(0)
 
 
@@ -3247,6 +3310,20 @@ class MainWindow(QMainWindow):
 
     def on_sim_timer_timeout(self):
         try:
+            # Step pro Tick LIVE aus dem Spinner lesen, damit der User
+            # mitten im Lauf scrollen kann ohne Pause/Resume. Auf NEST-
+            # Resolution clampen — Spinner-Min ist 0.1, Resolution
+            # default 0.1ms, also greift der clamp nur wenn jemand die
+            # Kernel-Resolution erhöht hat.
+            try:
+                res = float(nest.GetKernelStatus('resolution'))
+            except Exception:
+                res = 0.1
+            live_step = float(self.global_step_spin.value())
+            if live_step < res:
+                live_step = res
+            self.sim_step_size = live_step
+
             if self.sim_mode == 'continuous' and self.sim_target_time != float('inf'):
                 remaining = self.sim_target_time - self.current_nest_time
                 if remaining <= 0.0001:

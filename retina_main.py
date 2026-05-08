@@ -2218,7 +2218,7 @@ class Retina:
 
         print(f"\n  TOTAL: {sum(self.counts.values()):,}")
 
-    def create_spike_recorders(self) -> Dict[str, 'nest.NodeCollection']:
+    def create_spike_recorders(self, attach: bool = True) -> Dict[str, 'nest.NodeCollection']:
         """Erzeugt einen spike_recorder pro Population.
 
         Convenience-Methode fürs Debugging — verbindet ALLE Populationen
@@ -2228,7 +2228,15 @@ class Retina:
 
         Für Production lieber selektiv aufzeichnen (nur Ganglien ->
         spart massiv RAM bei langen Simulationen).
+
+        Args:
+            attach: Wenn False, wird kein einziger Recorder erzeugt;
+                    Methode liefert ein leeres Dict. Spiegelt das
+                    connect_recorders-Flag von retina_factory.build_retina_array
+                    für API-Konsistenz; default True für Backwards-Compat.
         """
+        if not attach:
+            return {}
         recorders = {}
         for name, pop in self.populations.items():
             sr = nest.Create('spike_recorder')
