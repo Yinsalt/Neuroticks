@@ -237,6 +237,88 @@ def convert_widget_to_graph_format(graph_id):
     del graph_parameters[graph_id]
     return converted
 
+class MaximizableViewport(QWidget):
+    """Wrapper-Container für ein Viz-Widget, das einen kleinen Maximize/
+    Minimize-Button als Overlay rechts unten anbietet.
+
+    Rendering-Plumbing: das eigentliche Viz-Widget liegt in einem
+    QVBoxLayout, der Button ist ein Child mit absoluten Koordinaten
+    (per resizeEvent positioniert) — damit kann er weder Layout noch
+    Aspect-Ratio des Viz beeinflussen.
+
+    Den Mode-Switch macht NICHT diese Klasse selber, sondern die
+    sigToggleMaximize-Signal-Connection im Editor-Widget. Grund: das
+    Maximieren bedeutet auf Editor-Ebene "Sidebar weg, anderes Layout
+    aktiv" — das kann nur der Editor entscheiden.
+    """
+    sigToggleMaximize = pyqtSignal(object)  # emits self
+
+    def __init__(self, inner_widget, parent=None):
+        super().__init__(parent)
+        self._inner = inner_widget
+        self._is_maximized = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(inner_widget)
+
+        # Overlay-Button: Child von self (nicht im Layout!), wird in
+        # resizeEvent positioniert. Stylesheet ahmt typische OS-Window-
+        # Buttons nach: dezenter Hintergrund, prägnante Glyphe.
+        self.btn_max = QPushButton("⛶", self)  # U+26F6 Square Four
+        self.btn_max.setToolTip("Maximize / Minimize")
+        self.btn_max.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_max.setFixedSize(28, 28)
+        self.btn_max.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(40, 40, 40, 200);
+                color: #DDD;
+                border: 1px solid #555;
+                border-radius: 4px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(80, 80, 80, 230);
+                color: #FFF;
+                border: 1px solid #2196F3;
+            }
+            QPushButton:pressed {
+                background-color: rgba(20, 20, 20, 230);
+            }
+        """)
+        self.btn_max.clicked.connect(
+            lambda: self.sigToggleMaximize.emit(self))
+        # Über alle Geschwister-Widgets (3D-Viewer etc.).
+        self.btn_max.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Button rechts unten mit 8 px Margin platzieren.
+        margin = 8
+        self.btn_max.move(
+            self.width() - self.btn_max.width() - margin,
+            self.height() - self.btn_max.height() - margin,
+        )
+        self.btn_max.raise_()
+
+    def set_maximized_state(self, is_max: bool):
+        """Setzt nur die Glyphe + State-Flag. Das eigentliche
+        Reparenting läuft im Editor."""
+        self._is_maximized = is_max
+        # ⛶ = maximize-Hint (vier Ecken nach außen)
+        # 🗗 würde "restore" sein, ist aber nicht zuverlässig in jedem
+        # Qt-Font; daher ⛶ auch im max-Zustand, mit anderem Tooltip.
+        # Alternative: Char "−" (Minus) wenn max-Glyphe nicht mag.
+        if is_max:
+            self.btn_max.setText("🗗")
+            self.btn_max.setToolTip("Restore")
+        else:
+            self.btn_max.setText("⛶")
+            self.btn_max.setToolTip("Maximize")
+
+
 class PreviewWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1168,24 +1250,145 @@ class MainWindow(QMainWindow):
         editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(0)
-        
+
+        # ─── Editor-View-Stack ───────────────────────────────────────
+        # Slot 0: normales Layout (Sidebar, Top-Right-Panel, Bottom).
+        # Slot 1: maximierter Viewport (eines der 4 Viz-Widgets fullscreen,
+        #          mit Restore-Button rechts unten).
+        # Beim Maximize wird das gewählte Viz-Widget aus self.vis_stack
+        # rausgehoben und in Slot 1 reparented; beim Restore wieder
+        # zurückgesteckt.
+        self.editor_view_stack = QStackedWidget()
+
+        # ── Slot 0: normaler Editor ──
+        normal_view = QWidget()
+        normal_layout = QVBoxLayout(normal_view)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(0)
+
         top_layout = QHBoxLayout()
         top_left = self.create_top_left()
         self.graph_overview = GraphOverviewWidget(self, graph_list=graph_list)
         top_layout.addLayout(top_left, 7)
         top_layout.addWidget(self.graph_overview, 3)
-        
+
         bottom_layout = QHBoxLayout()
         bottom_left = self.create_bottom_left()
         bottom_right = self.create_bottom_right()
-        
+
         bottom_layout.addLayout(bottom_left, 7)
         bottom_layout.addLayout(bottom_right, 3)
-        
-        editor_layout.addLayout(top_layout, 3)
-        editor_layout.addLayout(bottom_layout, 2)
-        
+
+        normal_layout.addLayout(top_layout, 3)
+        normal_layout.addLayout(bottom_layout, 2)
+
+        # ── Slot 1: maximierter Viewport (anfangs leer) ──
+        # Bekommt beim Maximize das Viz-Widget reingesetzt.
+        self.editor_max_slot = QWidget()
+        self.editor_max_slot_layout = QVBoxLayout(self.editor_max_slot)
+        self.editor_max_slot_layout.setContentsMargins(0, 0, 0, 0)
+        self.editor_max_slot_layout.setSpacing(0)
+
+        self.editor_view_stack.addWidget(normal_view)
+        self.editor_view_stack.addWidget(self.editor_max_slot)
+
+        editor_layout.addWidget(self.editor_view_stack)
+
+        # State für das aktuell maximierte Viewport (None wenn nichts
+        # maximiert).
+        self._maximized_viewport = None
+
         return editor
+
+    def _on_viz_toggle_maximize(self, viewport):
+        """Behandelt Klicks auf den Maximize/Minimize-Button eines
+        MaximizableViewport.
+
+        Logik:
+          - wenn nichts maximiert ist und ein Viewport will maximieren:
+            den Viewport aus vis_stack rausnehmen, in den max_slot
+            packen, editor_view_stack auf Slot 1 stellen.
+          - wenn der gleiche Viewport schon maximiert ist (Klick auf
+            Restore): rückwärts. Aus max_slot raus, zurück in vis_stack
+            an die richtige Position, editor_view_stack auf Slot 0.
+          - wenn ein ANDERER Viewport maximiert war: theoretisch
+            unmöglich weil im max-Modus die Sidebar weg ist und kein
+            anderer Button erreichbar — aber zur Sicherheit fangen
+            wir's: erst alten restoren, dann neuen maximieren.
+        """
+        if not hasattr(self, 'editor_view_stack'):
+            return
+
+        # ── Restore-Pfad ──
+        if self._maximized_viewport is viewport:
+            self._restore_viewport()
+            return
+
+        # ── Falls schon was anderes maximiert ist, erst restoren ──
+        if self._maximized_viewport is not None:
+            self._restore_viewport()
+
+        # ── Maximize ──
+        # Index merken damit wir beim Restore an die richtige Stelle
+        # zurückkommen — die Insert-Reihenfolge in vis_stack ist die
+        # Index-Quelle für die Sidebar-Buttons (Neurons=0, Graph=1,
+        # Firing=2, Flow=3).
+        idx = self.vis_stack.indexOf(viewport)
+        if idx < 0:
+            return  # Viewport gehört nicht zum vis_stack — kein-Op.
+
+        self._maximized_origin_index = idx
+
+        # vis_stack.removeWidget reparented das Widget auf None und
+        # markiert es als hidden. Direkt danach in den max_slot-Layout
+        # packen UND explizit show() rufen — sonst bleibt das Viewport
+        # unsichtbar (Stack-internes Hide-Flag wird durch addWidget
+        # nicht zurückgesetzt).
+        self.vis_stack.removeWidget(viewport)
+        self.editor_max_slot_layout.addWidget(viewport)
+        viewport.show()
+
+        viewport.set_maximized_state(True)
+        self.editor_view_stack.setCurrentIndex(1)
+        self._maximized_viewport = viewport
+
+    def _restore_viewport(self):
+        """Hebt den maximierten Zustand auf — Viewport zurück in die
+        Sidebar-Position, Editor zurück auf normales Layout."""
+        viewport = self._maximized_viewport
+        if viewport is None:
+            return
+
+        # Aus dem max_slot rausnehmen.
+        self.editor_max_slot_layout.removeWidget(viewport)
+
+        # An die ursprüngliche Index-Position zurück. insertWidget
+        # akzeptiert auch Indizes am Ende ohne zu meckern, aber wir
+        # nutzen den gemerkten Index. show() nochmal explizit, weil
+        # removeWidget() oben das Hidden-Flag wieder setzt.
+        idx = getattr(self, '_maximized_origin_index', -1)
+        if idx < 0 or idx > self.vis_stack.count():
+            self.vis_stack.addWidget(viewport)
+        else:
+            self.vis_stack.insertWidget(idx, viewport)
+        viewport.show()
+
+        viewport.set_maximized_state(False)
+        self.editor_view_stack.setCurrentIndex(0)
+        self._maximized_viewport = None
+        self._maximized_origin_index = -1
+
+        # Sidebar-Sync: das Sidebar-Switching benutzt setCurrentIndex
+        # auf vis_stack. Wenn der maximiert-zurückgesteckte Viewport
+        # nicht zufällig der zuletzt angezeigte war, will der User ihn
+        # vermutlich gerade SEHEN (er hat ja gerade auf Restore geklickt).
+        # Also bringen wir ihn nach vorne.
+        self.vis_stack.setCurrentWidget(viewport)
+        # Und passenden Sidebar-Button checken (Neurons=0..Flow=3
+        # sind direkt indizes der nav_buttons).
+        if hasattr(self, 'nav_buttons') and 0 <= idx < len(self.nav_buttons):
+            for i, b in enumerate(self.nav_buttons):
+                b.setChecked(i == idx)
   
     
 
@@ -1309,11 +1512,23 @@ class MainWindow(QMainWindow):
         self.graph_skeleton_wrapper = self.create_graph_visualization()
         self.blink_widget = BlinkingNetworkWidget(graph_list)
         self.flow_widget = FlowFieldWidget(graph_list)
-        
-        self.vis_stack.addWidget(self.neuron_plotter)
-        self.vis_stack.addWidget(self.graph_skeleton_wrapper)
-        self.vis_stack.addWidget(self.blink_widget)
-        self.vis_stack.addWidget(self.flow_widget)
+
+        # Die ersten vier Visualisierungen kriegen einen Maximize-
+        # Wrapper. Die Sim-Dashboard- und Other-Tab-Slots nicht (kein
+        # Bedarf, das sind Steuerflächen, kein Live-Viewport).
+        self.viz_neurons    = MaximizableViewport(self.neuron_plotter)
+        self.viz_graph      = MaximizableViewport(self.graph_skeleton_wrapper)
+        self.viz_firing     = MaximizableViewport(self.blink_widget)
+        self.viz_flow       = MaximizableViewport(self.flow_widget)
+
+        for v in (self.viz_neurons, self.viz_graph,
+                  self.viz_firing, self.viz_flow):
+            v.sigToggleMaximize.connect(self._on_viz_toggle_maximize)
+
+        self.vis_stack.addWidget(self.viz_neurons)
+        self.vis_stack.addWidget(self.viz_graph)
+        self.vis_stack.addWidget(self.viz_firing)
+        self.vis_stack.addWidget(self.viz_flow)
         self.sim_dashboard = SimulationDashboardWidget(graph_list)
         
         self.sim_dashboard.requestStartSimulation.connect(self.start_headless_simulation)
@@ -1476,7 +1691,13 @@ class MainWindow(QMainWindow):
     
         
     def _switch_view(self, index, sim_mode=False):
-        
+        # Wenn ein Viewport maximiert ist und der User über die Sidebar
+        # auf einen anderen Viewport klickt: erst restoren, sonst zeigt
+        # vis_stack den maximierten gar nicht (er hängt im max_slot).
+        if (self._maximized_viewport is not None
+                and getattr(self, '_maximized_origin_index', -1) != index):
+            self._restore_viewport()
+
         self.vis_stack.setCurrentIndex(index)
         
         if index == 2:
@@ -3062,21 +3283,7 @@ class MainWindow(QMainWindow):
         self.sim_timer = QTimer()
         self.sim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.sim_timer.timeout.connect(self.on_sim_timer_timeout)
-
-        # ─── Default-Tick-Frequenz: ~60 Hz ────────────────────────────
-        # Vorher: start(0) → Qt feuert so schnell wie möglich (mehrere
-        # tausend Hz). Bei kleinem Res-Wert (z.B. 0.1ms) rast der
-        # Bio-Time-Counter dadurch in Sekunden auf hunderte ms — das
-        # was eigentlich "in 0.1-Schritten sichtbar" sein sollte ist
-        # optisch ein Sprung. 16ms = 60Hz ist UI-flüssig und macht
-        # einzelne Steps lesbar:
-        #   step=0.1ms × 60Hz =   6 ms biotime / Sekunde  (Slow-Mo)
-        #   step=1.0ms × 60Hz =  60 ms biotime / Sekunde
-        #   step=25ms  × 60Hz = 1500 ms biotime / Sekunde (1.5× realtime)
-        # Der Speed-Slider in simulation_view kann das übersteuern
-        # (Range 0..200 ms) — Slider auf 0 = wieder max speed.
-        self.sim_timer.setInterval(16)
-
+        
         self.sim_mode = 'continuous'
         self.sim_target_time = 0.0
         self.current_nest_time = 0.0
@@ -3154,42 +3361,13 @@ class MainWindow(QMainWindow):
         akkumulierten Sim-Zeit aktualisiert. Jeder Pfad in Neuroticks der
         NEST live laufen lässt (continuous-loop, live-run, headless) sollte
         diesen Helper benutzen — sonst bleibt das global_time_label hängen.
-
-        Subsystem-Hooks: vor dem Simulate ruft die Routine
-        `on_global_tick(step)` an allen "armed" Subsystemen (z.B. dem
-        Retina-Tab), damit sie genau zum richtigen Zeitpunkt Inputs in
-        die Simulation feeden können — etwa das nächste Video-Frame in
-        die Retina. Nach dem Simulate gibt's `on_after_global_tick()` für
-        UI-Updates die NEST-Bio-Time brauchen (Frame-Counter, Preview
-        usw.). Subsysteme die nicht armed sind sind no-op.
-
         Reset auf 0 passiert ohnehin in reset_and_restart()."""
-        step = float(step)
-
-        # Pre-Simulate-Hooks: Frame-Feed o.ä.
-        rt = getattr(self, 'retina_test_tab', None)
-        if rt is not None:
-            try:
-                rt.on_global_tick(step)
-            except Exception as e:
-                # Hook-Fehler dürfen den globalen Timer nicht töten.
-                print(f"[retina pre-tick warn] {e}")
-
-        nest.Simulate(step)
-
+        nest.Simulate(float(step))
         # NEST-Zeit auslesen + lokale Akkumulation als Backup
-        local_t = float(getattr(self, 'current_nest_time', 0.0)) + step
+        local_t = float(getattr(self, 'current_nest_time', 0.0)) + float(step)
         nest_t = self._get_nest_time()
         self.current_nest_time = max(local_t, nest_t)
         self.update_global_time_display(self.current_nest_time)
-
-        # Post-Simulate-Hooks: UI-Updates die Bio-Time brauchen.
-        if rt is not None:
-            try:
-                rt.on_after_global_tick()
-            except Exception as e:
-                print(f"[retina post-tick warn] {e}")
-
         return self.current_nest_time
     def update_simulation_speed(self, slider_value):
         if hasattr(self, 'sim_timer'):
@@ -3199,23 +3377,7 @@ class MainWindow(QMainWindow):
     def start_continuous_simulation(self, step_size, max_duration=None):
 
         step_val = self.global_step_spin.value()
-
-        # NEST kann nur Vielfache der kernel resolution simulieren. Wenn
-        # der User z.B. 0.05ms eingibt während res=0.1, würde
-        # nest.Simulate(0.05) sofort crashen. Wir lesen die aktuelle
-        # Resolution und clampen step_val auf >= res. Falls step_val
-        # kein sauberes Vielfaches von res ist, nimmt NEST das nächste
-        # darunterliegende Vielfache — das ist OK, der globale Timer
-        # ruft den Tick eh wiederholt auf.
-        try:
-            res = float(nest.GetKernelStatus('resolution'))
-        except Exception:
-            res = 0.1
-        if step_val < res:
-            print(f"[res] global step {step_val}ms < kernel resolution "
-                  f"{res}ms; clamping to {res}ms.")
-            step_val = res
-
+        
         self.sim_mode = 'continuous'
         self.sim_step_size = step_val
         
@@ -3238,11 +3400,8 @@ class MainWindow(QMainWindow):
         
         if hasattr(self, 'simulation_view'):
             self.simulation_view.start_rendering()
-
-        # start() ohne Argument benutzt das in init_simulation_timer
-        # gesetzte Interval (16ms = 60Hz). Vorher start(0) hat das
-        # überschrieben und auf max speed gefeuert.
-        self.sim_timer.start()
+            
+        self.sim_timer.start(0)
 
 
     def step_simulation(self, step_size):
@@ -3252,7 +3411,6 @@ class MainWindow(QMainWindow):
         
         self.sim_timer.setSingleShot(True)
         self._ensure_spike_recorders()
-        # 0ms ist hier OK weil singleShot — feuert sofort einmal.
         self.sim_timer.start(0)
 
 
@@ -3310,20 +3468,6 @@ class MainWindow(QMainWindow):
 
     def on_sim_timer_timeout(self):
         try:
-            # Step pro Tick LIVE aus dem Spinner lesen, damit der User
-            # mitten im Lauf scrollen kann ohne Pause/Resume. Auf NEST-
-            # Resolution clampen — Spinner-Min ist 0.1, Resolution
-            # default 0.1ms, also greift der clamp nur wenn jemand die
-            # Kernel-Resolution erhöht hat.
-            try:
-                res = float(nest.GetKernelStatus('resolution'))
-            except Exception:
-                res = 0.1
-            live_step = float(self.global_step_spin.value())
-            if live_step < res:
-                live_step = res
-            self.sim_step_size = live_step
-
             if self.sim_mode == 'continuous' and self.sim_target_time != float('inf'):
                 remaining = self.sim_target_time - self.current_nest_time
                 if remaining <= 0.0001:
