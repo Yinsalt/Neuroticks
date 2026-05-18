@@ -428,14 +428,80 @@ DEFAULT_PARAMS: Dict = {
     # ribbon-Faktor. 10 ist ein konservativer Mittelwert.
     'ribbon_konio': 10,
 
+    # --- SHORT-TERM-PLASTICITY (Tsodyks-Markram, opt-in) ---
+    # Aktiviert über 'synapse_model' (siehe unten). Wenn synapse_model =
+    # 'static_synapse' (Default), werden diese Parameter ignoriert.
+    #
+    # Wenn synapse_model = 'tsodyks2_synapse': Ribbon-Synapsen bekommen
+    # echte Vesikel-Pool-Depletion mit exponentieller Erholung. Pro Spike
+    # wird Anteil U vom verfügbaren Pool freigesetzt; Pool erholt sich
+    # mit tau_rec.
+    #
+    # Steady-State bei rein depressiver Synapse (tau_fac=0, u=U konstant)
+    # und Input-Rate nu:
+    #     x_ss = 1 / (1 + U * nu * tau_rec_seconds)
+    # Effektive Synapsen-Stärke = weight * U * x_ss.
+    #
+    # PARAMETER-KALIBRIERUNG:
+    # U=0.2 ist niedrig genug damit selbst bei 100 Hz Bipolar-Rate
+    # ~10% des Pools verfügbar bleiben (statt der 1-2% mit U=0.5).
+    # Damit verhindern wir das "Synapse stirbt bei hoher Rate"-Problem.
+    # tau_fac=0 -> rein depressiv, keine Facilitation (matched primaten-
+    # retinale Ribbon-Synapsen, Singer & Diamond 2006).
+    #
+    # Cone-Pedikel hat schnellere Recovery (~150ms, Choi et al. 2005),
+    # Bipolar-Terminal langsamer (~500ms, Singer & Diamond 2006,
+    # Oesch & Diamond 2011).
+    'synapse_model': 'static_synapse',     # Default = alter Code-Pfad
+
+    # Pro Synapsen-Typ getrennte STP-Parameter:
+    # tau_rec auf die echten Operating-Raten der retinalen Bipolare/Amacrines
+    # kalibriert (BC peripheral OFF ~80 Hz, Amacrine ~100 Hz, Horizontal
+    # peripheral ~175 Hz). Bei den Raten würden längere tau_rec den
+    # Vesikel-Pool dauerhaft auf < 10% drücken; daher kürzer als
+    # Literatur-Defaults für niedrigere Kortex-Raten.
+    'stp_bipolar_to_ganglion': {  # Bipolar-Terminal (BC -> RGC, BC -> AC)
+        'U': 0.2,
+        'tau_rec': 100.0,   # ms — May 2026: weiter verkuerzt von 200ms
+                            # auf 100ms damit System auf Frame-Aenderungen
+                            # (~50ms) reagiert statt zu integrieren.
+                            # Gewichte entsprechend angepasst (Faktor 0.62)
+        'tau_fac': 0.0,     # rein depressiv
+    },
+    'stp_horizontal': {  # OPL — Cone-Pedikel-artig
+        'U': 0.2,
+        'tau_rec': 60.0,    # ms — verkuerzt von 100ms fuer schnelle HC-Antwort
+        'tau_fac': 0.0,
+    },
+    'stp_amacrine': {  # IPL — Amacrine-Output auf BC/RGC
+        'U': 0.2,
+        'tau_rec': 80.0,    # ms — verkuerzt von 150ms fuer responsives AC-Feedback
+        'tau_fac': 0.0,
+    },
+    'stp_konio': {  # Konio-Pfad
+        'U': 0.2,
+        'tau_rec': 100.0,   # ms — verkuerzt von 200ms (analog BC->RGC)
+        'tau_fac': 0.0,
+    },
+
     # --- SYNAPTISCHE GEWICHTE (nS) ---
     # Positive = exzitatorisch, negative = inhibitorisch. In NEST werden
     # inhibitorische Synapsen über negative Gewichte bei iaf_cond_exp
     # realisiert (Umleitung auf tau_syn_in).
     'w_horizontal_to_cone': -0.5,        # Surround-Inhibition
+    'w_bipolar_to_horizontal': 0.8,      # Drive auf HC.
+                                          # May 2026: erst 1.0 -> 0.6 (HC peripheral
+                                          # default 177 Hz war ueber biologisch),
+                                          # dann auf 0.8 hoch weil 0.6 HC foveal
+                                          # auf 3.8 Hz gedrueckt hat. 0.8 ist der
+                                          # Kompromiss: HC peripheral ~150 Hz,
+                                          # HC foveal ~8 Hz.
     'w_bipolar_to_ganglion_midget': 3.0, # Midget: starker einzelner Input
     'w_bipolar_to_ganglion_parasol': 2.5,# Parasol: viele Inputs, etwas schwächer
-    'w_bipolar_to_amacrine': 1.5,
+    'w_bipolar_to_amacrine': 1.0,        # Drive auf AC (frueher 1.5).
+                                          # Reduziert May 2026 weil AC_peripheral
+                                          # default bei 107 Hz statt biologischer
+                                          # ~70-80 Hz operierte.
     'w_amacrine_to_ganglion': -1.0,
     'w_amacrine_to_bipolar': -0.8,
     # Konio: Center-Strom kommt via Feeder (S-Cone-Helligkeit -> step_current),
@@ -549,14 +615,109 @@ DEFAULT_NEURON_PARAMS: Dict = {
 DEFAULT_FEEDER_CONFIG: Dict = {
     'generator_type': 'step_current',
     'input_resolution': (64, 64),
-    'max_current_pa': 800.0,     # Doppelt so hoch wie vorher:
-                                  # typischer Pixel (0.4) -> 320 pA (80 pA über Rheobase)
-                                  # heller Pixel (0.8) -> 640 pA (400 pA über Rheobase)
+    'max_current_pa': 800.0,     # Validierter Default. Versuch der Reduktion
+                                  # auf 350 zeigte: Bipolar-Raten sind nicht
+                                  # durch Step-Current allein bestimmt, sondern
+                                  # durch das Equilibrium aus Step-Current
+                                  # plus Horizontal/Amacrine-Inhibition. Eine
+                                  # Reduktion drueckt die Inhibitoren mit
+                                  # runter, das Equilibrium bleibt im
+                                  # gleichen Bereich (~80 Hz fuer OFF
+                                  # peripheral). Daher 800 als Original.
     'max_rate_hz': 4000.0,
     'poisson_weight_nS': 2.0,
     'contrast_gain': 2.0,         # Verstärkung der Mittel-adaptierten Kontraste.
                                   # 1.0 = nur Mittel abziehen, 2.0 = doppelt verstärkt,
                                   # höher = empfindlicher für kleine Kontraste.
+
+    # ------------------------------------------------------------------------
+    # Photorezeptor-Adaptations-Modus
+    # ------------------------------------------------------------------------
+    # 'weber':         Globaler Mittelwert-Subtract * contrast_gain (Default).
+    #                  Statisch, keine Zeitdynamik. Schnell und robust.
+    #
+    # 'cone_cascade':  Biophysische Angueyra-Phototransduktion.
+    #                  Pro Cone eine ODE-Kaskade mit persistenten State.
+    #                  Liefert biologisch korrekte Time-to-peak (~35ms),
+    #                  Light Adaptation und Dark Recovery.
+    #                  Braucht cone_cascade.py.
+    'adaptation_mode': 'weber',
+
+    # Substep-Größe der Cone-Cascade in ms. 1.0 ist ein robuster Default.
+    # Nur relevant bei adaptation_mode='cone_cascade'.
+    'cone_cascade_dt_ms': 1.0,
+
+    # Skalierung der Cone-Cascade-Stimulus-Empfindlichkeit. Default aus
+    # cone_cascade.STIMULUS_GAIN. Höher = empfindlicher für kleine
+    # Helligkeitsunterschiede.
+    'cone_cascade_stimulus_gain': None,    # None = aus dem Modul nehmen
+
+    # ------------------------------------------------------------------------
+    # Fixational Eye Movements (FEM)
+    # ------------------------------------------------------------------------
+    # Wenn aktiv, wird das Bild vor dem Sampling pro Frame leicht
+    # verschoben. Das modelliert echte Augenbewegungen (Drift) während
+    # einer Fixation. Effekt: jeder Cone sieht über mehrere Frames
+    # leicht unterschiedliche Pixel -> macht die Cone-Cascade-Adaptation
+    # natürlicher (weniger statisches Sättigen) und ist Voraussetzung
+    # damit High-Frequency-Content in der visuellen Szene überhaupt
+    # transmittiert wird (ohne Bewegung adaptieren Cones komplett weg).
+    #
+    # IMPLEMENTIERT: Drift (Ornstein-Uhlenbeck Random Walk)
+    # NOCH NICHT: Microsaccaden, Tremor (Anlauf 4)
+    #
+    # Drift-Mathematik (pro Achse, kontinuierlich):
+    #   dx/dt = -k*x + sqrt(2D) * eta(t)
+    # Diskretisiert (dt = sim_ms_per_frame / 1000):
+    #   x_new = x_old * (1 - k*dt) + N(0, sqrt(2*D*dt))
+    # D ist die Diffusionskonstante in pixel²/sec.
+    # k ist die OU-Rückstellrate in 1/sec (verhindert dass der Blickpunkt
+    # unbegrenzt davondriftet; biologisch durch okulomotorische Reflexe).
+    #
+    # KALIBRIERUNG (scale=3 -> 128x128 für ~5° Sichtfeld, 25.6 px/°):
+    # Literatur: Drift ~50-100 arcmin²/s ≈ 18 px²/s.
+    # OU-Pull k ≈ 2/s -> Stabilitätsfenster ~3 px Std-Dev von Origin.
+    'fem_enabled': False,                       # opt-in (alle FEM-Komponenten)
+    'fem_drift_diffusion_px2_per_s': 18.0,      # px²/s
+    'fem_drift_pull_per_s': 2.0,                # 1/s, OU-Rückstellung
+    'fem_seed': None,                            # None = nicht-deterministisch
+
+    # ------------------------------------------------------------------------
+    # Microsaccaden (FEM Phase 2)
+    # ------------------------------------------------------------------------
+    # Schnelle ruckartige Sprünge alle ~1s waehrend Fixation. Amplitude
+    # 3-30 arcmin, Dauer 10-30ms (im Modell instantan pro Frame). Setzen
+    # die Drift-Position auf einen neuen Zielpunkt vom aktuellen Punkt aus,
+    # in zufaelliger Richtung, log-normal verteilter Amplitude.
+    #
+    # Inter-Saccade-Intervall: exponentiell verteilt mit Rate
+    # `fem_microsaccade_rate_per_s`. 1.0 -> im Schnitt 1 Sakkade pro Sekunde.
+    # Amplitude: log-normal mit median = exp(mu) px, std = sigma in log-px.
+    # Default median ~2.5 px (6 arcmin @ scale=3), sigma=0.5 -> typischer
+    # Range 1-7 px.
+    #
+    # Effekt biologisch: Re-Zentriert die Drift (verhindert dass das Auge
+    # zu weit wegwandert) und stimuliert Cones die sonst adaptieren wuerden.
+    'fem_microsaccades_enabled': False,         # opt-in fuer Microsaccaden
+    'fem_microsaccade_rate_per_s': 1.0,         # ~1 Sakkade/sec (Literatur)
+    'fem_microsaccade_amplitude_log_median_px': 0.92,  # log(2.5px) ~ 6 arcmin
+    'fem_microsaccade_amplitude_log_sigma': 0.5,        # log-normal Streuung
+
+    # ------------------------------------------------------------------------
+    # Tremor (FEM Phase 2)
+    # ------------------------------------------------------------------------
+    # Hochfrequentes Zittern, ~30-100 Hz, Amplitude ~0.1-1 arcmin.
+    # Bei scale=3 (1px ≈ 2.34 arcmin) ist Tremor SUBPIXEL (~0.4 arcmin =
+    # 0.17 px) -> wirkt nur durch Anti-Aliasing der bilinearen Interpolation
+    # und ist effektiv nicht-detektierbar.
+    #
+    # WARNUNG: Bei scale<=3 hat Tremor praktisch keinen Effekt. Erst ab
+    # scale=4 (1px ≈ 1.17 arcmin) wird Tremor sub-pixel relevant.
+    #
+    # Modelliert als white noise pro Frame mit Std `fem_tremor_std_px`.
+    # Im Gegensatz zu Drift KEIN Persistenz-State - Tremor ist additiv pro Frame.
+    'fem_tremor_enabled': False,                # opt-in fuer Tremor
+    'fem_tremor_std_px': 0.17,                  # ~0.4 arcmin @ scale=3
 }
 
 
@@ -643,12 +804,79 @@ class RetinaInputFeeder:
                 f"bekam '{self.generator_type}'"
             )
 
+        # Adaptation-Modus validieren.
+        self.adaptation_mode = self.config.get('adaptation_mode', 'weber')
+        if self.adaptation_mode not in ('weber', 'cone_cascade'):
+            raise ValueError(
+                f"adaptation_mode muss 'weber' oder 'cone_cascade' sein, "
+                f"bekam '{self.adaptation_mode}'"
+            )
+
         # generators: pro Bipolar-Population eine NodeCollection mit
         # EINEM Generator pro Bipolar-Neuron (1:1 Verbindung).
         self.generators: Dict[str, 'nest.NodeCollection'] = {}
         # Photo-Positionen werden per set_photo_positions() nachgereicht,
         # weil sie ans feed()-Zeitpunkt-Sampling gebunden sind (nicht ans Setup).
         self._photo_positions_cache: Optional[Dict[str, np.ndarray]] = None
+
+        # Cone-Cascade-Bundle: wird in set_photo_positions() erzeugt
+        # (braucht die Cone-Counts). None wenn adaptation_mode='weber'.
+        self._cone_cascade = None
+
+        # ------------------------------------------------------------------
+        # FEM (Fixational Eye Movements) — Drift-State
+        # ------------------------------------------------------------------
+        # Drei Komponenten:
+        #   - Drift (langsamer OU Random Walk, persistent state)
+        #   - Microsaccaden (gelegentliche Spruenge, Poisson getriggert)
+        #   - Tremor (hochfrequentes Wackeln, pro Frame additives Rauschen)
+        #
+        # Alle drei werden auf dieselbe (dy, dx) Position addiert; die
+        # finale Verschiebung wird vor dem Pixel-Sampling angewandt.
+        self._fem_enabled = bool(self.config.get('fem_enabled', False))
+        self._fem_ms_enabled = bool(self.config.get('fem_microsaccades_enabled',
+                                                      False))
+        self._fem_tremor_enabled = bool(self.config.get('fem_tremor_enabled',
+                                                          False))
+        # Master-Switch: wird ueberhaupt was angewandt?
+        self._fem_any_active = (self._fem_enabled or
+                                  self._fem_ms_enabled or
+                                  self._fem_tremor_enabled)
+
+        if self._fem_any_active:
+            seed = self.config.get('fem_seed')
+            self._fem_rng = np.random.default_rng(seed)
+            self._fem_position = np.zeros(2, dtype=np.float64)
+            self._fem_dt_s = 0.050  # Annahme: 50ms pro Frame
+
+            # --- Drift Parameter (OU) ---
+            if self._fem_enabled:
+                D = float(self.config['fem_drift_diffusion_px2_per_s'])
+                k = float(self.config['fem_drift_pull_per_s'])
+                self._fem_decay = 1.0 - k * self._fem_dt_s
+                self._fem_noise_std = np.sqrt(2.0 * D * self._fem_dt_s)
+
+            # --- Microsaccade Parameter ---
+            if self._fem_ms_enabled:
+                # Erwartungswert pro Frame: rate_per_s * dt
+                self._fem_ms_p_per_frame = (
+                    float(self.config['fem_microsaccade_rate_per_s'])
+                    * self._fem_dt_s
+                )
+                self._fem_ms_log_median = float(self.config[
+                    'fem_microsaccade_amplitude_log_median_px'])
+                self._fem_ms_log_sigma = float(self.config[
+                    'fem_microsaccade_amplitude_log_sigma'])
+                # Stats fuer Diagnose
+                self._fem_ms_count = 0
+                self._fem_ms_last_amplitude = 0.0
+
+            # --- Tremor Parameter ---
+            if self._fem_tremor_enabled:
+                self._fem_tremor_std = float(self.config['fem_tremor_std_px'])
+        else:
+            self._fem_rng = None
+            self._fem_position = None
 
         self._build_generators()
 
@@ -697,8 +925,43 @@ class RetinaInputFeeder:
         """
         Wird von Retina.create_input_feeder() aufgerufen um die Positionen
         der Photorezeptoren zu übergeben (für Frame-Sampling).
+
+        Bei adaptation_mode='cone_cascade' wird ZUSÄTZLICH eine
+        Phototransduktions-Kaskade initialisiert (eine pro Cone-Population).
         """
         self._photo_positions_cache = photo_positions
+
+        # Wenn cone_cascade-Mode: Bundle initialisieren mit den richtigen
+        # Cone-Counts pro Population.
+        if self.adaptation_mode == 'cone_cascade':
+            try:
+                from cone_cascade import RetinaCascadeBundle, STIMULUS_GAIN
+            except ImportError as e:
+                raise ImportError(
+                    "adaptation_mode='cone_cascade' benötigt das cone_cascade-Modul. "
+                    f"Import fehlgeschlagen: {e}"
+                )
+
+            # Cone-Counts aus den Photo-Positionen ableiten.
+            # Rods werden bewusst weggelassen — Cone-Modell ist nicht für
+            # Stäbchen kalibriert (andere Kinetik).
+            cone_counts = {}
+            for pop_name, positions in photo_positions.items():
+                if pop_name == POP_RODS:
+                    continue  # Rods bleiben außen vor
+                # Strip "POP_" prefix-equivalent: 'L_foveal' nicht 'L_FOVEAL'
+                # Die POP_*-Konstanten heißen aber schon 'L_foveal' (siehe oben).
+                cone_counts[pop_name] = len(positions)
+
+            stimulus_gain = self.config.get('cone_cascade_stimulus_gain')
+            if stimulus_gain is None:
+                stimulus_gain = STIMULUS_GAIN
+
+            self._cone_cascade = RetinaCascadeBundle(
+                cone_counts=cone_counts,
+                stimulus_gain=stimulus_gain,
+                verbose=False,
+            )
 
     def feed(self, lms_frame: np.ndarray, intensity_frame: np.ndarray) -> None:
         """
@@ -732,15 +995,197 @@ class RetinaInputFeeder:
                 lms_frame, intensity_frame, target_res
             )
 
-        # Zwei-Phasen-Pipeline:
+        # FEM (Fixational Eye Movements): Bild leicht verschieben.
+        # Macht nur was wenn mindestens eine FEM-Komponente aktiv ist
+        # (Drift, Microsaccaden oder Tremor). State wird in-place
+        # in self._fem_position aktualisiert.
+        if self._fem_any_active:
+            lms_frame, intensity_frame = self._apply_fem(
+                lms_frame, intensity_frame
+            )
+
+        # Drei-Phasen-Pipeline:
         # 1. Sampling: welcher Photorezeptor sieht welchen Pixel?
-        # 2. Update: pro Bipolar Mittel bilden, ON/OFF flippen, in NEST pushen.
+        # 2. (optional) Phototransduktion: Pixel -> Cone-Adaptation
+        # 3. Update: pro Bipolar Mittel bilden, ON/OFF flippen, in NEST pushen.
         photo_values = self._sample_frame(lms_frame, intensity_frame)
+
+        # Phase 2: Phototransduktions-Adaptation (optional)
+        # Wenn cone_cascade aktiv: Pixel-Werte durch die ODE-Kaskade
+        # transformieren. Output ist im selben Dict-Format wie photo_values,
+        # nur dass die Werte jetzt Cone-Antworten in [0,1] sind statt
+        # rohe Pixel-Helligkeiten.
+        # Rods werden NICHT transformiert (Cascade ist Cone-spezifisch).
+        if self._cone_cascade is not None:
+            photo_values = self._apply_cone_cascade(photo_values)
 
         if self.generator_type == 'step_current':
             self._update_step_current(photo_values)
         else:
             self._update_poisson(photo_values)
+
+    def _apply_fem(self, lms_frame, intensity_frame):
+        """Wendet alle aktiven FEM-Komponenten auf das Bild an.
+
+        Drei Komponenten werden additiv auf (dy, dx) kombiniert:
+
+        1. DRIFT (persistent state, OU random walk):
+           pos += -k*pos*dt + N(0, sqrt(2D*dt))
+           Diskret: pos = pos*decay + noise
+
+        2. MICROSACCADES (event-getriggert, Poisson):
+           Pro Frame mit Wkt p = rate*dt: Sprung in zufaelliger Richtung
+           mit log-normal-verteilter Amplitude. Wird zur Drift-Position
+           addiert (nicht ersetzt) -> biologisch korrekt: Sakkade ueber-
+           lagert Drift, beide werden danach gemeinsam zurueck-pulled.
+
+        3. TREMOR (kein State, pro Frame additiv):
+           tremor = N(0, std_px) pro Achse, NICHT akkumuliert.
+           Wird zur finalen Position addiert ohne in self._fem_position
+           gespeichert zu werden -> bleibt high-frequency.
+
+        Die finale Position (dy, dx) = drift_pos + tremor wird via
+        scipy.ndimage.shift bilinear auf das Bild angewandt.
+
+        Args:
+            lms_frame:       (H, W, 3) float Array
+            intensity_frame: (H, W) float Array
+
+        Returns:
+            Shifted (lms_frame, intensity_frame) Tupel. Originale werden
+            nicht modifiziert.
+        """
+        from scipy.ndimage import shift as ndi_shift
+
+        # --- 1. DRIFT: OU-Schritt, State updaten ---
+        if self._fem_enabled:
+            noise = self._fem_rng.normal(0.0, self._fem_noise_std, size=2)
+            self._fem_position = self._fem_position * self._fem_decay + noise
+
+        # --- 2. MICROSACCADES: Poisson-Trigger ---
+        if self._fem_ms_enabled:
+            # Per-Frame-Wkt einer Sakkade
+            if self._fem_rng.random() < self._fem_ms_p_per_frame:
+                # Log-normale Amplitude in Pixeln
+                amplitude = self._fem_rng.lognormal(
+                    mean=self._fem_ms_log_median,
+                    sigma=self._fem_ms_log_sigma,
+                )
+                # Richtung gleichmaessig in [0, 2pi)
+                theta = self._fem_rng.uniform(0.0, 2.0 * np.pi)
+                jump = np.array([
+                    amplitude * np.sin(theta),  # dy
+                    amplitude * np.cos(theta),  # dx
+                ])
+                # Sprung zur aktuellen Position addieren
+                self._fem_position = self._fem_position + jump
+                self._fem_ms_count += 1
+                self._fem_ms_last_amplitude = float(amplitude)
+
+        # --- 3. TREMOR: additives Rauschen, NICHT persistent ---
+        if self._fem_tremor_enabled:
+            tremor = self._fem_rng.normal(0.0, self._fem_tremor_std, size=2)
+        else:
+            tremor = np.zeros(2)
+
+        # Finale Verschiebung = Drift-Position + Tremor (nicht persistiert)
+        final_pos = self._fem_position + tremor
+        dy, dx = float(final_pos[0]), float(final_pos[1])
+
+        # Fast-path bei verschwindender Verschiebung
+        if abs(dy) < 1e-3 and abs(dx) < 1e-3:
+            return lms_frame, intensity_frame
+
+        # bilinear (order=1), reflect-Padding am Rand.
+        lms_shifted = ndi_shift(
+            lms_frame, shift=(dy, dx, 0), order=1, mode='reflect'
+        )
+        intensity_shifted = ndi_shift(
+            intensity_frame, shift=(dy, dx), order=1, mode='reflect'
+        )
+        return lms_shifted, intensity_shifted
+
+    # Backwards-compat alias: alter Code rief _apply_drift direkt auf.
+    _apply_drift = _apply_fem
+
+    def get_fem_position(self):
+        """Aktuelle FEM-Position (dy, dx) in Pixeln. Für Diagnose.
+
+        Returns:
+            np.ndarray (2,) oder None wenn keine FEM-Komponente aktiv.
+        """
+        if not self._fem_any_active:
+            return None
+        return self._fem_position.copy()
+
+    def get_fem_stats(self) -> Dict:
+        """Diagnose-Stats fuer FEM. Returns dict mit Zaehlern."""
+        if not self._fem_any_active:
+            return {'fem_active': False}
+        stats = {
+            'fem_active': True,
+            'drift_enabled': self._fem_enabled,
+            'microsaccades_enabled': self._fem_ms_enabled,
+            'tremor_enabled': self._fem_tremor_enabled,
+            'current_position_px': self._fem_position.copy(),
+        }
+        if self._fem_ms_enabled:
+            stats['microsaccade_count'] = int(self._fem_ms_count)
+            stats['microsaccade_last_amplitude_px'] = self._fem_ms_last_amplitude
+        return stats
+
+    def reset_fem(self):
+        """Setzt den FEM-State zurück. Nützlich zwischen Trials."""
+        if self._fem_any_active:
+            self._fem_position[:] = 0.0
+            if self._fem_ms_enabled:
+                self._fem_ms_count = 0
+                self._fem_ms_last_amplitude = 0.0
+
+    def _apply_cone_cascade(self,
+                              photo_values: Dict[str, np.ndarray]
+                             ) -> Dict[str, np.ndarray]:
+        """Treibt die Cone-Cascade über einen Frame und liefert
+        transformierte photo_values zurück.
+
+        Die Cascade arbeitet pro Cone-Population (L_foveal, M_foveal,
+        L_peripheral, M_peripheral, S_peripheral). Rods werden
+        unverändert durchgereicht (keine Cascade für sie).
+
+        Returns: Dict mit derselben Struktur wie der Input, aber Werte
+                 sind jetzt Cone-Antworten in [0,1] statt Pixel-Helligkeiten.
+                 Konvention: 1.0 = Cone stark hyperpolarisiert (hell-Antwort),
+                             0.0 = Cone bei Dunkel-Baseline.
+        """
+        # Bestimme die Substep-Anzahl basierend auf der Sim-Frame-Zeit.
+        # ANNAHME: nest.biological_time wurde zwischen den feed()-Aufrufen
+        # genau einen Sim-Frame weitergetrieben. Wir wissen hier nicht direkt,
+        # wie lang der Frame war — daher nehmen wir 50ms als Default und
+        # erlauben Override via config['cone_cascade_n_substeps'].
+        dt_ms = self.config.get('cone_cascade_dt_ms', 1.0)
+        # 50 substeps × dt_ms=1.0 = 50ms Sim-Frame.
+        # Bei dt_ms=0.5 -> 100 substeps für 50ms; bei dt_ms=0.1 -> 500.
+        n_substeps = int(round(50.0 / dt_ms))
+
+        # Inputs für die Cascade aufbauen — nur die 5 Cone-Pops, keine Rods.
+        cascade_inputs = {}
+        for pop_name, pixels in photo_values.items():
+            if pop_name == POP_RODS:
+                continue
+            if pop_name in self._cone_cascade.cascades:
+                cascade_inputs[pop_name] = pixels
+
+        # Cascade ausführen — Output ist normiert auf [0,1].
+        cascade_outputs = self._cone_cascade.step_all(
+            cascade_inputs, dt_ms=dt_ms, n_substeps=n_substeps,
+            normalized=True,
+        )
+
+        # Neues photo_values-Dict bauen: Cone-Pops aus Cascade,
+        # Rods unverändert übernehmen.
+        new_photo_values = dict(photo_values)  # flache Kopie
+        new_photo_values.update(cascade_outputs)
+        return new_photo_values
 
     def _resize_frame(self, lms_frame, intensity_frame, target_res):
         """Skaliert Frames auf die Ziel-Auflösung mit bilinearer Interpolation.
@@ -815,22 +1260,36 @@ class RetinaInputFeeder:
         """
         Pro Bipolar-Population: Array [0,1] von Aktivierungen.
 
-        ADAPTATION AUF GLOBALEN BILDMITTELWERT (Weber-Fechner-artig):
-        Statt absolute Helligkeit zu codieren, codieren beide Pfade die
-        ABWEICHUNG vom Bildmittelwert. Das macht die Retina kontrast-
-        sensitiv (statt helligkeitssensitiv) und symmetriert ON/OFF auch
-        bei stark schiefen Helligkeitsverteilungen (z.B. dunkle Videos).
+        ZWEI MODI (abhängig von self.adaptation_mode):
 
-        ON-Bipolar:  amp = (intensity - mean) * gain + 0.5  → feuert wenn lokal heller
-        OFF-Bipolar: amp = (mean - intensity) * gain + 0.5  → feuert wenn lokal dunkler
+        WEBER (Default): Globaler Mittelwert-Subtract + contrast_gain.
+          Statisch, kein Zeitverhalten. ON-Bipolar feuert wenn lokal heller
+          als Bildmittel, OFF wenn dunkler.
 
-        Bei einem komplett uniformen Bild liegen beide Pfade bei amp=0.5
-        (Baseline). Bei Kontrast-Patches reagieren ON und OFF symmetrisch.
+            ON-Bipolar:  amp = (intensity - mean) * gain + 0.5
+            OFF-Bipolar: amp = (mean - intensity) * gain + 0.5
 
-        Der gain-Faktor bestimmt wie stark Kontraste verstärkt werden.
-        gain=2.0 bedeutet: ein Pixel der 25% über dem Mittel liegt sättigt
-        das ON-Signal voll aus.
+        CONE_CASCADE: Photo-Werte kommen schon ad-adaptiert aus der
+          Phototransduktions-Kaskade ([0,1] mit Konvention "1 = hell").
+          Wir bilden nur den lokalen Cone-Mittelwert pro Bipolar und
+          invertieren für OFF. Kein globaler Mittelwert, weil die Adaptation
+          bereits in der Cascade stattgefunden hat.
+
+            ON-Bipolar:  amp = local_cone_mean         (direkt)
+            OFF-Bipolar: amp = 1.0 - local_cone_mean   (invertiert)
+
+        In beiden Fällen ist das Ergebnis [0,1] und wird später auf pA
+        skaliert.
         """
+        if self.adaptation_mode == 'cone_cascade':
+            return self._compute_bipolar_amplitudes_cascade(photo_values)
+        else:
+            return self._compute_bipolar_amplitudes_weber(photo_values)
+
+    def _compute_bipolar_amplitudes_weber(self,
+                                            photo_values: Dict[str, np.ndarray]
+                                           ) -> Dict[str, np.ndarray]:
+        """Klassischer Weber-Adaptations-Modus (siehe Doku in _compute_bipolar_amplitudes)."""
         # --- Schritt 1: Globaler Bildmittelwert ---
         # Über ALLE Photorezeptor-Werte gemittelt (inkl. Rods), damit L/M/S-
         # Zapfen und Stäbchen dieselbe Baseline sehen. Das ist eine grobe
@@ -841,21 +1300,13 @@ class RetinaInputFeeder:
         global_mean = float(all_values.mean()) if len(all_values) > 0 else 0.5
 
         # --- Schritt 2: Kontrast-Gain aus Config ---
-        # Verstärkungsfaktor: 2.0 ist ein vernünftiger Startpunkt,
-        # höher = empfindlicher, niedriger = robuster gegen Rauschen.
         gain = self.config.get('contrast_gain', 2.0)
 
         result = {}
-        # --- Schritt 3: Pro Bipolar-Population ---
         for bip_name, mapping in self._mapping.items():
-            # Skip wenn kein Generator für diese Population existiert
-            # (z.B. wenn Foveal-Parasol deaktiviert wäre — aktuell nie der Fall).
             if bip_name not in self.generators:
                 continue
 
-            # Lokaler Mittelwert: für jeden Bipolar den Durchschnitt seiner
-            # zugeordneten Photorezeptoren. mapping[i] = Liste von
-            # (pop_name, photo_idx)-Tupeln.
             n_bip = len(mapping)
             local_means = np.zeros(n_bip)
             for bip_idx, photo_list in enumerate(mapping):
@@ -864,16 +1315,85 @@ class RetinaInputFeeder:
                 vals = [photo_values[pop_name][idx] for pop_name, idx in photo_list]
                 local_means[bip_idx] = np.mean(vals)
 
-            # --- Schritt 4: ON/OFF-Inversion ---
-            # Einzige Stelle im Code, wo ON vs OFF unterschieden wird!
-            # Alles andere (Neuronenparameter, Konnektivität) ist symmetrisch.
+            # ON/OFF-Inversion
             if 'OFF' in bip_name:
                 amplitudes = (global_mean - local_means) * gain + 0.5
             else:
                 amplitudes = (local_means - global_mean) * gain + 0.5
 
-            # Auf [0, 1] clippen damit der Strom nicht negativ wird
-            # (negativer Strom = hyperpolarisierend, würde Bipolar stummschalten).
+            amplitudes = np.clip(amplitudes, 0.0, 1.0)
+            result[bip_name] = amplitudes
+
+        return result
+
+    def _compute_bipolar_amplitudes_cascade(self,
+                                              photo_values: Dict[str, np.ndarray]
+                                             ) -> Dict[str, np.ndarray]:
+        """Cone-Cascade-Modus: photo_values sind schon adaptiert ([0,1]).
+
+        Konvention nach RetinaCascadeBundle.step_all(normalized=True):
+          photo_value = 1.0  -> Cone stark hyperpolarisiert (Hell-Antwort)
+          photo_value = 0.0  -> Cone bei Dunkel-Baseline
+
+        POPULATION-NORMALIZED VARIANT (May 2026):
+        Die naive Formel `ON = local, OFF = 1 - local` setzt voraus dass
+        die Cascade-Output-Verteilung um 0.5 zentriert ist. In der Praxis
+        ist sie aber bimodal (Cones im Dunklen ~0, Cones im Hellen ~0.8)
+        und die Verteilung pro Bipolar-Population ist meist nicht um 0.5
+        zentriert -- siehe diag_cascade_amps.py: foveal mean ~0.86,
+        peripheral mean ~0.32 bei einem dunklen Frame.
+
+        Fix: pro Bipolar-Population den Mittelwert der `local_means` als
+        Referenz nehmen, ON/OFF symmetrisch dazu definieren mit einem
+        Kontrast-Gain (analog zur Weber-Adaptation auf Pixel-Ebene). Das
+        bricht den 'die ON-Pfade sterben weil das Bild zu dunkel ist'-Bug.
+
+        Wichtige Eigenschaft: ON_foveal und OFF_foveal teilen sich
+        dasselbe Mapping (siehe _compute_bipolar_to_photo_mapping), also
+        ist local_means identisch -> Subtraktion des Mittelwerts liefert
+        symmetrische +/- Werte fuer ON/OFF -> ON/OFF-Symmetrie wiederhergestellt.
+        """
+        # Kontrast-Gain pro Population. 2.0 ist konservativ und vermeidet
+        # massives Clippen bei der finalen [0,1]-Begrenzung. Bei stark
+        # dynamischen Szenen kann ein hoeherer Wert noch sinnvoll sein.
+        gain = self.config.get('contrast_gain', 2.0)
+
+        result = {}
+        for bip_name, mapping in self._mapping.items():
+            if bip_name not in self.generators:
+                continue
+
+            n_bip = len(mapping)
+            local_means = np.zeros(n_bip)
+            for bip_idx, photo_list in enumerate(mapping):
+                if not photo_list:
+                    continue
+                vals = [photo_values[pop_name][idx] for pop_name, idx in photo_list]
+                local_means[bip_idx] = np.mean(vals)
+
+            # Population-Mittelwert als ON/OFF-Trennlinie statt 0.5.
+            # Bei n=1 (kann passieren bei sehr kleinen Skalen) faellt's
+            # auf den klassischen Cascade-Pfad zurueck.
+            #
+            # WICHTIG: das ist ein RAEUMLICHER Mittelwert (instant, pro
+            # Frame neu berechnet), KEIN zeitlicher Tiefpass.
+            # Wir haben zeitliche Adaptation ueber tau probiert (May 2026),
+            # das interferierte aber mit der Cone-Cascade Ca-Adaptation
+            # und gab falsche ON/OFF-Antworten bei stationaerem Stimulus.
+            # Temporales Tracking ist Aufgabe der Cone-Cascade (Ca-Feedback
+            # tau=50ms), nicht der pop_mean-Schicht.
+            if n_bip > 1:
+                pop_mean = float(local_means.mean())
+            else:
+                pop_mean = 0.5
+
+            # ON/OFF symmetrisch um den Pop-Mittelwert,
+            # mit gain skaliert, dann auf [0,1] geclippt
+            if 'OFF' in bip_name:
+                amplitudes = (pop_mean - local_means) * gain + 0.5
+            else:
+                amplitudes = (local_means - pop_mean) * gain + 0.5
+
             amplitudes = np.clip(amplitudes, 0.0, 1.0)
             result[bip_name] = amplitudes
 
@@ -1598,54 +2118,122 @@ class Retina:
     # Connection-Primitive
     # ------------------------------------------------------------------------
 
+    def _resolve_synapse(self, stp_key: str) -> Tuple[str, Optional[Dict]]:
+        """Liefert (synapse_model, stp_params) für eine Synapsen-Klasse.
+
+        Liest 'synapse_model' aus self.params (global pro Retina).
+        Bei 'static_synapse' wird stp_params = None zurückgegeben.
+        Bei 'tsodyks2_synapse' wird das passende stp_<key>-Dict aus
+        self.params geholt.
+
+        Args:
+            stp_key: einer von 'bipolar_to_ganglion', 'horizontal',
+                     'amacrine', 'konio'. Pro Klasse können in den
+                     Default-Params eigene U/tau_rec/tau_fac gesetzt sein.
+
+        Returns:
+            Tuple (synapse_model_str, stp_params_dict_or_None).
+        """
+        syn_model = self.params.get('synapse_model', 'static_synapse')
+        if syn_model == 'static_synapse':
+            return syn_model, None
+        if syn_model != 'tsodyks2_synapse':
+            raise ValueError(
+                f"synapse_model muss 'static_synapse' oder 'tsodyks2_synapse' "
+                f"sein, bekam '{syn_model}'"
+            )
+        stp_dict_key = f'stp_{stp_key}'
+        stp = self.params.get(stp_dict_key)
+        if stp is None:
+            raise ValueError(
+                f"synapse_model='tsodyks2_synapse' aber '{stp_dict_key}' "
+                f"nicht in params gesetzt. Verfügbar: "
+                f"{[k for k in self.params if k.startswith('stp_')]}"
+            )
+        # Validierung minimal: alle drei Keys da?
+        for required in ('U', 'tau_rec', 'tau_fac'):
+            if required not in stp:
+                raise ValueError(
+                    f"stp_{stp_key} fehlt Schlüssel '{required}': {stp}"
+                )
+        return syn_model, stp
+
     def _connect_nearest(self, src_pop, src_positions, tgt_pop, tgt_positions,
                           k: int, weight: float, delay: float = 1.0,
-                          n_ribbon: int = 1):
+                          n_ribbon: int = 1,
+                          synapse_model: str = 'static_synapse',
+                          stp_params: Optional[Dict] = None):
         """
         Jedes Target bekommt seine k räumlich nächsten Sources als Inputs.
-        Nutzt Ribbon-Multiplicity für starke Verbindungen.
 
-        Ribbon-Synapse: biologisch setzen echte Bipolars pro AP mehrere
-        Vesikel-Gruppen frei (glutamaterge Ribbon-Synapsen). Das simulieren
-        wir durch n_ribbon parallele Connect-Calls — NEST sieht dann mehrere
-        Synapsen zwischen denselben Knoten, was effektiv die synaptische
-        Stärke multipliziert ohne das Membran-Zeitverhalten zu verändern.
+        ZWEI MODI je nach synapse_model:
+
+        'static_synapse' (Default, alter Pfad):
+            Ribbon-Synapse via n_ribbon parallele Static-Connects.
+            Effektive synaptische Stärke = n_ribbon * weight.
+            Keine Short-Term-Plasticity, keine Vesikel-Pool-Dynamik.
+
+        'tsodyks2_synapse' (biophysisch):
+            EINE Synapse pro Source-Target-Paar mit Tsodyks-Markram
+            Short-Term-Depression. Vesikel-Pool wird bei jedem Spike
+            entleert (Anteil U) und erholt sich exponentiell (tau_rec).
+            Effektive Stärke = weight * n_ribbon, weil die Steady-State-
+            Synapse mit U*x_ss ≈ U/(1+U*nu*tau_rec) gedämpft ist.
+            stp_params muss U, tau_rec, tau_fac enthalten.
         """
         if len(src_pop) == 0 or len(tgt_pop) == 0 or k == 0:
             return
 
         k = min(k, len(src_pop))
-        # kNN liefert für jedes Target die Indizes seiner k nächsten Sources.
         neighbor_idx = nearest_k_indices(src_positions, tgt_positions, k)
 
         src_list = src_pop.tolist()
         tgt_list = tgt_pop.tolist()
 
-        # Pro Target: NodeCollection aus den ausgewählten Sources bauen.
-        # sorted(set(...)) dedupliziert — theoretisch könnte kNN denselben
-        # Source zweimal zurückgeben wenn src_positions Duplikate hat (sollte
-        # nicht vorkommen, aber Safeguard).
+        # syn_spec einmal aufbauen, je nach Modus.
+        if synapse_model == 'tsodyks2_synapse':
+            if stp_params is None:
+                raise ValueError(
+                    "tsodyks2_synapse braucht stp_params={U, tau_rec, tau_fac}"
+                )
+            # Bei STP: ribbon-Multiplicity wird ins Gewicht eingerechnet,
+            # NICHT als parallele Synapsen. Das ist mathematisch äquivalent
+            # zu einer Synapse mit n_ribbon-fachem Gewicht, aber WICHTIG:
+            # alle n_ribbon "Vesikel-Pools" teilen sich denselben State.
+            # Real ist das auch so — eine Ribbon hat einen Pool, nicht 20.
+            effective_weight = weight * n_ribbon
+            syn_spec = {
+                'synapse_model': 'tsodyks2_synapse',
+                'weight': effective_weight,
+                'delay': delay,
+                'U': stp_params['U'],
+                'tau_rec': stp_params['tau_rec'],
+                'tau_fac': stp_params['tau_fac'],
+            }
+            n_ribbon_loops = 1  # Nur einmal connecten
+        else:
+            syn_spec = {'weight': weight, 'delay': delay}
+            n_ribbon_loops = n_ribbon
+
         for tgt_idx, src_indices in enumerate(neighbor_idx):
             tgt_node = nest.NodeCollection([tgt_list[tgt_idx]])
             src_nodes = nest.NodeCollection(sorted(set(
                 src_list[si] for si in src_indices
             )))
-            # Ribbon-Multiplicity: n_ribbon parallele Synapsen-Bündel.
-            # Jedes Bündel verbindet alle gewählten Sources mit dem Target.
-            for _ in range(n_ribbon):
+            for _ in range(n_ribbon_loops):
                 nest.Connect(
                     src_nodes, tgt_node,
                     conn_spec='all_to_all',
-                    syn_spec={'weight': weight, 'delay': delay},
+                    syn_spec=syn_spec,
                 )
 
     def _connect_one_to_one_ribbon(self, src_pop, tgt_pop, weight: float,
-                                     delay: float = 1.0, n_ribbon: int = 1):
-        """1:1 mit Ribbon-Multiplicity.
+                                     delay: float = 1.0, n_ribbon: int = 1,
+                                     synapse_model: str = 'static_synapse',
+                                     stp_params: Optional[Dict] = None):
+        """1:1 mit Ribbon-Multiplicity oder STP.
 
-        Nur für die foveale Midget-Schicht genutzt, wo Index i im Bipolar
-        genau dem Index i im Ganglion entspricht (durch das radial_project-
-        Alignment). Schnellerer Weg als _connect_nearest mit k=1.
+        Siehe _connect_nearest für die Modi.
         """
         if len(src_pop) == 0 or len(tgt_pop) == 0:
             return
@@ -1653,11 +2241,26 @@ class Retina:
             raise ValueError(
                 f"1:1 erfordert gleiche Größe: {len(src_pop)} vs {len(tgt_pop)}"
             )
-        # n_ribbon parallele 1:1-Verbindungen — keine explizite Deduplikation
-        # nötig weil one_to_one sauber pairt.
-        for _ in range(n_ribbon):
-            nest.Connect(src_pop, tgt_pop, 'one_to_one',
-                         syn_spec={'weight': weight, 'delay': delay})
+
+        if synapse_model == 'tsodyks2_synapse':
+            if stp_params is None:
+                raise ValueError(
+                    "tsodyks2_synapse braucht stp_params={U, tau_rec, tau_fac}"
+                )
+            effective_weight = weight * n_ribbon
+            syn_spec = {
+                'synapse_model': 'tsodyks2_synapse',
+                'weight': effective_weight,
+                'delay': delay,
+                'U': stp_params['U'],
+                'tau_rec': stp_params['tau_rec'],
+                'tau_fac': stp_params['tau_fac'],
+            }
+            nest.Connect(src_pop, tgt_pop, 'one_to_one', syn_spec=syn_spec)
+        else:
+            for _ in range(n_ribbon):
+                nest.Connect(src_pop, tgt_pop, 'one_to_one',
+                             syn_spec={'weight': weight, 'delay': delay})
 
     # ------------------------------------------------------------------------
     # Spezifische Connection-Routinen
@@ -1683,6 +2286,9 @@ class Retina:
         """
         p = self.params
 
+        # STP-Konfiguration für diese Synapsen-Klasse
+        syn_model, stp_params = self._resolve_synapse('horizontal')
+
         # --- Foveal-Zirkus ---
         hf = self.populations.get(POP_HORIZONTAL_FOVEAL)
         if hf is not None and POP_MIDGET_OFF_BIP_FOVEAL in self.populations:
@@ -1695,24 +2301,28 @@ class Retina:
                 tgt_pop=hf,
                 tgt_positions=self.positions[POP_HORIZONTAL_FOVEAL],
                 k=p['k_cones_per_horizontal_foveal'],
-                weight=1.0, delay=1.0,
+                weight=p['w_bipolar_to_horizontal'], delay=1.0,
                 n_ribbon=p['ribbon_horizontal'],
+                synapse_model=syn_model, stp_params=stp_params,
             )
-            # Feedback: Horizontal -> OFF-Bipolars (inhibitorisch, w=-0.5).
-            # Nur OFF foveal — die ON-Pfad-Foveal-Inhibition kommt nicht
-            # zustande, weil foveal keine ON-Bipolars via Horizontal moduliert
-            # werden (Vereinfachung; biologisch inhibieren Horizontals beide
-            # über H1/H2-Subtypen).
-            self._connect_nearest(
-                src_pop=hf,
-                src_positions=self.positions[POP_HORIZONTAL_FOVEAL],
-                tgt_pop=self.populations[POP_MIDGET_OFF_BIP_FOVEAL],
-                tgt_positions=self.positions[POP_MIDGET_OFF_BIP_FOVEAL],
-                k=p['k_horizontals_surround_per_cone'],
-                weight=p['w_horizontal_to_cone'],
-                delay=1.5,   # leicht verzögert -> Surround kommt NACH Center
-                n_ribbon=p['ribbon_horizontal'],
-            )
+            # Feedback: Horizontal -> OFF-Bipolars (inhibitorisch).
+            # Vorher nur OFF foveal — May 2026 erweitert auf ON+OFF foveal,
+            # weil ON-foveal sonst bei dichten Stim-Mustern saturiert (142 Hz
+            # statt biologischer ~50-80 Hz). Biologisch realistischer:
+            # Horizontals inhibieren H1/H2-Subtypen-vermittelt beide Pfade.
+            for bip_name in [POP_MIDGET_OFF_BIP_FOVEAL, POP_MIDGET_ON_BIP_FOVEAL]:
+                if bip_name in self.populations:
+                    self._connect_nearest(
+                        src_pop=hf,
+                        src_positions=self.positions[POP_HORIZONTAL_FOVEAL],
+                        tgt_pop=self.populations[bip_name],
+                        tgt_positions=self.positions[bip_name],
+                        k=p['k_horizontals_surround_per_cone'],
+                        weight=p['w_horizontal_to_cone'],
+                        delay=1.5,
+                        n_ribbon=p['ribbon_horizontal'],
+                        synapse_model=syn_model, stp_params=stp_params,
+                    )
 
         # --- Peripheral-Zirkus ---
         # Hier vollständiger: Input kommt von Midget-OFF UND Parasol-OFF,
@@ -1728,8 +2338,9 @@ class Retina:
                         tgt_pop=hp,
                         tgt_positions=self.positions[POP_HORIZONTAL_PERIPHERAL],
                         k=p['k_cones_per_horizontal_peripheral'],
-                        weight=1.0, delay=1.0,
+                        weight=p['w_bipolar_to_horizontal'], delay=1.0,
                         n_ribbon=p['ribbon_horizontal'],
+                        synapse_model=syn_model, stp_params=stp_params,
                     )
             # Inhibitorischer Feedback auf ALLE Bipolar-Typen peripheral.
             # Dadurch entsteht das Surround für alle vier Pfade.
@@ -1745,6 +2356,7 @@ class Retina:
                         weight=p['w_horizontal_to_cone'],
                         delay=1.5,
                         n_ribbon=p['ribbon_horizontal'],
+                        synapse_model=syn_model, stp_params=stp_params,
                     )
 
     def _connect_bipolar_to_midget_ganglion(self):
@@ -1755,26 +2367,25 @@ class Retina:
         Auge die höchste Sehschärfe erzeugt.
         """
         p = self.params
-        # abs() weil w_bipolar_to_ganglion_midget als positive (exzitatorische)
-        # Verbindung gedacht ist. Falls im Config versehentlich negativ.
         w = abs(p['w_bipolar_to_ganglion_midget'])
         n_ribbon = p['ribbon_bipolar_to_ganglion']  # = 20 (validiert)
+        syn_model, stp_params = self._resolve_synapse('bipolar_to_ganglion')
 
         # --- Foveal: strikt 1:1 ---
-        # Kein kNN nötig, Index-Alignment existiert dank radial_project.
         self._connect_one_to_one_ribbon(
             self.populations[POP_MIDGET_ON_BIP_FOVEAL],
             self.populations[POP_MIDGET_ON_GANG_FOVEAL],
             weight=w, delay=1.0, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
         self._connect_one_to_one_ribbon(
             self.populations[POP_MIDGET_OFF_BIP_FOVEAL],
             self.populations[POP_MIDGET_OFF_GANG_FOVEAL],
             weight=w, delay=1.0, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
 
-        # --- Peripheral: k nächste Bipolars -> Ganglion ---
-        # k=3 typisch -> leichte Konvergenz, Auflösung nimmt nach peripher ab.
+        # --- Peripheral ---
         k = p['k_bipolars_per_midget_ganglion_peripheral']
         self._connect_nearest(
             src_pop=self.populations[POP_MIDGET_ON_BIP_PERIPHERAL],
@@ -1782,6 +2393,7 @@ class Retina:
             tgt_pop=self.populations[POP_MIDGET_ON_GANG_PERIPHERAL],
             tgt_positions=self.positions[POP_MIDGET_ON_GANG_PERIPHERAL],
             k=k, weight=w, delay=1.0, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
         self._connect_nearest(
             src_pop=self.populations[POP_MIDGET_OFF_BIP_PERIPHERAL],
@@ -1789,6 +2401,7 @@ class Retina:
             tgt_pop=self.populations[POP_MIDGET_OFF_GANG_PERIPHERAL],
             tgt_positions=self.positions[POP_MIDGET_OFF_GANG_PERIPHERAL],
             k=k, weight=w, delay=1.0, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
 
     def _connect_bipolar_to_parasol_ganglion(self):
@@ -1803,13 +2416,15 @@ class Retina:
         w = abs(p['w_bipolar_to_ganglion_parasol'])
         n_ribbon = p['ribbon_bipolar_to_ganglion']
         k = p['k_bipolars_per_parasol_ganglion']
+        syn_model, stp_params = self._resolve_synapse('bipolar_to_ganglion')
 
         self._connect_nearest(
             src_pop=self.populations[POP_PARASOL_ON_BIP],
             src_positions=self.positions[POP_PARASOL_ON_BIP],
             tgt_pop=self.populations[POP_PARASOL_ON_GANG],
             tgt_positions=self.positions[POP_PARASOL_ON_GANG],
-            k=k, weight=w, delay=0.8, n_ribbon=n_ribbon,   # delay=0.8 schneller als Midget
+            k=k, weight=w, delay=0.8, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
         self._connect_nearest(
             src_pop=self.populations[POP_PARASOL_OFF_BIP],
@@ -1817,6 +2432,7 @@ class Retina:
             tgt_pop=self.populations[POP_PARASOL_OFF_GANG],
             tgt_positions=self.positions[POP_PARASOL_OFF_GANG],
             k=k, weight=w, delay=0.8, n_ribbon=n_ribbon,
+            synapse_model=syn_model, stp_params=stp_params,
         )
 
     def _connect_konio_pathway(self):
@@ -1845,6 +2461,7 @@ class Retina:
             return
 
         p = self.params
+        syn_model, stp_params = self._resolve_synapse('konio')
 
         # --- Step 1: Midget-ON-Bipolar peripheral -> Konio-Bipolar (Yellow-Surround) ---
         # Negatives Gewicht erzeugt die Inhibition. Wir nehmen Midget-ON statt
@@ -1861,12 +2478,12 @@ class Retina:
                 tgt_positions=self.positions[POP_KONIO_S_BIP],
                 k=k_surround,
                 weight=w_surround,
-                delay=1.5,        # leicht verzögert wie Horizontal-Surround
+                delay=1.5,
                 n_ribbon=n_ribbon_surround,
+                synapse_model=syn_model, stp_params=stp_params,
             )
 
         # --- Step 2: Konio-Bipolar -> Konio-Ganglion ---
-        # Exzitatorisch, ribbon=10 (kleiner als Midget=20 weil dünnere Bahn).
         w_kg = abs(p['w_konio_bipolar_to_ganglion'])
         k_kg = p['k_konio_bipolars_per_konio_ganglion']
         n_ribbon_kg = p['ribbon_konio']
@@ -1879,6 +2496,7 @@ class Retina:
             weight=w_kg,
             delay=1.0,
             n_ribbon=n_ribbon_kg,
+            synapse_model=syn_model, stp_params=stp_params,
         )
 
     def _connect_amacrine_circuit(self):
@@ -1906,6 +2524,7 @@ class Retina:
         k_amac2gang = p['k_amacrines_per_ganglion']
         k_amac2bip = p['k_amacrines_per_bipolar_feedback']
         n_ribbon = p['ribbon_amacrine']
+        syn_model, stp_params = self._resolve_synapse('amacrine')
 
         # --- Peripheral-Zirkus ---
         ap = self.populations.get(POP_AMACRINE_PERIPHERAL)
@@ -1913,9 +2532,6 @@ class Retina:
             ap_pos = self.positions[POP_AMACRINE_PERIPHERAL]
 
             # Step 1: Bipolar -> Amacrine (exzitatorisch).
-            # Alle vier peripheral-Bipolar-Typen speisen gemeinsam die
-            # peripheral-Amacrines — biologisch integrieren Amacrines
-            # auch Pfad-übergreifend.
             for bip_name in [POP_MIDGET_ON_BIP_PERIPHERAL, POP_MIDGET_OFF_BIP_PERIPHERAL,
                              POP_PARASOL_ON_BIP, POP_PARASOL_OFF_BIP]:
                 if bip_name not in self.populations:
@@ -1926,11 +2542,10 @@ class Retina:
                     tgt_pop=ap, tgt_positions=ap_pos,
                     k=k_bip2amac, weight=w_bip_in, delay=1.0,
                     n_ribbon=n_ribbon,
+                    synapse_model=syn_model, stp_params=stp_params,
                 )
 
             # Step 2: Amacrine -> Ganglion (inhibitorisch).
-            # Dämpft die Ganglion-Aktivität direkt — Quelle der transienten
-            # Antworten auf Bewegung/Flicker.
             for gang_name in [POP_MIDGET_ON_GANG_PERIPHERAL, POP_MIDGET_OFF_GANG_PERIPHERAL,
                               POP_PARASOL_ON_GANG, POP_PARASOL_OFF_GANG]:
                 if gang_name not in self.populations:
@@ -1941,11 +2556,10 @@ class Retina:
                     tgt_positions=self.positions[gang_name],
                     k=k_amac2gang, weight=w_amac_gang, delay=1.5,
                     n_ribbon=n_ribbon,
+                    synapse_model=syn_model, stp_params=stp_params,
                 )
 
             # Step 3: Amacrine -> Bipolar (inhibitorisches Feedback).
-            # Reziproke Amacrine-Synapse. Biologisch GABAerg, dämpft
-            # anhaltende Bipolar-Aktivität -> High-Pass-ähnliche Filterung.
             for bip_name in [POP_MIDGET_ON_BIP_PERIPHERAL, POP_MIDGET_OFF_BIP_PERIPHERAL,
                              POP_PARASOL_ON_BIP, POP_PARASOL_OFF_BIP]:
                 if bip_name not in self.populations:
@@ -1956,16 +2570,14 @@ class Retina:
                     tgt_positions=self.positions[bip_name],
                     k=k_amac2bip, weight=w_amac_bip, delay=2.0,
                     n_ribbon=n_ribbon,
+                    synapse_model=syn_model, stp_params=stp_params,
                 )
 
         # --- Foveal-Zirkus ---
-        # Nur Midget-Pfad. min(k, len(...)) als Safeguard weil die foveale
-        # Amacrine-Population klein sein kann (bei wenigen Zapfen).
         af = self.populations.get(POP_AMACRINE_FOVEAL)
         if af is not None:
             af_pos = self.positions[POP_AMACRINE_FOVEAL]
 
-            # Input von Midget-Bipolars (ON+OFF) foveal.
             for bip_name in [POP_MIDGET_ON_BIP_FOVEAL, POP_MIDGET_OFF_BIP_FOVEAL]:
                 if bip_name in self.populations:
                     self._connect_nearest(
@@ -1974,12 +2586,9 @@ class Retina:
                         tgt_pop=af, tgt_positions=af_pos,
                         k=min(k_bip2amac, len(self.populations[bip_name])),
                         weight=w_bip_in, delay=1.0, n_ribbon=n_ribbon,
+                        synapse_model=syn_model, stp_params=stp_params,
                     )
 
-            # Output: Inhibition auf Midget-Ganglien foveal.
-            # Kein reziprokes Feedback foveal — bewusste Vereinfachung
-            # (im echten Foveal-Midget-Pfad ist Amacrine-Beteiligung
-            # minimal, sustain-Antworten dominieren).
             for gang_name in [POP_MIDGET_ON_GANG_FOVEAL, POP_MIDGET_OFF_GANG_FOVEAL]:
                 if gang_name in self.populations:
                     self._connect_nearest(
@@ -1988,6 +2597,7 @@ class Retina:
                         tgt_positions=self.positions[gang_name],
                         k=min(k_amac2gang, len(af)),
                         weight=w_amac_gang, delay=1.5, n_ribbon=n_ribbon,
+                        synapse_model=syn_model, stp_params=stp_params,
                     )
 
     # ========================================================================

@@ -50,7 +50,7 @@ NEST_RESOLUTION  = 0.1                  # ms
 NUM_THREADS      = __NUM_THREADS__      # local_num_threads
 RNG_SEED         = None                 # int or None for NEST default
 PRINT_TIME       = False                # NEST's own progress prints
-ENABLE_STRUCTURAL_PLASTICITY = True     # tolerated as no-op on builds without it
+ENABLE_STRUCTURAL_PLASTICITY = False     # tolerated as no-op on builds without it
 
 # --- Simulation timing ---
 SIM_DURATION     = __SIM_DURATION__     # ms per run

@@ -248,6 +248,192 @@ VARIANTS: Dict[str, Dict] = {
         'w_bipolar_to_ganglion_parasol': 1.5,
         'ribbon_bipolar_to_ganglion': 15,
     },
+
+    # ------------------------------------------------------------------------
+    # 'cone_cascade': biophysische Phototransduktion via Angueyra-Kaskade
+    # ------------------------------------------------------------------------
+    # Aktiviert den ConeCascade-Pfad statt Weber-Adaptation.
+    # Erhaltene Default-Tuning-Werte; nur der Feeder-Adaptation-Modus
+    # wird umgeschaltet. Reine biologische Plausibilitäts-Variante.
+    'cone_cascade': {
+        'description': ('Angueyra/van-Hateren Cone-Phototransduktion '
+                        'statt Weber-Adaptation'),
+        # _feeder_overrides ist ein Sonderschlüssel der von get_config
+        # ausgewertet wird und in den feeder_config gemerged wird.
+        '_feeder_overrides': {
+            'adaptation_mode': 'cone_cascade',
+            'cone_cascade_dt_ms': 1.0,
+            'contrast_gain': 3.0,  # Hoeher fuer mehr Kontrast-Sensitivitaet im Cascade
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'tsodyks2': Short-Term-Plasticity an allen retinalen Synapsen
+    # ------------------------------------------------------------------------
+    # Ersetzt n_ribbon-parallele Static-Synapsen durch echte Tsodyks-Markram
+    # Vesikel-Pool-Dynamik. Bei rein depressiver Synapse (tau_fac=0) und
+    # konstanter Bipolar-Rate gilt: x_ss = 1/(1+U*nu*tau_rec), eff_w = U*x_ss.
+    #
+    # GEWICHTS-KALIBRIERUNG (May 2026, nach Diagnose-Lauf):
+    # Empirisch gemessene Operating-Raten in der default-Variante zeigten
+    # dass Bipolare bei ~80-150 Hz feuern (nicht ~30 Hz wie initial angenommen)
+    # weil das System in einem Equilibrium aus Step-Current und
+    # Horizontal/Amacrine-Inhibition operiert.
+    #
+    # Mit tau_rec=200ms und ν=80 Hz: x_ss ≈ 0.20, effektiver Faktor U*x_ss
+    # = 0.040 -> Multiplikator 25x noetig fuer Static-aequivalenten
+    # Steady-State-Drive.
+    # Bei Onset (low rate): Faktor ~0.2 -> 5x staerker als Static -> klarer
+    # Onset-Burst-Effekt.
+    'tsodyks2': {
+        'description': ('Tsodyks-Markram Short-Term-Plasticity statt '
+                        'n_ribbon-Static (Vesikel-Pool-Dynamik)'),
+        'synapse_model': 'tsodyks2_synapse',
+        # Kalibriert fuer echte Operating-Raten (~80 Hz BC, ~100 Hz AC):
+        'w_bipolar_to_ganglion_midget':  46.0,   # 75 * 0.62 (tau_rec halbiert)
+        'w_bipolar_to_ganglion_parasol': 39.0,   # 62.5 * 0.62
+        'w_bipolar_to_amacrine':         12.5,   # 18.5 * 0.67 (AC-Drive runter)
+        'w_bipolar_to_horizontal':        8.0,   # 10 * 0.8 (HC-Drive: 0.6 war zu wenig)
+        'w_horizontal_to_cone':         -10.0,   # -13 * 0.76
+        'w_amacrine_to_ganglion':       -14.0,   # -22 * 0.65 (AC tau_rec 150->80)
+        'w_amacrine_to_bipolar':        -11.5,   # -17.6 * 0.65
+        'w_konio_bipolar_to_ganglion':   37.0,   # 60 * 0.62
+        # stp_* Parameter aus DEFAULT_PARAMS werden genutzt
+    },
+
+    # ------------------------------------------------------------------------
+    # 'biophysical_v2': Cone-Cascade + tsodyks2 kombiniert
+    # ------------------------------------------------------------------------
+    # Vollstaendige biophysische Front-End-Konfiguration:
+    #   - Phototransduktion via Angueyra-Cascade
+    #   - Ribbon-Synapsen via Tsodyks-Markram (Pool-Depletion)
+    'biophysical_v2': {
+        'description': ('Cone-Cascade + Tsodyks2 STP  ·  '
+                        'volle biophysische Front-End-Konfiguration'),
+        'synapse_model': 'tsodyks2_synapse',
+        'w_bipolar_to_ganglion_midget':  46.0,   # 75 * 0.62 (tau_rec halbiert)
+        'w_bipolar_to_ganglion_parasol': 39.0,   # 62.5 * 0.62
+        'w_bipolar_to_amacrine':         12.5,   # 18.5 * 0.67 (AC-Drive runter)
+        'w_bipolar_to_horizontal':        8.0,   # 10 * 0.8 (HC-Drive: 0.6 war zu wenig)
+        'w_horizontal_to_cone':         -10.0,   # -13 * 0.76
+        'w_amacrine_to_ganglion':       -14.0,   # -22 * 0.65 (AC tau_rec 150->80)
+        'w_amacrine_to_bipolar':        -11.5,   # -17.6 * 0.65
+        'w_konio_bipolar_to_ganglion':   37.0,   # 60 * 0.62
+        '_feeder_overrides': {
+            'adaptation_mode': 'cone_cascade',
+            'cone_cascade_dt_ms': 1.0,
+            'contrast_gain': 3.0,  # Hoeher fuer mehr Kontrast-Sensitivitaet im Cascade
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'fem_drift': default + Ocular Drift (FEM Phase 1)
+    # ------------------------------------------------------------------------
+    # Static + Weber + Drift. Reine Diagnose-Variante um zu sehen wie
+    # sich der Drift auf die Spike-Pattern auswirkt, ohne Cascade- oder
+    # STP-Komplikation. Erwarteter Effekt: höhere Varianz pro Cone,
+    # weniger statische Adaptation.
+    'fem_drift': {
+        'description': ('Static-Synapsen + Weber + Ocular Drift (FEM)'),
+        '_feeder_overrides': {
+            'fem_enabled': True,
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'cone_cascade_fem': Cascade + Drift (FEM auf Cascade angewendet)
+    # ------------------------------------------------------------------------
+    # Cascade-Modus + Drift, ohne STP. Wichtige Diagnose-Variante: ob
+    # der bekannte ON/OFF-Asymmetrie-Bug der Cascade durch Drift
+    # gemildert wird (siehe KNOWN_BUGS.md).
+    'cone_cascade_fem': {
+        'description': ('Cone-Cascade + Ocular Drift (FEM)'),
+        '_feeder_overrides': {
+            'adaptation_mode': 'cone_cascade',
+            'cone_cascade_dt_ms': 1.0,
+            'contrast_gain': 3.0,  # Hoeher fuer mehr Kontrast-Sensitivitaet im Cascade
+            'fem_enabled': True,
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'biophysical_v3': Cone-Cascade + Tsodyks2 + FEM
+    # ------------------------------------------------------------------------
+    # Vollstaendige biophysische Front-End-Konfiguration mit FEM-Drift:
+    #   - Phototransduktion via Angueyra-Cascade
+    #   - Ribbon-Synapsen via Tsodyks-Markram
+    #   - Ocular Drift (Fixational Eye Movement)
+    # Macht die Cone-Cascade-Output-Verteilung natuerlicher (weniger
+    # statische Adaptation) und stoert die STP-Pool-Depletion produktiv:
+    # Onset-Bursts werden bei FEM-induzierter Cone-Restimulation erneut
+    # ausgeloest.
+    'biophysical_v3': {
+        'description': ('Cone-Cascade + Tsodyks2 STP + FEM-Drift  ·  '
+                        'volle biophysische Front-End-Konfiguration'),
+        'synapse_model': 'tsodyks2_synapse',
+        'w_bipolar_to_ganglion_midget':  46.0,   # 75 * 0.62 (tau_rec halbiert)
+        'w_bipolar_to_ganglion_parasol': 39.0,   # 62.5 * 0.62
+        'w_bipolar_to_amacrine':         12.5,   # 18.5 * 0.67 (AC-Drive runter)
+        'w_bipolar_to_horizontal':        8.0,   # 10 * 0.8 (HC-Drive: 0.6 war zu wenig)
+        'w_horizontal_to_cone':         -10.0,   # -13 * 0.76
+        'w_amacrine_to_ganglion':       -14.0,   # -22 * 0.65 (AC tau_rec 150->80)
+        'w_amacrine_to_bipolar':        -11.5,   # -17.6 * 0.65
+        'w_konio_bipolar_to_ganglion':   37.0,   # 60 * 0.62
+        '_feeder_overrides': {
+            'adaptation_mode': 'cone_cascade',
+            'cone_cascade_dt_ms': 1.0,
+            'contrast_gain': 3.0,  # Hoeher fuer mehr Kontrast-Sensitivitaet im Cascade
+            'fem_enabled': True,
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'fem_full': default + Drift + Microsaccaden + Tremor (FEM Phase 2)
+    # ------------------------------------------------------------------------
+    # Static + Weber + alle drei FEM-Komponenten. Diagnose-Variante:
+    # zeigt isoliert was Sakkaden + Tremor zusaetzlich zum Drift
+    # beitragen.
+    'fem_full': {
+        'description': ('Static-Synapsen + Weber + alle FEM-Komponenten '
+                        '(Drift + Microsaccaden + Tremor)'),
+        '_feeder_overrides': {
+            'fem_enabled': True,
+            'fem_microsaccades_enabled': True,
+            'fem_tremor_enabled': True,
+        },
+    },
+
+    # ------------------------------------------------------------------------
+    # 'biophysical_v4': Vollausbau - Cascade + STP + Drift + Sakkaden + Tremor
+    # ------------------------------------------------------------------------
+    # Komplette biophysische Front-End-Konfiguration mit allen FEM-Komponenten:
+    #   - Phototransduktion via Angueyra-Cascade
+    #   - Ribbon-Synapsen via Tsodyks-Markram
+    #   - Drift + Microsaccaden + Tremor (volle FEM)
+    # Erwarteter Effekt vs biophysical_v3: Sakkaden triggern zusaetzliche
+    # Onset-Bursts (jeder Sprung re-stimuliert Cones), Tremor ist bei
+    # scale=3 unter Detektionsschwelle.
+    'biophysical_v4': {
+        'description': ('Cone-Cascade + Tsodyks2 STP + Full FEM  ·  '
+                        'Vollausbau (Drift + Sakkaden + Tremor)'),
+        'synapse_model': 'tsodyks2_synapse',
+        'w_bipolar_to_ganglion_midget':  46.0,   # 75 * 0.62 (tau_rec halbiert)
+        'w_bipolar_to_ganglion_parasol': 39.0,   # 62.5 * 0.62
+        'w_bipolar_to_amacrine':         12.5,   # 18.5 * 0.67 (AC-Drive runter)
+        'w_bipolar_to_horizontal':        8.0,   # 10 * 0.8 (HC-Drive: 0.6 war zu wenig)
+        'w_horizontal_to_cone':         -10.0,   # -13 * 0.76
+        'w_amacrine_to_ganglion':       -14.0,   # -22 * 0.65 (AC tau_rec 150->80)
+        'w_amacrine_to_bipolar':        -11.5,   # -17.6 * 0.65
+        'w_konio_bipolar_to_ganglion':   37.0,   # 60 * 0.62
+        '_feeder_overrides': {
+            'adaptation_mode': 'cone_cascade',
+            'cone_cascade_dt_ms': 1.0,
+            'contrast_gain': 3.0,  # Hoeher fuer mehr Kontrast-Sensitivitaet im Cascade
+            'fem_enabled': True,
+            'fem_microsaccades_enabled': True,
+            'fem_tremor_enabled': True,
+        },
+    },
 }
 
 
@@ -326,16 +512,19 @@ def get_config(scale: Union[int, str] = 3,
     scale_overrides = scale_dict.get('param_overrides', {})
     params.update(scale_overrides)
 
-    # 2. Variant-Overlay
+    # 2. Variant-Overlay — _feeder_overrides ist ein Sonderschlüssel, der
+    #    NICHT in params landen darf (gehört zum Feeder-Config).
     variant_dict = deepcopy(VARIANTS[variant])
     variant_dict.pop('description', None)
+    feeder_overrides = variant_dict.pop('_feeder_overrides', {})
     params.update(variant_dict)
 
     # 3. Neuron-Overrides (deep merge)
     neuron_params: Dict = deepcopy(NEURON_OVERRIDES.get(variant, {}))
 
-    # 4. Feeder-Config
+    # 4. Feeder-Config — Basis aus _feeder_config_for, dann variant-Overrides
     feeder_config = _feeder_config_for(scale_id)
+    feeder_config.update(feeder_overrides)
 
     return params, neuron_params, feeder_config
 
