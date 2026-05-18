@@ -1,6 +1,5 @@
 #!/bin/bash
 set -e
-
 INSTALL_DIR="${HOME}/neuroticks"
 VENV_DIR="${INSTALL_DIR}/venv"
 NEST_SRC="${INSTALL_DIR}/nest-src"
@@ -8,7 +7,6 @@ NEST_BUILD="${INSTALL_DIR}/nest-build"
 NEUROTICKS_DIR="${INSTALL_DIR}/NeuroTicks"
 PYTHON_VERSION="3.12"
 NUM_CORES=$(nproc)
-
 sudo apt-get update
 sudo apt-get install -y \
     build-essential cmake git wget curl autoconf automake libtool pkg-config \
@@ -18,13 +16,11 @@ sudo apt-get install -y \
     qt6-base-dev libqt6opengl6-dev libgl1-mesa-dev libglu1-mesa-dev libegl1 \
     libxrender1 libxcb-xinerama0 libxcb-cursor0 libxkbcommon-x11-0 \
     libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-    libxcb-render-util0 libxcb-shape0 libdbus-1-3 libfontconfig1 libgtk-3-0
-
+    libxcb-render-util0 libxcb-shape0 libdbus-1-3 libfontconfig1 libgtk-3-0 \
+    xvfb xauth git-lfs
 mkdir -p "${INSTALL_DIR}" "${NEST_BUILD}"
-
 python${PYTHON_VERSION} -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
-
 pip install --upgrade pip wheel setuptools
 pip install numpy 'cython<3'
 pip install pandas scipy networkx matplotlib
@@ -32,9 +28,8 @@ pip install PyQt6 PyQt6-WebEngine pyqtgraph
 pip install vtk pyvista pyvistaqt
 pip install PyOpenGL==3.1.10
 pip install ipython
-
+pip install pygame Pillow opencv-python-headless
 git clone --branch v3.8 --depth 1 https://github.com/nest/nest-simulator.git "${NEST_SRC}"
-
 cd "${NEST_BUILD}"
 cmake "${NEST_SRC}" \
     -DCMAKE_INSTALL_PREFIX="${VENV_DIR}" \
@@ -46,20 +41,18 @@ cmake "${NEST_SRC}" \
     -Dwith-openmp=ON \
     -Dwith-boost=ON \
     -DCMAKE_BUILD_TYPE=Release
-
 make -j${NUM_CORES}
 make install
-
 git clone https://github.com/Yinsalt/NeuroTicks.git "${NEUROTICKS_DIR}"
-
+cd "${NEUROTICKS_DIR}" && git lfs install && git lfs pull || true
 cat > "${INSTALL_DIR}/activate.sh" << EOF
 #!/bin/bash
 source "${VENV_DIR}/bin/activate"
+source "${VENV_DIR}/bin/nest_vars.sh"
 export NEUROTICKS_DIR="${NEUROTICKS_DIR}"
 cd "${NEUROTICKS_DIR}"
 EOF
 chmod +x "${INSTALL_DIR}/activate.sh"
-
 echo ""
 echo "============================================"
 echo "  Installation complete!"
