@@ -994,7 +994,17 @@ class MainWindow(QMainWindow):
 
         lbl_step = QLabel("Res:"); lbl_step.setStyleSheet("color:#888;")
         self.global_step_spin = QDoubleSpinBox()
-        self.global_step_spin.setRange(0.1, 1000); self.global_step_spin.setValue(25.0); self.global_step_spin.setSuffix(" ms")
+        self.global_step_spin.setRange(0.1, 1000)
+        self.global_step_spin.setDecimals(2)
+        self.global_step_spin.setSingleStep(0.1)
+        self.global_step_spin.setValue(0.1)          # default = 1 NEST-Resolution-Step (zeitliches Mikroskop, max zoom)
+        self.global_step_spin.setKeyboardTracking(True)  # Wert greift sofort beim Tippen, nicht erst bei Enter
+        self.global_step_spin.setSuffix(" ms")
+        self.global_step_spin.setToolTip(
+            "Bio-Zeit pro Simulation-Step.\n"
+            "0.10ms = feinste Auflösung (1 Resolution-Step pro Tick).\n"
+            "Live tweakbar — wirkt sofort, auch während ein Run läuft."
+        )
         self.global_step_spin.setFixedWidth(70); self.global_step_spin.setStyleSheet("background:#333; color:#00E5FF; border:1px solid #555;")
         
         self.global_time_label = QLabel("0.0 ms")
@@ -3360,15 +3370,51 @@ class MainWindow(QMainWindow):
         """Wrapper um nest.Simulate(step) der den globalen Timer mit der
         akkumulierten Sim-Zeit aktualisiert. Jeder Pfad in Neuroticks der
         NEST live laufen lässt (continuous-loop, live-run, headless) sollte
-        diesen Helper benutzen — sonst bleibt das global_time_label hängen.
+        diesen Helper benutzen — sonst bleibt das global_time_label hängen
+        UND der Eye-Tab bekommt keinen Frame-Takt.
         Reset auf 0 passiert ohnehin in reset_and_restart()."""
-        nest.Simulate(float(step))
-        # NEST-Zeit auslesen + lokale Akkumulation als Backup
-        local_t = float(getattr(self, 'current_nest_time', 0.0)) + float(step)
+        # NEST akzeptiert nur Vielfache der Kernel-Resolution. Den Spinner-
+        # Wert darauf snappen, sonst crasht nest.Simulate() z.B. bei 0.15ms
+        # auf einem 0.1ms-Kernel ("not a multiple of resolution"). Mindestens
+        # 1 Resolution-Step.
+        try:
+            res = float(nest.GetKernelStatus('resolution')) or 0.1
+        except Exception:
+            res = 0.1
+        snapped = max(1, round(float(step) / res)) * res
+
+        # Eye-Tab VOR dem Simulate: ggf. das nächste Video-Frame in die
+        # Retina feeden, damit der Input zum Bio-Zeitfenster dieses Steps
+        # passt. No-op wenn kein Tab / kein Video / nicht armed.
+        self._drive_retina_tab('on_global_tick', snapped)
+
+        nest.Simulate(snapped)
+
+        # Eye-Tab NACH dem Simulate: Tab-eigene UI (Frame-Index, Preview).
+        self._drive_retina_tab('on_after_global_tick')
+
+        # NEST-Zeit auslesen + lokale Akkumulation als Backup. Der Zeitmesser
+        # wächst additiv um exakt den (gesnappten) Step pro Simulation-Step.
+        local_t = float(getattr(self, 'current_nest_time', 0.0)) + snapped
         nest_t = self._get_nest_time()
         self.current_nest_time = max(local_t, nest_t)
         self.update_global_time_display(self.current_nest_time)
         return self.current_nest_time
+
+    def _drive_retina_tab(self, hook_name, *args):
+        """Ruft einen Eye-Tab-Hook (on_global_tick / on_after_global_tick)
+        auf, falls der Tab geladen ist und den Hook hat. Fehler im Tab
+        dürfen die globale Sim-Loop NICHT killen — nur loggen."""
+        tab = getattr(self, 'retina_test_tab', None)
+        if tab is None:
+            return
+        hook = getattr(tab, hook_name, None)
+        if hook is None:
+            return
+        try:
+            hook(*args)
+        except Exception as e:
+            print(f"[retina {hook_name}] {e}")
     def update_simulation_speed(self, slider_value):
         if hasattr(self, 'sim_timer'):
             self.sim_timer.setInterval(slider_value)
@@ -3468,6 +3514,13 @@ class MainWindow(QMainWindow):
 
     def on_sim_timer_timeout(self):
         try:
+            # Step LIVE vom Spinner lesen → Tweaken während des Runs wirkt
+            # sofort (vorher wurde sim_step_size nur einmal beim Start
+            # gecached, der Slider war damit faktisch tot). Single-Step setzt
+            # denselben Spinner-Wert in step_simulation(), bleibt konsistent.
+            if hasattr(self, 'global_step_spin'):
+                self.sim_step_size = float(self.global_step_spin.value())
+
             if self.sim_mode == 'continuous' and self.sim_target_time != float('inf'):
                 remaining = self.sim_target_time - self.current_nest_time
                 if remaining <= 0.0001:
